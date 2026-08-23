@@ -411,10 +411,15 @@ def run_doctor(python: Path, model: str) -> bool:
 
 
 def finish(python: Path, venv_dir: Path, served: bool, healthy: bool,
-           model: str | None) -> None:
+           model: str | None, checked: bool) -> None:
     print()
     if healthy:
         print(S.green(S.bold("  Done. Everything checks out.")))
+    elif not checked:
+        # Nothing was verified because nothing was asked to be. Not a problem.
+        print(S.green(S.bold("  wynxo is installed.")))
+        print(S.dim("  Once Ollama is reachable, check it over with:"))
+        print(S.dim(f"    {venv_python(venv_dir)} -m wynxo --doctor"))
     else:
         print(S.yellow(S.bold("  Installed, with something left to sort out.")))
         print(S.dim("  The checks above say what. Re-run them any time:"))
@@ -466,14 +471,16 @@ def main() -> int:
         preferred, why = args.model, "you asked for this one"
 
     model: str | None = None
+    checked = False
     if not args.no_ollama:
         served = setup_ollama(args.yes)
         if served:
             model = ensure_model(preferred, why, args.yes)
             if model:
+                checked = True
                 healthy = run_doctor(python, model)
 
-    finish(python, venv_dir, served, healthy, model)
+    finish(python, venv_dir, served, healthy, model, checked)
     return 0
 
 
