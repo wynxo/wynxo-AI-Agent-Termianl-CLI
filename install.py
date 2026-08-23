@@ -242,6 +242,83 @@ def install_wynxo(python: Path, into_user: bool) -> None:
     info("no compiled extensions -- nothing was built from source")
 
 
+def user_bin_dir() -> Path:
+    """Where a user-level command should go on this platform."""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
+        return Path(base) / "Programs" / "wynxo"
+    if is_termux():
+        prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
+        return Path(prefix) / "bin"
+    return Path.home() / ".local" / "bin"
+
+
+def on_path(directory: Path) -> bool:
+    entries = os.environ.get("PATH", "").split(os.pathsep)
+    try:
+        resolved = directory.resolve()
+    except OSError:
+        return False
+    for entry in entries:
+        try:
+            if entry and Path(entry).resolve() == resolved:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def shell_rc_hint(directory: Path) -> str:
+    line = f'export PATH="{directory}:$PATH"'
+    shell = os.path.basename(os.environ.get("SHELL", "")) or "bash"
+    rc = {"zsh": "~/.zshrc", "fish": "~/.config/fish/config.fish",
+          "bash": "~/.bashrc"}.get(shell, "~/.profile")
+    if shell == "fish":
+        line = f'fish_add_path {directory}'
+    return f"{line}    # add to {rc}"
+
+
+def link_command(python: Path, venv_dir: Path, assume_yes: bool) -> Path | None:
+    """Put a `wynxo` command somewhere on PATH, so `wynxo` just works.
+
+    A launcher script rather than a symlink: it pins the interpreter, so the
+    command keeps working regardless of which virtualenv is active when it
+    is run.
+    """
+    step("Making `wynxo` available everywhere")
+
+    target = user_bin_dir()
+    launcher = target / ("wynxo.cmd" if sys.platform == "win32" else "wynxo")
+
+    if not ask(f"Install a `wynxo` command into {target}?", True, assume_yes):
+        info("Skipped.")
+        return None
+
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "win32":
+            launcher.write_text(f'@echo off\r\n"{python}" -m wynxo %*\r\n',
+                                encoding="utf-8")
+        else:
+            launcher.write_text(
+                f'#!/bin/sh\nexec "{python}" -m wynxo "$@"\n', encoding="utf-8")
+            launcher.chmod(0o755)
+    except OSError as exc:
+        warn(f"Could not write {launcher}: {exc}")
+        return None
+
+    ok(f"installed {launcher}")
+
+    if not on_path(target):
+        warn(f"{target} is not on your PATH yet, so `wynxo` will not be found.")
+        if sys.platform == "win32":
+            info("Add it: Settings -> Edit environment variables -> Path")
+        else:
+            info(shell_rc_hint(target))
+            info("Then restart the shell, or run that line now.")
+    return launcher
+
+
 def find_ollama() -> str | None:
     return shutil.which("ollama")
 
@@ -411,7 +488,7 @@ def run_doctor(python: Path, model: str) -> bool:
 
 
 def finish(python: Path, venv_dir: Path, served: bool, healthy: bool,
-           model: str | None, checked: bool) -> None:
+           model: str | None, checked: bool, launcher: Path | None = None) -> None:
     print()
     if healthy:
         print(S.green(S.bold("  Done. Everything checks out.")))
@@ -425,14 +502,21 @@ def finish(python: Path, venv_dir: Path, served: bool, healthy: bool,
         print(S.dim("  The checks above say what. Re-run them any time:"))
         print(S.dim(f"    {venv_python(venv_dir)} -m wynxo --doctor"))
     print()
-    if os.environ.get("VIRTUAL_ENV") or not venv_dir.exists():
-        print(f"    {S.bold('wynxo')}")
+    if launcher is not None and on_path(launcher.parent):
+        print("    Run it from anywhere:")
+        print()
+        print(f"      {S.bold('wynxo')}")
+    elif launcher is not None:
+        print("    Once " + str(launcher.parent) + " is on your PATH:")
+        print()
+        print(f"      {S.bold('wynxo')}")
+        print()
+        print(S.dim("    Until then:"))
+        print(S.dim(f"      {launcher}"))
     else:
-        activate = (venv_dir / "Scripts" / "activate")if sys.platform == "win32" \
-            else (venv_dir / "bin" / "activate")
-        print("    Start it with either of these:")
+        print("    Start it with:")
+        print()
         print(f"      {S.bold(str(venv_python(venv_dir)) + ' -m wynxo')}")
-        print(f"      {S.dim('source ' + str(activate) + ' && wynxo')}")
     print()
     if not served:
         print(S.yellow("    Ollama is not serving yet."))
@@ -452,6 +536,8 @@ def main() -> int:
                         help="only install wynxo; skip Ollama and the model")
     parser.add_argument("--model", help="pull this model instead of the recommended one")
     parser.add_argument("--venv", default=".venv", help="virtualenv directory")
+    parser.add_argument("--no-link", action="store_true",
+                        help="do not install a `wynxo` command onto PATH")
     args = parser.parse_args()
 
     print()
@@ -463,6 +549,7 @@ def main() -> int:
     venv_dir = (ROOT / args.venv) if not os.path.isabs(args.venv) else Path(args.venv)
     python = make_venv(venv_dir, args.yes)
     install_wynxo(python, into_user=(python == Path(sys.executable) and not os.environ.get("VIRTUAL_ENV")))
+    launcher = None if args.no_link else link_command(python, venv_dir, args.yes)
 
     served = False
     healthy = False
@@ -480,7 +567,7 @@ def main() -> int:
                 checked = True
                 healthy = run_doctor(python, model)
 
-    finish(python, venv_dir, served, healthy, model, checked)
+    finish(python, venv_dir, served, healthy, model, checked, launcher)
     return 0
 
 

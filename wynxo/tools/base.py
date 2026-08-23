@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Type
 
 from ..schema import Schema, ValidationError
+from ..scope import Boundary, Scope
 
 
 @dataclass
@@ -53,8 +54,11 @@ class Tool(ABC):
     """Whether several calls to this tool may run at once. Read-only tools
     can; anything that writes must not."""
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, boundary: Boundary | None = None):
         self.workspace = workspace.resolve()
+        # Without an explicit boundary, confine to the workspace -- the safe
+        # reading of "no scope was chosen".
+        self.boundary = boundary or Boundary(scope=Scope.FOLDER, root=self.workspace)
 
     @abstractmethod
     async def run(self, args: Schema) -> ToolResult: ...
@@ -108,29 +112,28 @@ class Tool(ABC):
     # -- path safety -------------------------------------------------------
 
     def resolve_path(self, raw: str) -> Path:
-        """Resolve a model-supplied path, refusing to escape the workspace.
+        """Resolve a model-supplied path, refusing to leave the boundary.
 
         The model is not adversarial, but it is frequently confused, and a
         confused agent writing to ``../../etc`` is the same problem as a
-        malicious one.
+        malicious one. This check is not waivable by a permission mode:
+        scope is the wall, mode is only how often it knocks.
         """
         candidate = Path(raw).expanduser()
         full = candidate if candidate.is_absolute() else (self.workspace / candidate)
         full = Path(os.path.normpath(str(full)))
-        try:
-            full.resolve().relative_to(self.workspace)
-        except ValueError:
-            raise PermissionError(
-                f"{raw!r} is outside the workspace ({self.workspace}). "
-                "Tools may only touch files in the project directory."
-            ) from None
+        if not self.boundary.contains(full):
+            raise PermissionError(self.boundary.reject(raw)) from None
         return full
 
     def relative(self, path: Path) -> str:
-        try:
-            return str(path.resolve().relative_to(self.workspace))
-        except ValueError:
-            return str(path)
+        """A short display path: relative to the workspace when it can be."""
+        for base in (self.workspace, self.boundary.root):
+            try:
+                return str(path.resolve().relative_to(base))
+            except ValueError:
+                continue
+        return str(path)
 
 
 def _explain_validation(exc: ValidationError) -> str:

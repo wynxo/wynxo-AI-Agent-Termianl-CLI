@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..memory import Memory
+from ..scope import Boundary
 from .base import Tool, ToolResult
-from .files import EditFile, ListDir, ReadFile, WriteFile
+from .files import EditFile, ListDir, MultiEdit, ReadFile, WriteFile
+from .memory_tool import Remember
 from .search import Glob, Grep
 from .shell import Shell
 from .todo import TodoWrite
@@ -46,16 +49,23 @@ class Registry:
         return "\n".join(f"  {t.signature()}\n      {t.description}" for t in self._tools.values())
 
 
-def build_registry(workspace: Path, allow_shell: bool = True) -> Registry:
+def build_registry(
+    workspace: Path,
+    allow_shell: bool = True,
+    boundary: Boundary | None = None,
+    memory: Memory | None = None,
+) -> Registry:
     tools: list[Tool] = [
-        ReadFile(workspace),
-        WriteFile(workspace),
-        EditFile(workspace),
-        ListDir(workspace),
-        Glob(workspace),
-        Grep(workspace),
-        TodoWrite(workspace),
+        ReadFile(workspace, boundary),
+        WriteFile(workspace, boundary),
+        EditFile(workspace, boundary),
+        MultiEdit(workspace, boundary),
+        ListDir(workspace, boundary),
+        Glob(workspace, boundary),
+        Grep(workspace, boundary),
+        TodoWrite(workspace, boundary),
+        Remember(workspace, boundary, memory),
     ]
     if allow_shell:
-        tools.append(Shell(workspace))
+        tools.append(Shell(workspace, boundary))
     return Registry(tools)

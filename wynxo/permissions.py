@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .scope import Mode
+
 
 class Decision(Enum):
     ALLOW = "allow"
@@ -58,17 +60,44 @@ class PermissionStore:
     always_allowed_tools: set[str] = field(default_factory=set)
     always_allowed_commands: set[str] = field(default_factory=set)
     denied_this_session: list[str] = field(default_factory=list)
-    yolo: bool = False
-    """Approve everything. For a sandbox or a throwaway container."""
+    mode: Mode = Mode.MANUAL
+
+    @property
+    def yolo(self) -> bool:
+        return self.mode is Mode.YOLO
+
+    @yolo.setter
+    def yolo(self, value: bool) -> None:
+        self.mode = Mode.YOLO if value else Mode.MANUAL
 
     def preapprove(self, names: list[str]) -> None:
         self.always_allowed_tools.update(names)
 
+    def blocked(self, tool_name: str, mutating: bool) -> str | None:
+        """Whether the current mode forbids this outright.
+
+        Plan mode is the only one that refuses rather than asks: the point of
+        it is that nothing changes, so a prompt would defeat it.
+        """
+        if self.mode is Mode.PLAN and mutating:
+            return (
+                f"{tool_name} would change something, and wynxo is in plan mode "
+                "(read-only). Investigate and describe what you would do instead. "
+                "The user can switch with /mode auto or /mode manual."
+            )
+        return None
+
     def needs_prompt(self, tool_name: str, mutating: bool, args: dict) -> bool:
-        if self.yolo:
+        if self.mode is Mode.YOLO:
             return False
         if not mutating:
             return False
+
+        if self.mode is Mode.AUTO:
+            # Edits in scope go through; anything that runs a command or
+            # reaches off the machine still asks.
+            if tool_name != "shell":
+                return False
 
         if tool_name == "shell":
             command = str(args.get("command", "")).strip()

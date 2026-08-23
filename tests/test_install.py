@@ -3,6 +3,7 @@ tested directly. Getting the model choice wrong turns a successful install
 into a confusing failure at the last step."""
 
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -122,3 +123,48 @@ class TestScriptWrappers:
         text = (ROOT / "install.ps1").read_text()
         assert "install.py" in text
         assert "py -3" in text
+
+
+class TestLauncher:
+    def test_bin_dir_per_platform(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(install.sys, "platform", "linux")
+        monkeypatch.delenv("TERMUX_VERSION", raising=False)
+        monkeypatch.setenv("PREFIX", "")
+        assert install.user_bin_dir() == Path.home() / ".local" / "bin"
+
+        monkeypatch.setenv("TERMUX_VERSION", "0.118.0")
+        monkeypatch.setenv("PREFIX", str(tmp_path))
+        assert install.user_bin_dir() == tmp_path / "bin"
+
+    def test_windows_bin_dir(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(install.sys, "platform", "win32")
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+        assert install.user_bin_dir() == tmp_path / "Programs" / "wynxo"
+
+    def test_on_path_detection(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("PATH", f"/usr/bin{os.pathsep}{tmp_path}")
+        assert install.on_path(tmp_path)
+        assert not install.on_path(tmp_path / "elsewhere")
+
+    def test_launcher_pins_the_interpreter(self, monkeypatch, tmp_path):
+        """A shim rather than a symlink, so it works whatever venv is active."""
+        monkeypatch.setattr(install.sys, "platform", "linux")
+        monkeypatch.setattr(install, "user_bin_dir", lambda: tmp_path / "bin")
+        monkeypatch.setattr(install, "ask", lambda *a, **k: True)
+        python = tmp_path / "venv" / "bin" / "python"
+        launcher = install.link_command(python, tmp_path / "venv", assume_yes=True)
+        assert launcher is not None
+        body = launcher.read_text()
+        assert str(python) in body and "-m wynxo" in body
+        assert launcher.stat().st_mode & 0o111, "must be executable"
+
+    def test_declining_the_link_returns_none(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(install, "user_bin_dir", lambda: tmp_path / "bin")
+        monkeypatch.setattr(install, "ask", lambda *a, **k: False)
+        assert install.link_command(Path("/x/python"), tmp_path, False) is None
+
+    def test_shell_rc_hint_matches_the_shell(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SHELL", "/usr/bin/zsh")
+        assert ".zshrc" in install.shell_rc_hint(tmp_path)
+        monkeypatch.setenv("SHELL", "/usr/bin/fish")
+        assert "fish_add_path" in install.shell_rc_hint(tmp_path)

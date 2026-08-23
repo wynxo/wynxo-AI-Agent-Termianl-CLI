@@ -204,11 +204,54 @@ def project_context(workspace: Path) -> str:
     return ""
 
 
+SCOPE_BLOCK = """
+## What you may touch
+
+{boundary}
+
+Paths outside that are refused by the tools themselves, not by your judgement.
+Do not try to work around it -- say what you need and let the user widen the
+scope if they agree.
+"""
+
+MODE_BLOCK = {
+    "plan": """
+## Mode: plan (read-only)
+
+You cannot change anything this session. Investigate properly, then describe
+what you would do and why -- specific files, specific changes. Any attempt to
+write or run a command will be refused.
+""",
+    "manual": "",
+    "auto": """
+## Mode: auto
+
+File edits inside the scope go through without asking. That is a reason to be
+more careful, not less: re-read what you changed. Commands still require the
+user's approval.
+""",
+    "yolo": """
+## Mode: unattended
+
+Nothing asks for approval. Be conservative with anything irreversible.
+""",
+}
+
+MEMORY_TOOL_NOTE = """
+When you learn something durable -- a build command, a convention, a decision
+and its reason, a trap you hit -- write it down with `remember` so the next
+session starts knowing it. Keep it to things that will still be true later.
+"""
+
+
 def build_system_prompt(
     workspace: Path,
     policy: EffortPolicy,
     tools_description: str = "",
     native_tools: bool = True,
+    memory: str = "",
+    boundary=None,
+    mode=None,
 ) -> str:
     from .platforms import default_shell, describe
 
@@ -228,9 +271,16 @@ def build_system_prompt(
     if not native_tools and tools_description:
         parts.append(HERMES_TOOLS.format(tools=tools_description))
 
+    if boundary is not None:
+        parts.append(SCOPE_BLOCK.format(boundary=boundary.describe()))
+    if mode is not None:
+        parts.append(MODE_BLOCK.get(getattr(mode, "value", str(mode)), ""))
+
     parts.append(
         EFFORT_BLOCK.format(name=policy.name, guidance=EFFORT_GUIDANCE[policy.name])
     )
+    parts.append(MEMORY_TOOL_NOTE)
+    parts.append(memory)
     parts.append(project_context(workspace))
 
     return "\n".join(p for p in parts if p.strip())

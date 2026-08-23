@@ -28,6 +28,10 @@ from .permissions import Decision
 from .provider import OllamaClient, ProviderError, check_context
 from .session import Session
 from .keys import KeyWatcher, describe_bindings
+from .memory import Memory
+from .scope import Mode, Scope, resolve as resolve_scope
+from .status import Status
+from .tools import build_registry
 from .ui import ACCENT, MUTED, ActivityBar, CodeStreamer, UI
 
 # What the activity bar says while each tool runs.
@@ -50,6 +54,10 @@ COMMANDS = {
     "/endpoint": "list | use <name> | add <url> | test -- where Ollama serves",
     "/ctx": "show or set the context window (num_ctx)",
     "/tools": "list the tools the agent can call",
+    "/mode": "plan | manual | auto | yolo -- how much it asks first",
+    "/scope": "folder | repo | machine -- what it may touch",
+    "/undo": "revert the last file change",
+    "/memory": "show, add to, or forget long-term memory",
     "/thinking": "show or hide the model's reasoning",
     "/plan": "show the current plan",
     "/clear": "start a fresh conversation",
@@ -193,12 +201,16 @@ class TerminalCallbacks(Callbacks):
 
 
 class Repl:
-    def __init__(self, config: Config, workspace: Path, ui: UI):
+    def __init__(self, config: Config, workspace: Path, ui: UI,
+                 scope: Scope = Scope.FOLDER, mode: Mode = Mode.MANUAL):
         self.config = config
         self.workspace = workspace
         self.ui = ui
         self.client = OllamaClient(config)
         self.policy = resolve(config.effort)
+        self.boundary = resolve_scope(workspace, scope)
+        self.mode = mode
+        self.memory = Memory(workspace)
 
         history_file = data_dir() / "history"
         history_file.parent.mkdir(parents=True, exist_ok=True)
@@ -238,18 +250,58 @@ class Repl:
             multiline=False,
         )
         self.callbacks = TerminalCallbacks(ui, self.prompt_session)
-        self.agent = Agent(self.client, config, self.policy, workspace, self.callbacks)
-        self._effort_changed = False
+        self.agent = Agent(self.client, config, self.policy, workspace, self.callbacks,
+                           boundary=self.boundary, memory=self.memory)
+        self.agent.permissions.mode = mode
+        self.agent.refresh_system_prompt()
         self._task: asyncio.Task | None = None
 
     async def _connect(self) -> bool:
-        """Reach the server, show the banner, adapt to the model."""
+        """Reach the server, report what is loaded, adapt to the model."""
+        status = Status()
+        print()
+
         try:
             version = await self.client.ping()
         except ProviderError as exc:
+            status.fail("ollama", self.client.base_url)
+            status.close()
             self.ui.error(str(exc))
             self.ui.console.print(server_help())
             return False
+        status.ok(f"ollama {version}", self.client.base_url)
+
+        info = None
+        try:
+            info = await self.client.show(self.config.model)
+        except ProviderError:
+            pass
+        if info is not None and info.capabilities:
+            status.ok(self.config.model, ", ".join(info.capabilities))
+        else:
+            status.ok(self.config.model)
+
+        warning = await check_context(self.client, self.config)
+        if warning:
+            status.warn(f"context {self.config.num_ctx}", warning.split(".")[0])
+        else:
+            status.ok(f"context {self.config.num_ctx}")
+
+        await self.agent.detect_capabilities()
+        status.ok(
+            f"{len(self.agent.tools)} tools",
+            "native" if self.agent.native_tools else "hermes (prompted)")
+
+        status.ok(f"scope {self.boundary.scope.value}", self.boundary.describe())
+        status.ok(f"mode {self.mode.value}", self.mode.describe())
+
+        project, user = self.memory.counts()
+        if project or user:
+            status.ok("memory", f"{project} project, {user} user")
+        else:
+            status.skip("memory", "nothing remembered yet")
+
+        status.close()
 
         self.ui.banner(
             self.config.model,
@@ -257,9 +309,6 @@ class Repl:
             self.policy.name,
             str(self.workspace),
         )
-        if warning := await check_context(self.client, self.config):
-            self.ui.warn(warning)
-        await self.agent.detect_capabilities()
         return True
 
     async def start(self) -> int:
@@ -449,6 +498,15 @@ class Repl:
             await Doctor(self.client, self.config, self.ui).run()
             return True
 
+        if name == "/mode":
+            return await self.cmd_mode(args)
+        if name == "/scope":
+            return await self.cmd_scope(args)
+        if name == "/undo":
+            return self.cmd_undo(args)
+        if name == "/memory":
+            return self.cmd_memory(args)
+
         if name == "/yolo":
             self.agent.permissions.yolo = not self.agent.permissions.yolo
             if self.agent.permissions.yolo:
@@ -607,6 +665,153 @@ class Repl:
         self.ui.warn("usage: /endpoint [list | test | add <url> [name] | use <name>]")
         return True
 
+    async def cmd_mode(self, args: list[str]) -> bool:
+        if not args:
+            self.ui.table(
+                ["mode", "behaviour"],
+                [(m.value + ("  <-" if m is self.agent.permissions.mode else ""),
+                  m.describe()) for m in Mode],
+                title="permission modes",
+            )
+            return True
+        try:
+            mode = Mode.parse(args[0])
+        except KeyError as exc:
+            self.ui.warn(str(exc))
+            return True
+        self.agent.permissions.mode = mode
+        self.agent.refresh_system_prompt()
+        self.ui.success(f"mode: {mode.value} -- {mode.describe()}")
+        if mode is Mode.YOLO:
+            self.ui.warn("Nothing will ask for approval from here on.")
+        return True
+
+    async def cmd_scope(self, args: list[str]) -> bool:
+        if not args:
+            current = self.agent.boundary
+            self.ui.table(
+                ["scope", "means"],
+                [(s.value + ("  <-" if current and s is current.scope else ""),
+                  {"folder": "only the directory wynxo started in",
+                   "repo": "the whole git repository",
+                   "machine": "no path restriction at all"}[s.value]) for s in Scope],
+                title="scope",
+            )
+            if current:
+                self.ui.info(f"currently: {current.describe()}")
+            return True
+        try:
+            scope = Scope.parse(args[0])
+        except KeyError as exc:
+            self.ui.warn(str(exc))
+            return True
+
+        if scope is Scope.MACHINE:
+            self.ui.warn(
+                "Machine scope removes the path restriction entirely: the agent "
+                "can read and write anywhere your user account can.")
+            try:
+                answer = (await self.prompt_session.prompt_async(
+                    HTML('<ansicyan>  really widen to the whole machine? [y/N]: </ansicyan>')
+                )).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = "n"
+            if answer not in ("y", "yes"):
+                self.ui.info("left unchanged")
+                return True
+
+        self._apply_scope(scope)
+        self.ui.success(f"scope: {self.agent.boundary.describe()}")
+        return True
+
+    def _apply_scope(self, scope: Scope) -> None:
+        boundary = resolve_scope(self.workspace, scope)
+        if boundary.scope is not scope and scope is Scope.REPO:
+            self.ui.warn("Not inside a git repository; staying with folder scope.")
+        self.agent.boundary = boundary
+        self.agent.tools = build_registry(
+            self.workspace, allow_shell=self.config.allow_shell,
+            boundary=boundary, memory=self.agent.memory)
+        self.agent.refresh_system_prompt()
+
+    def cmd_undo(self, args: list[str]) -> bool:
+        if args and args[0] in ("list", "history"):
+            history = self.agent.checkpoints.history()
+            if not history:
+                self.ui.info("nothing to undo")
+                return True
+            self.ui.table(
+                ["file", "changed by"],
+                [(s.label or s.path.name, s.tool) for s in history],
+                title="undo history (most recent first)",
+            )
+            return True
+
+        count = 1
+        if args and args[0].isdigit():
+            count = max(1, min(20, int(args[0])))
+        for _ in range(count):
+            done, message = self.agent.checkpoints.undo()
+            if not done:
+                self.ui.info(message)
+                break
+            self.ui.success(message)
+        return True
+
+    def cmd_memory(self, args: list[str]) -> bool:
+        memory = self.agent.memory
+
+        if not args or args[0] in ("show", "list"):
+            project, user = memory.counts()
+            if not project and not user:
+                self.ui.info("nothing remembered yet")
+                self.ui.info("the agent writes here itself; or: /memory add <note>")
+                return True
+            if user:
+                self.ui.table(["about you"], [(e.lstrip("-* "),)
+                                              for e in memory.user.entries()])
+            if project:
+                self.ui.table(["about this project"], [(e.lstrip("-* "),)
+                                                       for e in memory.project.entries()])
+            self.ui.info(f"{memory.project.path}")
+            return True
+
+        action, rest = args[0], " ".join(args[1:]).strip()
+
+        if action in ("add", "remember") and rest:
+            scope = "user" if rest.startswith("user:") else "project"
+            note = rest.split(":", 1)[1].strip() if rest.startswith("user:") else rest
+            added, message = memory.remember(note, scope)
+            self.ui.success(f"remembered: {message}") if added else self.ui.info(message)
+            self.agent.refresh_system_prompt()
+            return True
+
+        if action in ("forget", "remove") and rest:
+            count, message = memory.forget(rest)
+            if not count:
+                count, message = memory.forget(rest, "user")
+            self.ui.info(message)
+            self.agent.refresh_system_prompt()
+            return True
+
+        if action == "edit":
+            path = memory.project.path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_text(memory.project.header, encoding="utf-8")
+            self.ui.info(f"open it in your editor: {path}")
+            self.ui.info("changes are picked up with /memory reload")
+            return True
+
+        if action == "reload":
+            self.agent.refresh_system_prompt()
+            project, user = memory.counts()
+            self.ui.success(f"reloaded: {project} project, {user} user")
+            return True
+
+        self.ui.warn("usage: /memory [show | add <note> | forget <text> | edit | reload]")
+        return True
+
     async def cmd_ctx(self, args: list[str]) -> bool:
         if not args:
             used = self.agent.session.token_estimate()
@@ -698,7 +903,8 @@ def read_piped_stdin(grace: float = 0.25) -> str:
     return result[0].strip() if result else ""
 
 
-async def run_once(config: Config, workspace: Path, ui: UI, prompt: str) -> int:
+async def run_once(config: Config, workspace: Path, ui: UI, prompt: str,
+                   scope: Scope = Scope.FOLDER, mode: Mode = Mode.YOLO) -> int:
     """Non-interactive mode: answer one prompt and exit."""
     client = OllamaClient(config)
     try:
@@ -709,10 +915,13 @@ async def run_once(config: Config, workspace: Path, ui: UI, prompt: str) -> int:
         return 1
 
     callbacks = TerminalCallbacks(ui)
-    agent = Agent(client, config, resolve(config.effort), workspace, callbacks)
-    # No human to answer prompts, so pre-approve; the caller opted into this
-    # by using -p.
-    agent.permissions.yolo = True
+    agent = Agent(client, config, resolve(config.effort), workspace, callbacks,
+                  boundary=resolve_scope(workspace, scope), memory=Memory(workspace))
+    # No human to answer prompts, so nothing can be asked; the caller opted
+    # into that by using -p. An explicit --mode still wins, so `-p --mode plan`
+    # gives a read-only run.
+    agent.permissions.mode = mode
+    agent.refresh_system_prompt()
     await agent.detect_capabilities()
 
     result = await agent.run(prompt)
@@ -745,7 +954,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="check the server and model, and report what will not work")
     parser.add_argument("--no-stream", action="store_true", help="wait for the full response")
     parser.add_argument("--no-thinking", action="store_true", help="hide model reasoning")
-    parser.add_argument("--yolo", action="store_true", help="never ask permission")
+    parser.add_argument("--yolo", action="store_true",
+                        help="never ask permission (same as --mode yolo)")
+    parser.add_argument("--mode", choices=[m.value for m in Mode],
+                        help="how much it asks first: plan, manual, auto, yolo")
+    parser.add_argument("--scope", choices=[s.value for s in Scope],
+                        help="what it may touch: folder, repo, machine")
     parser.add_argument("--version", action="version", version=f"wynxo {__version__}")
     return parser
 
@@ -817,12 +1031,21 @@ async def amain(argv: list[str] | None = None) -> int:
         args.print = True  # nothing to be interactive with
 
     if prompt and args.print:
-        return await run_once(config, workspace, ui, prompt)
+        once_mode = Mode.parse(args.mode) if args.mode else Mode.YOLO
+        once_scope = Scope.parse(args.scope) if args.scope else Scope.FOLDER
+        return await run_once(config, workspace, ui, prompt, once_scope, once_mode)
 
-    repl = Repl(config, workspace, ui)
+    mode = Mode.parse(args.mode) if args.mode else Mode.MANUAL
     if args.yolo:
-        repl.agent.permissions.yolo = True
-        ui.warn("--yolo: the agent will write files and run commands without asking.")
+        mode = Mode.YOLO
+    scope = Scope.parse(args.scope) if args.scope else Scope.FOLDER
+
+    repl = Repl(config, workspace, ui, scope=scope, mode=mode)
+    if mode is Mode.YOLO:
+        ui.warn("Nothing will ask for approval: the agent writes and runs freely.")
+    if scope is Scope.MACHINE:
+        ui.warn("Machine scope: no path restriction. The agent can reach anything "
+                "your user account can.")
 
     # Ctrl-C cancels the running turn rather than killing the process.
     loop = asyncio.get_running_loop()

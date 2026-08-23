@@ -3,6 +3,7 @@ import pytest
 from wynxo.config import Config, Endpoint, normalise_url
 from wynxo.effort import ORDER, POLICIES, resolve
 from wynxo.permissions import PermissionStore, is_read_only_command
+from wynxo.scope import Mode
 from wynxo.session import Session, estimate_tokens
 
 
@@ -112,8 +113,28 @@ class TestPermissions:
         assert store.needs_prompt("shell", True, {"command": "curl http://x.com"})
 
     def test_yolo_skips_everything(self):
-        store = PermissionStore(yolo=True)
+        store = PermissionStore(mode=Mode.YOLO)
         assert not store.needs_prompt("shell", True, {"command": "rm -rf build"})
+        assert store.yolo
+
+    def test_plan_mode_refuses_rather_than_asks(self):
+        """Plan mode is the only one that blocks: a prompt would defeat it."""
+        store = PermissionStore(mode=Mode.PLAN)
+        assert store.blocked("write_file", True)
+        assert store.blocked("shell", True)
+        assert store.blocked("read_file", False) is None
+
+    def test_auto_mode_edits_freely_but_still_asks_to_run(self):
+        store = PermissionStore(mode=Mode.AUTO)
+        assert not store.needs_prompt("write_file", True, {"path": "x"})
+        assert not store.needs_prompt("edit_file", True, {"path": "x"})
+        assert store.needs_prompt("shell", True, {"command": "npm install"})
+        assert store.blocked("write_file", True) is None
+
+    def test_manual_mode_asks_for_writes(self):
+        store = PermissionStore(mode=Mode.MANUAL)
+        assert store.needs_prompt("write_file", True, {"path": "x"})
+        assert not store.needs_prompt("read_file", False, {})
 
 
 class TestSession:

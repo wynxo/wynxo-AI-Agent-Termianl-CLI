@@ -280,7 +280,7 @@ class TestResilience:
         await agent.run("escape")
         assert not (tmp_path.parent.parent / "escaped.txt").exists()
         tool_messages = [m for m in agent.session.messages if m.get("role") == "tool"]
-        assert "outside the workspace" in tool_messages[0]["content"]
+        assert "outside the project directory" in tool_messages[0]["content"]
         await agent.client.aclose()
 
     async def test_denied_permission_stops_the_write(self, tmp_path):
