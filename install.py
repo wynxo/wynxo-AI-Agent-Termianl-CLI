@@ -192,7 +192,15 @@ def check_python() -> None:
 
 
 def make_venv(venv_dir: Path, assume_yes: bool) -> Path:
-    """Create the virtualenv and return its python. Falls back to --user."""
+    """Create the virtualenv and return its python. Falls back to --user.
+
+    Note that nothing here "activates" the virtualenv. Every later step calls
+    its interpreter by full path instead, which sidesteps the most common
+    Windows failure entirely: PowerShell refuses to run Activate.ps1 under its
+    default Restricted execution policy, so activation fails, pip is then
+    either missing or the global one, and the whole install appears to do
+    nothing.
+    """
     step("Setting up the environment")
 
     if os.environ.get("VIRTUAL_ENV"):
@@ -250,6 +258,41 @@ def install_wynxo(python: Path, into_user: bool) -> None:
     # Every dependency is pure Python, so this should never need a compiler.
     ok("wynxo and its dependencies installed")
     info("no compiled extensions -- nothing was built from source")
+
+    # Prove it. pip can report success while the result is unusable -- a stale
+    # venv, a shadowed name, the wrong interpreter -- and a silent half-install
+    # is the hardest kind of failure to diagnose from the outside.
+    verify_install(python)
+
+
+def verify_install(python: Path) -> None:
+    """Confirm wynxo is genuinely importable, from outside the source tree.
+
+    Running this from the repository directory would prove nothing: Python
+    puts the working directory on sys.path, so `import wynxo` would find the
+    source folder whether or not anything was ever installed. Checking from
+    elsewhere is what actually distinguishes an install from a checkout.
+    """
+    import tempfile
+
+    try:
+        check = subprocess.run(
+            [str(python), "-c",
+             "import wynxo, sys; print(wynxo.__version__); print(sys.executable)"],
+            capture_output=True, text=True, timeout=120,
+            cwd=tempfile.gettempdir())
+    except (OSError, subprocess.SubprocessError) as exc:
+        die(f"Installed, but could not run it: {exc}")
+
+    if check.returncode != 0:
+        detail = (check.stderr or check.stdout).strip().splitlines()[-3:]
+        die("pip reported success but wynxo will not import.",
+            "\n".join(detail) + "\n\n"
+            "This usually means pip installed into a different Python than the\n"
+            "one being used. Try again from a clean checkout, or report this.")
+
+    version = check.stdout.strip().splitlines()[0] if check.stdout.strip() else "?"
+    ok(f"verified: wynxo {version} imports and runs")
 
 
 def user_bin_dir() -> Path:

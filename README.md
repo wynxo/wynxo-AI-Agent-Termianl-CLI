@@ -48,7 +48,15 @@ fits your machine, and checks it all works.
 ```bash
 git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
 cd wynxo-AI-Agent-Termianl-CLI
-./install.sh          # Windows: .\install.ps1
+./install.sh
+```
+
+On Windows, from cmd or PowerShell:
+
+```
+git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
+cd wynxo-AI-Agent-Termianl-CLI
+install.bat
 ```
 
 ```
@@ -135,12 +143,22 @@ pip install -e .
 
 ### Windows
 
-PowerShell:
+```
+py -m venv .venv
+.venv\Scripts\python.exe -m pip install -e .
+.venv\Scripts\python.exe -m wynxo
+```
+
+**Do not use `.venv\Scripts\Activate.ps1`.** PowerShell blocks `.ps1` scripts
+under its default Restricted execution policy, so activation fails, `pip` is
+then either missing or your global one, and the install appears to do nothing
+at all. Calling the venv's `python.exe` by full path skips the problem
+entirely — that is exactly what `install.bat` does.
+
+If you want activation anyway, allow it once per user:
 
 ```powershell
-py -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -e .
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ```
 
 Use Windows Terminal rather than the old console host — colours and box
@@ -854,13 +872,34 @@ chmod +x install.sh && ./install.sh
 
 Or skip the wrapper entirely: `python3 install.py`.
 
-### install.ps1 is blocked by execution policy
+### Windows: the install did nothing / `pip` is not recognised
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1
+Almost always `Activate.ps1`. PowerShell refuses to run `.ps1` files under its
+default Restricted execution policy, so the virtualenv is never activated,
+`pip` resolves to your global one or to nothing, and it looks like the install
+silently failed.
+
+Use `install.bat` — batch files are not subject to that policy:
+
+```
+install.bat
 ```
 
-Or: `py -3 install.py`.
+Or do it by hand without activating, calling the venv's Python by full path:
+
+```
+py -m venv .venv
+.venv\Scripts\python.exe -m pip install -e .
+.venv\Scripts\python.exe -m wynxo
+```
+
+Or allow scripts once, per user:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+`.\install.ps1` also works via `powershell -ExecutionPolicy Bypass -File .\install.ps1`.
 
 ### It made a change I did not want
 

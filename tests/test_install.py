@@ -168,3 +168,83 @@ class TestLauncher:
         assert ".zshrc" in install.shell_rc_hint(tmp_path)
         monkeypatch.setenv("SHELL", "/usr/bin/fish")
         assert "fish_add_path" in install.shell_rc_hint(tmp_path)
+
+
+class TestVerifyInstall:
+    """pip can report success while the result is unusable. The check has to
+    be able to tell an install from a source checkout, which is exactly what
+    it got wrong first: run from the repo directory, `import wynxo` finds the
+    source folder whether or not anything was installed."""
+
+    def test_passes_when_the_module_imports(self, capsys, monkeypatch):
+        monkeypatch.setattr(
+            install.subprocess, "run",
+            lambda *a, **k: type("R", (), {
+                "returncode": 0, "stdout": "0.1.0\n/venv/bin/python\n",
+                "stderr": ""})())
+        install.verify_install(Path("/venv/bin/python"))
+        assert "verified: wynxo 0.1.0" in capsys.readouterr().out
+
+    def test_runs_from_outside_the_source_tree(self, monkeypatch):
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen.update(kwargs)
+            return type("R", (), {"returncode": 0, "stdout": "0.1.0\n/x\n", "stderr": ""})()
+
+        monkeypatch.setattr(install.subprocess, "run", fake_run)
+        install.verify_install(Path("/x/python"))
+        cwd = Path(seen["cwd"]).resolve()
+        assert cwd != ROOT, "checking from the repo proves nothing"
+
+    def test_fails_when_the_module_is_missing(self, monkeypatch):
+        monkeypatch.setattr(
+            install.subprocess, "run",
+            lambda *a, **k: type("R", (), {
+                "returncode": 1, "stdout": "",
+                "stderr": "ModuleNotFoundError: No module named 'wynxo'"})())
+        with pytest.raises(SystemExit) as exc:
+            install.verify_install(Path("/x/python"))
+        assert exc.value.code == 1
+
+    def test_reports_a_launch_failure(self, monkeypatch):
+        def boom(*a, **k):
+            raise OSError("no such interpreter")
+        monkeypatch.setattr(install.subprocess, "run", boom)
+        with pytest.raises(SystemExit):
+            install.verify_install(Path("/nope/python"))
+
+
+class TestWindowsEntryPoints:
+    """PowerShell's default Restricted policy blocks .ps1, which is the most
+    common reason a Windows setup appears to do nothing."""
+
+    def test_bat_wrapper_exists_and_is_not_powershell(self):
+        script = ROOT / "install.bat"
+        assert script.exists()
+        text = script.read_text()
+        assert text.lstrip().startswith("@echo off")
+        assert "install.py" in text
+        assert "py -3" in text
+
+    def test_bat_wrapper_handles_a_missing_python(self):
+        text = (ROOT / "install.bat").read_text()
+        assert "python.org/downloads" in text
+
+    def test_ps1_documents_the_policy_workaround(self):
+        text = (ROOT / "install.ps1").read_text()
+        assert "ExecutionPolicy Bypass" in text
+        assert "install.bat" in text
+
+    def test_readme_does_not_tell_windows_users_to_activate(self):
+        readme = (ROOT / "README.md").read_text()
+        for line in readme.splitlines():
+            stripped = line.strip()
+            # A bare activation command in a code block is the trap; prose
+            # explaining not to use it is fine.
+            if stripped.startswith((".venv\\Scripts\\Activate", ".\\.venv\\Scripts\\Activate")):
+                raise AssertionError(f"README instructs activation: {line!r}")
+
+    def test_readme_gives_the_full_path_pip_invocation(self):
+        readme = (ROOT / "README.md").read_text()
+        assert ".venv\\Scripts\\python.exe -m pip install -e ." in readme

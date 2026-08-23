@@ -4,6 +4,12 @@
 #   .\install.ps1 --yes        accept every recommendation
 #   .\install.ps1 --no-ollama  just install wynxo
 #
+# If PowerShell refuses to run this file at all, that is its default
+# Restricted execution policy, not a problem with wynxo. Use install.bat
+# instead -- batch files are not subject to it -- or run:
+#
+#   powershell -ExecutionPolicy Bypass -File .\install.ps1
+#
 # All it does is find a Python 3.10+ and hand over to install.py.
 
 $ErrorActionPreference = "Stop"
