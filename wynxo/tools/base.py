@@ -50,6 +50,12 @@ class Tool(ABC):
     mutating: ClassVar[bool] = False
     """Whether this tool changes the world. Drives the permission prompt."""
 
+    internal: ClassVar[bool] = False
+    """Whether the only thing it changes is wynxo's own state -- its memory,
+    its plan -- rather than the user's files. Internal writes are not worth a
+    permission prompt, and blocking them in plan mode would mean a read-only
+    session could never write down what it learned."""
+
     concurrency_safe: ClassVar[bool] = True
     """Whether several calls to this tool may run at once. Read-only tools
     can; anything that writes must not."""

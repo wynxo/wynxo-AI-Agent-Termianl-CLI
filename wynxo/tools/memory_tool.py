@@ -32,6 +32,7 @@ class Remember(Tool):
     )
     Input = RememberInput
     mutating = True
+    internal = True
     concurrency_safe = False
 
     def __init__(self, workspace: Path, boundary=None, memory: Memory | None = None):

@@ -145,3 +145,38 @@ class TestModeBehaviour:
         assert store.needs_prompt("write_file", True, {"path": "a"})
         assert store.needs_prompt("shell", True, {"command": "ls -la"}) is False  # read-only
         assert store.needs_prompt("shell", True, {"command": "make"})
+
+
+class TestInternalTools:
+    """A tool that only writes wynxo's own state should not need approval,
+    and should still work in plan mode -- a read-only session that cannot
+    write down what it learned is worse than useless."""
+
+    def test_remember_is_marked_internal(self, tmp_path):
+        from wynxo.tools import build_registry
+        registry = build_registry(tmp_path)
+        assert registry.get("remember").internal
+        assert not registry.get("write_file").internal
+        assert not registry.get("shell").internal
+
+    def test_manual_mode_does_not_prompt_for_internal_writes(self):
+        store = PermissionStore(mode=Mode.MANUAL)
+        assert not store.needs_prompt("remember", True, {}, internal=True)
+        assert store.needs_prompt("write_file", True, {"path": "a"})
+
+    def test_plan_mode_allows_internal_writes(self):
+        store = PermissionStore(mode=Mode.PLAN)
+        assert store.blocked("remember", True, internal=True) is None
+        assert store.blocked("write_file", True)
+
+    async def test_remember_works_in_plan_mode_end_to_end(self, tmp_path):
+        from wynxo.memory import Memory
+        from wynxo.tools.memory_tool import Remember
+
+        memory = Memory(tmp_path, tmp_path / "u")
+        tool = Remember(tmp_path, None, memory)
+        store = PermissionStore(mode=Mode.PLAN)
+        assert store.blocked(tool.name, tool.mutating, tool.internal) is None
+        result = await tool.invoke({"note": "Learned during a plan-mode session"})
+        assert result.ok
+        assert memory.counts()[0] == 1

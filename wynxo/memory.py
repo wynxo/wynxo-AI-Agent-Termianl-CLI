@@ -65,24 +65,20 @@ class MemoryFile:
             return ""
 
     def body(self) -> str:
-        """The content without the boilerplate header."""
-        text = self.read()
-        if not text.strip():
-            return ""
-        lines = [
-            line for line in text.splitlines()
-            # Drop the header prose so it is not re-fed to the model as fact.
-            if not line.startswith("#") or line.startswith("##")
-        ]
-        stripped = "\n".join(lines).strip()
-        for phrase in ("Facts about this codebase", "Preferences and working habits",
-                       "Keep entries short", "Keep it short", "Delete anything"):
-            stripped = "\n".join(
-                l for l in stripped.splitlines() if phrase not in l)
-        return stripped.strip()
+        """The remembered entries, without the boilerplate header.
+
+        Entries are the bullet lines. Splitting on structure rather than
+        matching header phrases matters: an earlier version dropped any line
+        containing wording from the header, which silently ate real notes
+        like "keep it short when writing commit messages".
+        """
+        return "\n".join(self.entries())
 
     def entries(self) -> list[str]:
-        return [line.strip() for line in self.body().splitlines()
+        text = self.read()
+        if not text.strip():
+            return []
+        return [line.strip() for line in text.splitlines()
                 if line.strip().startswith(("-", "*"))]
 
     def append(self, note: str) -> tuple[bool, str]:

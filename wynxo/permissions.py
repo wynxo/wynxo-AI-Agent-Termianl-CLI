@@ -73,13 +73,15 @@ class PermissionStore:
     def preapprove(self, names: list[str]) -> None:
         self.always_allowed_tools.update(names)
 
-    def blocked(self, tool_name: str, mutating: bool) -> str | None:
+    def blocked(self, tool_name: str, mutating: bool, internal: bool = False) -> str | None:
         """Whether the current mode forbids this outright.
 
         Plan mode is the only one that refuses rather than asks: the point of
-        it is that nothing changes, so a prompt would defeat it.
+        it is that nothing changes, so a prompt would defeat it. Internal
+        writes are exempt -- a read-only session should still be able to note
+        what it worked out.
         """
-        if self.mode is Mode.PLAN and mutating:
+        if self.mode is Mode.PLAN and mutating and not internal:
             return (
                 f"{tool_name} would change something, and wynxo is in plan mode "
                 "(read-only). Investigate and describe what you would do instead. "
@@ -87,10 +89,11 @@ class PermissionStore:
             )
         return None
 
-    def needs_prompt(self, tool_name: str, mutating: bool, args: dict) -> bool:
+    def needs_prompt(self, tool_name: str, mutating: bool, args: dict,
+                     internal: bool = False) -> bool:
         if self.mode is Mode.YOLO:
             return False
-        if not mutating:
+        if not mutating or internal:
             return False
 
         if self.mode is Mode.AUTO:

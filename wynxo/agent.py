@@ -273,12 +273,13 @@ class Agent:
 
             summary = summarise_call(call.name, call.arguments)
 
-            if refusal := self.permissions.blocked(call.name, tool.mutating):
+            if refusal := self.permissions.blocked(call.name, tool.mutating, tool.internal):
                 await self.cb.on_tool_result(call.name, False, refusal, refusal)
                 self.session.add_tool_result(call.name, f"ERROR: {refusal}", call.call_id)
                 continue
 
-            if self.permissions.needs_prompt(call.name, tool.mutating, call.arguments):
+            if self.permissions.needs_prompt(
+                call.name, tool.mutating, call.arguments, tool.internal):
                 preview = await self._permission_preview(call.name, call.arguments)
                 decision = await self.cb.ask_permission(call.name, summary, preview)
                 if decision is Decision.ABORT:

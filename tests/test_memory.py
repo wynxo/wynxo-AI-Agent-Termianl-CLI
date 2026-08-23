@@ -147,3 +147,32 @@ class TestSpeed:
             memory.prompt_section()
         elapsed = time.monotonic() - started
         assert elapsed < 1.0, f"50 loads took {elapsed:.2f}s"
+
+
+class TestHeaderIsNotContent:
+    """An earlier version stripped the boilerplate header by matching its
+    wording, which silently ate any note containing the same phrases."""
+
+    @pytest.mark.parametrize("note", [
+        "Keep it short when writing commit messages",
+        "Delete anything that stops being accurate in the changelog",
+        "Facts about this codebase live in docs/architecture.md",
+        "Preferences and working habits are documented in CONTRIBUTING.md",
+        "Keep entries short in the release notes",
+    ])
+    def test_notes_echoing_the_header_survive(self, memory, note):
+        added, _ = memory.remember(note)
+        assert added
+        assert note in memory.project.body()
+        assert note in memory.prompt_section()
+
+    def test_header_prose_never_reaches_the_model(self, memory):
+        memory.remember("A real fact")
+        section = memory.prompt_section()
+        assert "Keep entries short and true" not in section
+        assert "Facts about this codebase worth carrying" not in section
+
+    def test_body_is_only_the_entries(self, memory):
+        memory.remember("First")
+        memory.remember("Second")
+        assert memory.project.body().splitlines() == ["- First", "- Second"]

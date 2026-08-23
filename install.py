@@ -142,12 +142,22 @@ def total_memory_gb() -> float:
                                  capture_output=True, text=True, timeout=5)
             return int(out.stdout.strip()) / 1024 ** 3
         elif sys.platform == "win32":
-            out = subprocess.run(
+            # PowerShell/CIM first: wmic is deprecated and simply absent on
+            # Windows 11 24H2 and later, where it would silently report 0 and
+            # get a 64GB machine recommended an 8B model.
+            for command in (
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"],
                 ["wmic", "computersystem", "get", "TotalPhysicalMemory"],
-                capture_output=True, text=True, timeout=10)
-            digits = [w for w in out.stdout.split() if w.isdigit()]
-            if digits:
-                return int(digits[0]) / 1024 ** 3
+            ):
+                try:
+                    out = subprocess.run(command, capture_output=True, text=True,
+                                         timeout=15)
+                except (OSError, subprocess.SubprocessError):
+                    continue
+                digits = [w for w in out.stdout.split() if w.isdigit()]
+                if digits:
+                    return int(digits[0]) / 1024 ** 3
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
     return 0.0

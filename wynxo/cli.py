@@ -82,6 +82,10 @@ class TerminalCallbacks(Callbacks):
         self._thinking_open = False
         self._thinking_chars = 0
         self.bar: ActivityBar | None = None
+        self.watcher: KeyWatcher | None = None
+        """Set while a turn runs. It holds the terminal in cbreak mode, so it
+        must be stopped before prompt_toolkit is asked to read a line --
+        otherwise both read stdin and keystrokes go to whichever wins."""
         self.streamer: CodeStreamer | None = None
         self.verbose_tools = False
         """Ctrl-T: show full tool output instead of a one-line summary."""
@@ -169,9 +173,28 @@ class TerminalCallbacks(Callbacks):
         self._end_stream()
         if self.prompt_session is None:
             return Decision.ALLOW
-        # The bar owns the bottom of the screen; it must go before a prompt.
+        try:
+            return await self._ask(name, summary, preview)
+        finally:
+            # Hand the terminal back so the rest of the turn keeps its status
+            # line and its live keys.
+            self._resume_live()
+
+    def _suspend_live(self) -> None:
+        """Release the terminal before prompt_toolkit reads a line."""
+        if self.watcher is not None:
+            self.watcher.stop()
         if self.bar is not None:
             self.bar.stop()
+
+    def _resume_live(self) -> None:
+        if self.bar is not None:
+            self.bar.start()
+        if self.watcher is not None:
+            self.watcher.start()
+
+    async def _ask(self, name: str, summary: str, preview: str) -> Decision:
+        self._suspend_live()
         self.ui.console.print()
         verb = {
             "write_file": "write to",
@@ -360,6 +383,7 @@ class Repl:
             "ctrl+t": self.callbacks.toggle_verbose,
         })
 
+        self.callbacks.watcher = watcher
         self._task = asyncio.ensure_future(self.agent.run(text))
         bar.start()
         watcher.start()
@@ -375,6 +399,7 @@ class Repl:
             watcher.stop()
             bar.stop()
             self.callbacks.bar = None
+            self.callbacks.watcher = None
             self._task = None
 
         self.callbacks._end_stream()
@@ -728,10 +753,18 @@ class Repl:
         boundary = resolve_scope(self.workspace, scope)
         if boundary.scope is not scope and scope is Scope.REPO:
             self.ui.warn("Not inside a git repository; staying with folder scope.")
+
+        # The registry is rebuilt with new tool instances, so carry over the
+        # state that lives on a tool -- otherwise changing scope silently
+        # wipes the plan the agent is working through.
+        previous_todo = self.agent.tools.get("todo_write")
         self.agent.boundary = boundary
         self.agent.tools = build_registry(
             self.workspace, allow_shell=self.config.allow_shell,
             boundary=boundary, memory=self.agent.memory)
+        current_todo = self.agent.tools.get("todo_write")
+        if previous_todo is not None and current_todo is not None:
+            current_todo.items = previous_todo.items
         self.agent.refresh_system_prompt()
 
     def cmd_undo(self, args: list[str]) -> bool:
