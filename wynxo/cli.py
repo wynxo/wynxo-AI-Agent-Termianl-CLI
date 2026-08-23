@@ -27,7 +27,19 @@ from .effort import ORDER, resolve
 from .permissions import Decision
 from .provider import OllamaClient, ProviderError, check_context
 from .session import Session
-from .ui import ACCENT, MUTED, UI
+from .keys import KeyWatcher, describe_bindings
+from .ui import ACCENT, MUTED, ActivityBar, CodeStreamer, UI
+
+# What the activity bar says while each tool runs.
+_ACTIVITY = {
+    "read_file": "reading", "write_file": "writing file", "edit_file": "editing",
+    "list_dir": "listing", "glob": "finding", "grep": "searching",
+    "shell": "running", "todo_write": "planning",
+}
+_LANGUAGE = {"read_file": "python", "shell": "console"}
+
+# Keys that work *while the agent is running*, not just at the prompt.
+LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail"}
 from .platforms import ollama_server_help as server_help
 from .wizard import probe, run_wizard
 
@@ -61,6 +73,28 @@ class TerminalCallbacks(Callbacks):
         self._streaming = False
         self._thinking_open = False
         self._thinking_chars = 0
+        self.bar: ActivityBar | None = None
+        self.streamer: CodeStreamer | None = None
+        self.verbose_tools = False
+        """Ctrl-T: show full tool output instead of a one-line summary."""
+        self.tokens = 0
+
+    # -- live toggles, called from the key watcher thread -------------------
+
+    def toggle_thinking(self) -> None:
+        self.ui.show_thinking = not self.ui.show_thinking
+        self._note(f"thinking {'shown' if self.ui.show_thinking else 'hidden'}")
+
+    def toggle_verbose(self) -> None:
+        self.verbose_tools = not self.verbose_tools
+        self._note(f"tool output {'full' if self.verbose_tools else 'summarised'}")
+
+    def _note(self, message: str) -> None:
+        """Surface a toggle without disturbing whatever is streaming."""
+        if self.bar is not None:
+            self.bar.update(detail=message)
+        else:
+            self.ui.info(message)
 
     def _end_stream(self) -> None:
         """Close whichever transient line is open, so the next block starts clean."""
@@ -69,37 +103,52 @@ class TerminalCallbacks(Callbacks):
             self._thinking_open = False
             self._thinking_chars = 0
         if self._streaming:
-            self.ui.console.print()
+            if self.streamer is not None:
+                self.streamer.finish()
+                self.streamer = None
             self._streaming = False
 
     async def on_thinking(self, text: str) -> None:
+        self._thinking_chars += len(text)
+        if self.bar is not None:
+            self.bar.update(activity="thinking", detail=f"{self._thinking_chars} chars")
         if not self.ui.show_thinking:
             return
         if self._streaming:
             self._end_stream()
-        if not self._thinking_open:
+        if not self._thinking_open and self.bar is None:
             self.ui.console.print(f"  [{MUTED}]thinking...[/]", end="")
             self._thinking_open = True
-        self._thinking_chars += len(text)
 
     async def on_content(self, text: str) -> None:
+        self.tokens += max(1, len(text) // 4)
         if not self._streaming:
             self._end_stream()
-            self.ui.console.print()
+            self.streamer = CodeStreamer(self.ui)
             self._streaming = True
-        self.ui.stream_chunk(text)
+        if self.bar is not None:
+            self.bar.update(activity="writing", detail="", tokens=self.tokens)
+        self.streamer.feed(text)
 
     async def on_stage(self, name: str, detail: str = "") -> None:
         self._end_stream()
+        if self.bar is not None:
+            self.bar.update(activity=name, detail=detail)
         suffix = f" [{MUTED}]{detail}[/]" if detail else ""
         self.ui.console.print(f"  [{ACCENT}]{self.ui.g.arrow}[/] [{MUTED}]{name}[/]{suffix}")
 
     async def on_tool_start(self, name: str, summary: str) -> None:
         self._end_stream()
+        if self.bar is not None:
+            self.bar.update(activity=_ACTIVITY.get(name, name), detail=summary)
         self.ui.tool_start(name, summary)
 
     async def on_tool_result(self, name: str, ok: bool, display: str, output: str) -> None:
-        self.ui.tool_result(name, ok, display, output)
+        if self.verbose_tools and output.strip():
+            self.ui.tool_result(name, ok, "", "")
+            self.ui.code(output[:4000], _LANGUAGE.get(name, "text"))
+        else:
+            self.ui.tool_result(name, ok, display, output)
 
     async def on_todos(self, rendered: str) -> None:
         self.ui.todos(rendered)
@@ -112,6 +161,9 @@ class TerminalCallbacks(Callbacks):
         self._end_stream()
         if self.prompt_session is None:
             return Decision.ALLOW
+        # The bar owns the bottom of the screen; it must go before a prompt.
+        if self.bar is not None:
+            self.bar.stop()
         self.ui.console.print()
         verb = {
             "write_file": "write to",
@@ -158,6 +210,25 @@ class Repl:
             """Alt-Enter inserts a newline; Enter submits."""
             event.current_buffer.insert_text("\n")
 
+        @bindings.add("c-o")
+        def _(event):
+            """Ctrl-O toggles the thinking display, at the prompt or mid-turn."""
+            self.callbacks.toggle_thinking()
+
+        @bindings.add("c-t")
+        def _(event):
+            """Ctrl-T toggles full tool output."""
+            self.callbacks.toggle_verbose()
+
+        @bindings.add("c-e")
+        def _(event):
+            """Ctrl-E steps the effort level up; Ctrl-D steps it down."""
+            self._shift_effort(1)
+
+        @bindings.add("c-b")
+        def _(event):
+            self._shift_effort(-1)
+
         self.prompt_session: PromptSession = PromptSession(
             history=FileHistory(str(history_file)),
             completer=WordCompleter(list(COMMANDS), sentence=True),
@@ -166,6 +237,7 @@ class Repl:
         )
         self.callbacks = TerminalCallbacks(ui, self.prompt_session)
         self.agent = Agent(self.client, config, self.policy, workspace, self.callbacks)
+        self._effort_changed = False
         self._task: asyncio.Task | None = None
 
     async def _connect(self) -> bool:
@@ -227,8 +299,21 @@ class Repl:
         return await self._loop()
 
     async def turn(self, text: str) -> None:
-        """Run one request, cancellable with Ctrl-C."""
+        """Run one request, with a live status bar and mid-flight keybinds."""
+        self.callbacks.tokens = 0
+        self.callbacks._thinking_chars = 0
+
+        bar = ActivityBar(self.ui, self.policy.name, describe_bindings(LIVE_KEYS))
+        self.callbacks.bar = bar
+
+        watcher = KeyWatcher({
+            "ctrl+o": self.callbacks.toggle_thinking,
+            "ctrl+t": self.callbacks.toggle_verbose,
+        })
+
         self._task = asyncio.ensure_future(self.agent.run(text))
+        bar.start()
+        watcher.start()
         try:
             result = await self._task
         except (asyncio.CancelledError, Interrupted):
@@ -236,6 +321,11 @@ class Repl:
             self.ui.warn("Interrupted. The conversation is intact; ask me something else.")
             return
         finally:
+            # Order matters: the terminal must be restored before anything
+            # tries to read from it again.
+            watcher.stop()
+            bar.stop()
+            self.callbacks.bar = None
             self._task = None
 
         self.callbacks._end_stream()
@@ -260,6 +350,16 @@ class Repl:
         if result.compacted:
             self.ui.info("context was compacted during this turn")
 
+    def _shift_effort(self, delta: int) -> None:
+        """Step the effort level without typing a command."""
+        policy = self.policy.bump(delta)
+        if policy.name == self.policy.name:
+            return
+        self.policy = policy
+        self.config.effort = policy.name
+        self.agent.set_effort(policy)
+        self.ui.info(f"effort: {policy.name} -- {policy.headline}")
+
     def interrupt(self) -> None:
         if self._task and not self._task.done():
             self._task.cancel()
@@ -279,7 +379,17 @@ class Repl:
                 [(c, d) for c, d in COMMANDS.items()],
                 title="commands",
             )
-            self.ui.info("Alt-Enter for a newline, Ctrl-C to interrupt a running turn.")
+            self.ui.table(
+                ["key", "does"],
+                [("Ctrl-O", "show or hide the model's thinking (works mid-answer)"),
+                 ("Ctrl-T", "full tool output vs. one-line summary (mid-answer)"),
+                 ("Ctrl-E", "step effort up"),
+                 ("Ctrl-B", "step effort down"),
+                 ("Ctrl-C", "interrupt the current turn, keep the conversation"),
+                 ("Alt-Enter", "newline instead of submitting"),
+                 ("Up / Down", "history")],
+                title="keys",
+            )
             return True
 
         if name == "/effort":

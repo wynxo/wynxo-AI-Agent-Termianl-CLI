@@ -8,16 +8,17 @@ from wynxo.session import Session, estimate_tokens
 
 class TestNormaliseUrl:
     @pytest.mark.parametrize("raw,expected", [
-        ("localhost", "http://localhost:11434"),
-        ("homelab", "http://homelab:11434"),
-        ("homelab:11434", "http://homelab:11434"),
+        ("127.0.0.1", "http://127.0.0.1:11434"),
         ("192.168.1.50", "http://192.168.1.50:11434"),
+        ("192.168.1.50:11434", "http://192.168.1.50:11434"),
+        ("http://192.168.1.50", "http://192.168.1.50:11434"),
         ("10.0.0.4:8080", "http://10.0.0.4:8080"),
-        ("http://box:11434/api", "http://box:11434"),
-        ("http://box:11434/v1", "http://box:11434"),
-        ("http://box:11434/", "http://box:11434"),
+        ("http://192.168.1.50:11434/api", "http://192.168.1.50:11434"),
+        ("http://192.168.1.50:11434/v1", "http://192.168.1.50:11434"),
+        ("http://192.168.1.50:11434/", "http://192.168.1.50:11434"),
         ("[::1]:11434", "http://[::1]:11434"),
-        ("  localhost  ", "http://localhost:11434"),
+        ("  127.0.0.1  ", "http://127.0.0.1:11434"),
+        ("localhost", "http://localhost:11434"),
     ])
     def test_shapes(self, raw, expected):
         assert normalise_url(raw) == expected
@@ -26,8 +27,8 @@ class TestNormaliseUrl:
         # An https URL means a reverse proxy, not a bare Ollama on 11434.
         assert normalise_url("https://ollama.example.com/v1") == "https://ollama.example.com"
 
-    def test_empty_falls_back_to_local(self):
-        assert normalise_url("") == "http://localhost:11434"
+    def test_empty_falls_back_to_loopback(self):
+        assert normalise_url("") == "http://127.0.0.1:11434"
 
 
 class TestEffort:

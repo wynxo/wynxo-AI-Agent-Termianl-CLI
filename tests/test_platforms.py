@@ -2,7 +2,6 @@
 differs in every path that matters."""
 
 import os
-from pathlib import Path
 
 import pytest
 
