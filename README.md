@@ -31,6 +31,49 @@ wynxo
 
 On first run it asks four questions. The only one that matters is the first.
 
+## No Ollama yet? Try it anyway
+
+A stand-in server ships with the repo. It speaks Ollama's real wire protocol —
+streaming NDJSON, native `tool_calls`, `/api/show` capabilities — but there is
+no model behind it. The agent loop, the tools, the permission prompts, the
+diffs and the effort machinery all run for real, against real files.
+
+```bash
+python scripts/fake_ollama.py &
+wynxo --endpoint localhost:11435 --doctor
+wynxo --endpoint localhost:11435
+```
+
+Point wynxo at a real server whenever you have one; nothing else changes.
+
+## Does it work? Ask it
+
+```bash
+wynxo --doctor
+```
+
+Every assumption wynxo makes about your server and model, checked one at a
+time, with a concrete fix for each failure:
+
+```
+  ✓ server reachable      ollama 0.12.0 at http://homelab:11434
+  ✓ model installed       qwen3-coder:30b  18.6GB  30.5B Q4_K_M
+  ✓ model capabilities    completion, tools, thinking
+  ✓ context window        32768 tokens
+      model's native window: 262144
+  ✓ generation            streamed 14 chunk(s): 'OK. one, two, three...'
+      312 tokens in 8.2s
+      38.0 tok/s (includes model load)
+  ✓ thinking mode         think levels accepted, reasoning returned
+  ✓ tool calling          the model calls tools through Ollama's native tools field
+
+  Everything checks out. You are good to go.
+```
+
+The last check is the one that matters: it sends a real tool definition and
+sees whether the model actually calls it, natively or as Hermes text. A model
+can pass every other check and still be unable to drive an agent loop.
+
 ## Where does Ollama serve?
 
 This is the question everyone answers twice — once for the laptop, once for
@@ -103,14 +146,14 @@ native reasoning budget at all, so a level that only forwarded a
 
 Instead, effort controls how many chances the model gets to be right:
 
-| level    | plan               | tool iters | verify        | plan consensus | thinking |
-|----------|--------------------|-----------:|---------------|---------------:|----------|
-| `low`    | none               |          6 | none          |              1 | off      |
-| `medium` | inline             |         16 | none          |              1 | off      |
-| `high`   | separate pass      |         40 | 1 round       |              1 | on       |
-| `xhigh`  | separate pass      |         80 | 2 rounds      |              1 | on       |
-| `max`    | plan + self-critique |      150 | until clean   |              2 | on       |
-| `ultra`  | plan + self-critique |      400 | until clean   |              3 | on       |
+| level    | plan               | tool iters | verify        | plan consensus | `think` |
+|----------|--------------------|-----------:|---------------|---------------:|---------|
+| `low`    | none               |          6 | none          |              1 | off     |
+| `medium` | inline             |         16 | none          |              1 | off     |
+| `high`   | separate pass      |         40 | 1 round       |              1 | `"medium"` |
+| `xhigh`  | separate pass      |         80 | 2 rounds      |              1 | `"high"` |
+| `max`    | plan + self-critique |      150 | until clean   |              2 | `"max"` |
+| `ultra`  | plan + self-critique |      400 | until clean   |              3 | `"max"` |
 
 At `low` the agent reads what it needs, makes the change and stops. At `max`
 it plans, attacks its own plan, executes, then reviews its own diff as a
@@ -132,8 +175,21 @@ wynxo -e max "refactor the session layer to use the new store"
 /effort xhigh     # change gear mid-conversation
 ```
 
-Where a model *does* have a native dial, effort drives that too — Qwen3's
-thinking mode, and gpt-oss's real `reasoning_effort`.
+### The native dial
+
+Ollama's `think` field takes `"low"`, `"medium"`, `"high"` or `"max"` as well
+as a plain boolean, so on a thinking model the effort level drives the model's
+own reasoning budget too — the right-hand column above.
+
+The mapping is graduated rather than name-matched. By the time you are at
+wynxo's `high` you are already getting a planning pass and a verification
+round, which is more added rigour than the raw thinking dial contributes on
+its own.
+
+Older Ollama builds only understand the boolean. A rejected string level is
+detected and retried once as `think: true`, then remembered, so there is one
+wasted round trip per session rather than one per request. `--doctor` tells
+you which form your server accepts.
 
 ## Models
 
@@ -257,6 +313,7 @@ a yes/no prompt is exactly the thing people click through on autopilot.
 /clear                   fresh conversation
 /compact                 summarise now, reclaim context
 /stats                   tokens, speed, context use, tool mode
+/doctor                  check the server and model for problems
 /yolo                    stop asking permission this session
 /sessions                recent sessions
 /init                    write a WYNXO.md describing this project
@@ -275,6 +332,11 @@ git diff | wynxo -p "review this"
 ```
 
 `-p` implies `--yolo`, since there is nobody there to answer a prompt.
+
+Piped stdin is folded into the prompt as context. wynxo gives up on an idle
+pipe after a moment rather than blocking — starting it with stdin attached to
+a pipe nobody writes to (CI, a supervisor, some editor terminals) would
+otherwise hang with no output at all.
 
 ## Project instructions
 
@@ -303,7 +365,12 @@ pytest
 
 The agent tests run the real loop, real tools and real files against a
 scripted fake Ollama — including malformed tool calls, denied permissions,
-path escapes and iteration ceilings.
+path escapes, iteration ceilings, and older servers that reject string think
+levels.
+
+The wire format is checked against Ollama's own `api/types.go` and
+`docs/api.md` rather than against assumptions. That is how the `tool_name`
+field and the string `think` levels were found; both were wrong here first.
 
 ## License
 

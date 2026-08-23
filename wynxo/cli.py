@@ -5,8 +5,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import select
 import signal
+import stat
 import sys
+import threading
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
@@ -19,6 +22,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from . import __version__
 from .agent import Agent, Callbacks, Interrupted
 from .config import Config, Endpoint, data_dir, is_configured, load, normalise_url
+from .doctor import run_doctor
 from .effort import ORDER, resolve
 from .permissions import Decision
 from .provider import OllamaClient, ProviderError, check_context
@@ -38,6 +42,7 @@ COMMANDS = {
     "/clear": "start a fresh conversation",
     "/compact": "summarise the conversation to reclaim context",
     "/stats": "tokens, speed, context use",
+    "/doctor": "check the server and model for problems",
     "/yolo": "stop asking permission for this session",
     "/sessions": "list recent sessions",
     "/init": "write a WYNXO.md describing this project",
@@ -324,6 +329,11 @@ class Repl:
         if name == "/stats":
             return self.cmd_stats()
 
+        if name == "/doctor":
+            from .doctor import Doctor
+            await Doctor(self.client, self.config, self.ui).run()
+            return True
+
         if name == "/yolo":
             self.agent.permissions.yolo = not self.agent.permissions.yolo
             if self.agent.permissions.yolo:
@@ -527,6 +537,52 @@ class Repl:
         return True
 
 
+def read_piped_stdin(grace: float = 0.25) -> str:
+    """Read piped stdin, or return "" -- but never block waiting for a writer.
+
+    A plain ``sys.stdin.read()`` here hangs forever whenever stdin is an open
+    pipe that nobody writes to, which is the normal state of affairs under CI,
+    process supervisors and editor terminals. The agent then sits there with no
+    output and no explanation, which looks exactly like a crash.
+    """
+    if sys.stdin.isatty():
+        return ""
+
+    try:
+        if stat.S_ISREG(os.fstat(sys.stdin.fileno()).st_mode):
+            # A redirect from a real file always has an EOF coming.
+            return sys.stdin.read().strip()
+    except (OSError, ValueError):
+        return ""
+
+    if hasattr(select, "select"):
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], grace)
+        except (OSError, ValueError):
+            return ""
+        if not ready:
+            return ""
+        try:
+            return sys.stdin.read().strip()
+        except (OSError, UnicodeDecodeError):
+            return ""
+
+    # Windows cannot select on a pipe, so read in a thread we can abandon.
+    # A slow producer may miss the window; redirect from a file to be certain.
+    result: list[str] = []
+
+    def _read() -> None:
+        try:
+            result.append(sys.stdin.read())
+        except (OSError, UnicodeDecodeError, ValueError):
+            pass
+
+    thread = threading.Thread(target=_read, daemon=True)
+    thread.start()
+    thread.join(grace)
+    return result[0].strip() if result else ""
+
+
 async def run_once(config: Config, workspace: Path, ui: UI, prompt: str) -> int:
     """Non-interactive mode: answer one prompt and exit."""
     client = OllamaClient(config)
@@ -570,6 +626,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ctx", type=int, help="context window size (num_ctx)")
     parser.add_argument("-C", "--cwd", help="project directory (default: here)")
     parser.add_argument("--setup", action="store_true", help="re-run first-time setup")
+    parser.add_argument("--doctor", action="store_true",
+                        help="check the server and model, and report what will not work")
     parser.add_argument("--no-stream", action="store_true", help="wait for the full response")
     parser.add_argument("--no-thinking", action="store_true", help="hide model reasoning")
     parser.add_argument("--yolo", action="store_true", help="never ask permission")
@@ -628,21 +686,20 @@ async def amain(argv: list[str] | None = None) -> int:
         config.show_thinking = False
     ui.show_thinking = config.show_thinking
 
+    if args.doctor:
+        return await run_doctor(config, ui)
+
     prompt = " ".join(args.prompt).strip()
 
     # Piped input becomes context for the prompt: `git diff | wynxo -p "review"`.
-    if not sys.stdin.isatty():
-        try:
-            piped = sys.stdin.read().strip()
-        except (OSError, UnicodeDecodeError):
-            piped = ""
-        if piped:
-            prompt = (
-                f"{prompt}\n\n<piped-input>\n{piped}\n</piped-input>"
-                if prompt
-                else f"Here is some input:\n\n<piped-input>\n{piped}\n</piped-input>"
-            )
-            args.print = True  # nothing to be interactive with
+    piped = read_piped_stdin()
+    if piped:
+        prompt = (
+            f"{prompt}\n\n<piped-input>\n{piped}\n</piped-input>"
+            if prompt
+            else f"Here is some input:\n\n<piped-input>\n{piped}\n</piped-input>"
+        )
+        args.print = True  # nothing to be interactive with
 
     if prompt and args.print:
         return await run_once(config, workspace, ui, prompt)
