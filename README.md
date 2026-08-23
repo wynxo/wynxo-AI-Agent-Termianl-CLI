@@ -110,7 +110,7 @@ has, and you pick one.
 ## Contents
 
 1. [Install](#1-install)
-2. [Set up Ollama](#2-set-up-ollama)
+2. [Ollama](#2-ollama)
 3. [First run](#3-first-run)
 4. [Check it works](#4-check-it-works)
 5. [Using it](#5-using-it)
