@@ -47,6 +47,12 @@ LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail"}
 from .platforms import ollama_server_help as server_help, suspicious_workspace
 from .wizard import probe, run_wizard
 
+def _escape(text: str) -> str:
+    """prompt_toolkit's HTML helper parses its input, so a model tag with an
+    angle bracket in it would raise rather than render."""
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
 COMMANDS = {
     "/help": "show this",
     "/effort": "change effort level (low|medium|high|xhigh|max|ultra)",
@@ -122,8 +128,9 @@ class TerminalCallbacks(Callbacks):
 
     async def on_thinking(self, text: str) -> None:
         self._thinking_chars += len(text)
+        self.tokens += 1
         if self.bar is not None:
-            self.bar.update(activity="thinking", detail=f"{self._thinking_chars} chars")
+            self.bar.update(activity="thinking", detail="reasoning", tokens=self.tokens)
         if not self.ui.show_thinking:
             return
         if self._streaming:
@@ -133,7 +140,10 @@ class TerminalCallbacks(Callbacks):
             self._thinking_open = True
 
     async def on_content(self, text: str) -> None:
-        self.tokens += max(1, len(text) // 4)
+        # Ollama streams roughly one token per chunk, so counting chunks gives
+        # a live figure that tracks generation instead of a character estimate
+        # that lurches. The exact count arrives with the final chunk.
+        self.tokens += 1
         if not self._streaming:
             self._end_stream()
             self.streamer = CodeStreamer(self.ui)
@@ -347,7 +357,8 @@ class Repl:
     async def _loop(self) -> int:
         while True:
             try:
-                text = await self.prompt_session.prompt_async(self._prompt_message)
+                text = await self.prompt_session.prompt_async(
+                    self._prompt_message, bottom_toolbar=self._bottom_toolbar)
             except KeyboardInterrupt:
                 continue
             except EOFError:
@@ -380,7 +391,11 @@ class Repl:
         self.callbacks.tokens = 0
         self.callbacks._thinking_chars = 0
 
-        bar = ActivityBar(self.ui, self.policy.name, describe_bindings(LIVE_KEYS))
+        bar = ActivityBar(self.ui, self.policy.name, describe_bindings(LIVE_KEYS),
+                          model=self.config.model)
+        used = self.agent.session.token_estimate()
+        limit = self.policy.context_budget or self.config.num_ctx
+        bar.context_pct = 100 * used / max(1, limit)
         self.callbacks.bar = bar
 
         watcher = KeyWatcher({
@@ -432,6 +447,30 @@ class Repl:
     def _prompt_message(self) -> HTML:
         """Evaluated on every redraw, so Ctrl-E/Ctrl-B show up at once."""
         return HTML(f'<ansicyan><b>{self.policy.name}</b> &gt; </ansicyan>')
+
+    def _bottom_toolbar(self) -> HTML:
+        """The idle half of the pinned bar.
+
+        prompt_toolkit renders this immediately below the input, in the same
+        place the activity bar occupies while a turn runs -- so the strip is
+        there the whole time and only its contents change.
+        """
+        usage = self.agent.session.usage
+        used = self.agent.session.token_estimate()
+        limit = self.policy.context_budget or self.config.num_ctx
+        pieces = [
+            _escape(self.config.model),
+            _escape(self.policy.name),
+            f"ctx {100 * used / max(1, limit):.0f}%",
+        ]
+        if usage.completion_tokens:
+            pieces.append(f"{usage.completion_tokens} tok")
+            if speed := usage.tokens_per_second():
+                pieces.append(f"{speed:.0f} tok/s")
+        if self.agent.permissions.mode is not Mode.MANUAL:
+            pieces.append(_escape(self.agent.permissions.mode.value))
+        body = "  ·  ".join(pieces)
+        return HTML(f" {body}   <b>^O</b> thinking  <b>^T</b> detail  <b>^C</b> stop ")
 
     def _shift_effort(self, delta: int) -> None:
         """Step the effort level without typing a command."""
@@ -1100,7 +1139,12 @@ async def amain(argv: list[str] | None = None) -> int:
         except NotImplementedError:
             pass
 
-    with patch_stdout():
+    # raw=True is load-bearing. patch_stdout routes everything through
+    # prompt_toolkit's Vt100_Output.write, which replaces every ESC byte with
+    # "?" as an escape-injection guard -- turning every colour code from rich
+    # and from the status lines into literal "?[1;32m" garbage on screen.
+    # write_raw passes them through, which is what a terminal UI needs.
+    with patch_stdout(raw=True):
         if prompt:
             return await repl.start_with(prompt)
         return await repl.start()

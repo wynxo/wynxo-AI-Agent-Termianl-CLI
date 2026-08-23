@@ -13,7 +13,7 @@ import sys
 import time
 from typing import Iterable
 
-from rich.console import Console, Control, Group
+from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -26,6 +26,13 @@ from rich.text import Text
 from .platforms import is_narrow, terminal_width
 
 ACCENT = "bright_cyan"
+BAR_STYLE = "on grey23"
+"""The pinned bar's background. A filled strip is what separates a status bar
+from just another line that scrolled past."""
+BAR_ACCENT = "bright_cyan"
+BAR_DIM = "grey62"
+MIN_ACTIVITY_WIDTH = 16
+"""Cells kept for the activity text before the stats start claiming space."""
 MUTED = "grey58"
 GOOD = "green"
 BAD = "red"
@@ -72,37 +79,47 @@ class UI:
     # -- chrome ------------------------------------------------------------
 
     def banner(self, model: str, endpoint: str, effort: str, workspace: str) -> None:
-        rows = [("model", model), ("server", endpoint),
-                ("effort", effort), ("project", workspace)]
+        """A single line of identity, then a rule.
 
-        if self.narrow:
-            # A phone in portrait has no room for a box and two columns.
-            self.console.print()
-            self.console.print(Text("wynxo", style=f"bold {ACCENT}"))
-            for label, value in rows:
-                self.console.print(Text(f"{label} ", style=MUTED) + Text(str(value)))
-            self.console.print(Text("/help  ^O thinking  ^C stop", style=MUTED))
-            self.console.print()
-            return
+        Assembled by priority rather than truncated: on a narrow terminal the
+        server address goes before the project path does, because the path is
+        the one you actually need to see.
+        """
+        server = endpoint.split(" (")[0].replace("http://", "").replace("https://", "")
+        parts = [model, effort, self.shorten_path(workspace), server]
 
-        title = Text()
-        title.append("wynxo", style=f"bold {ACCENT}")
-        title.append("  a local coding agent", style=MUTED)
+        separator = f"  {self.g.dot}  "
+        budget = self.width - 10
+        shown: list[str] = []
+        for part in parts:
+            candidate = shown + [part]
+            if len(separator.join(candidate)) > budget:
+                continue
+            shown = candidate
 
-        table = Table.grid(padding=(0, 2))
-        table.add_column(style=MUTED)
-        table.add_column()
-        for label, value in rows:
-            style = "bold" if label == "model" else (f"bold {ACCENT}" if label == "effort" else "")
-            table.add_row(label, Text(str(value), style=style))
+        head = Text()
+        head.append("  wynxo", style=f"bold {ACCENT}")
+        for i, part in enumerate(shown):
+            head.append(separator, style=MUTED)
+            head.append(part, style="bold" if i == 0 else "")
 
         self.console.print()
-        self.console.print(Panel(Group(title, "", table), border_style=ACCENT, padding=(1, 2)))
-        self.console.print(
-            Text("  /help for commands  ·  ^O thinking  ^T detail  ^E/^B effort  ^C stop",
-                 style=MUTED)
-        )
-        self.console.print()
+        self.console.print(head, overflow="ellipsis", no_wrap=True)
+        self.console.print(Rule(style=MUTED, characters="\u2500"))
+
+    def shorten_path(self, path: str) -> str:
+        """~/code/proj rather than /home/you/code/proj, and never the full
+        thing when it would push everything else off the line."""
+        import os
+
+        home = os.path.expanduser("~")
+        if path.startswith(home):
+            path = "~" + path[len(home):]
+        budget = max(18, self.width // 3)
+        if len(path) <= budget:
+            return path
+        parts = path.replace("\\", "/").split("/")
+        return ".../" + "/".join(parts[-2:]) if len(parts) > 2 else path[-budget:]
 
     def rule(self, label: str = "") -> None:
         self.console.print(Rule(label, style=MUTED))
@@ -206,6 +223,40 @@ class UI:
     def code(self, text: str, language: str = "text") -> None:
         self.console.print(Syntax(text, language, theme=self.code_theme, word_wrap=True))
 
+    def code_line(self, line: str, language: str = "text") -> None:
+        """One highlighted line, indented, with no block chrome.
+
+        Syntax() would draw its own background band per line and stack into a
+        ragged column, so the lexer is used directly instead.
+        """
+        try:
+            rendered = Text.from_ansi(line) if "\x1b" in line else Text(line)
+            if language not in ("text", ""):
+                from rich.syntax import Syntax as _S
+
+                lexer = _S.get_lexer(_S("", language), line)
+                rendered = Text()
+                for token, value in lexer.get_tokens(line):
+                    if value.endswith("\n"):
+                        value = value[:-1]
+                    if value:
+                        rendered.append(value, style=self._token_style(token))
+        except Exception:
+            rendered = Text(line)
+        self.console.print(Text("  ") + rendered, highlight=False)
+
+    def _token_style(self, token) -> str:
+        from pygments.token import (Comment, Error, Keyword, Name, Number,
+                                    Operator, String)
+
+        for kind, style in ((Comment, MUTED), (String, "green"), (Number, "cyan"),
+                            (Keyword, "magenta"), (Name.Function, "bright_blue"),
+                            (Name.Class, "bright_blue"), (Operator, "bright_white"),
+                            (Error, BAD)):
+            if token in kind:
+                return style
+        return ""
+
     # -- transient ---------------------------------------------------------
 
     def status(self, message: str) -> Status:
@@ -256,21 +307,23 @@ class UI:
 class CodeStreamer:
     """Renders streamed assistant text, highlighting code as it arrives.
 
-    A model writes prose, then a fenced code block, then more prose. Waiting
-    for the whole turn before rendering loses the point of streaming; naively
-    printing raw text loses the highlighting. This does both: prose goes out
-    immediately, and a fenced block is buffered only until its closing fence,
-    then reprinted in place with syntax highlighting.
+    Each code line is syntax-highlighted and printed once, as soon as it is
+    complete. An earlier version printed a dim preview and then rewound the
+    cursor to replace it with a highlighted block, which crashed outright on
+    rich 15 (no ``Control.clear_lines``) and was fragile regardless: cursor
+    arithmetic goes wrong the moment a line wraps, the block scrolls, or the
+    pinned status bar redraws underneath it.
+
+    Printing each line once, already highlighted, has none of those failure
+    modes and looks the same -- code appearing a line at a time, in colour.
     """
 
     def __init__(self, ui: "UI"):
         self.ui = ui
         self.buffer = ""
         self.in_code = False
-        self.language = ""
-        self.code_lines: list[str] = []
+        self.language = "text"
         self.started = False
-        self._code_line_count = 0
 
     def feed(self, text: str) -> None:
         self.buffer += text
@@ -281,123 +334,156 @@ class CodeStreamer:
     def _line(self, line: str) -> None:
         fence = line.lstrip().startswith("```")
 
-        if not self.in_code and fence:
-            self.in_code = True
-            self.language = line.lstrip()[3:].strip() or "text"
-            self.code_lines = []
-            self._code_line_count = 0
-            self._ensure_started()
-            return
-
-        if self.in_code and fence:
-            self.in_code = False
-            self._flush_code()
-            return
-
-        if self.in_code:
-            self.code_lines.append(line)
-            # Show it arriving, dimmed, so the wait is not a blank screen.
-            # Only on a real terminal: without cursor movement the preview
-            # cannot be replaced later and would simply duplicate the block.
-            if self.ui.console.is_terminal:
-                self._code_line_count += 1
-                self.ui.console.print(Text(f"  {line}", style=MUTED), highlight=False)
+        if fence:
+            if self.in_code:
+                self.in_code = False
+            else:
+                self.in_code = True
+                self.language = _language(line.lstrip()[3:].strip())
+                self._ensure_started()
             return
 
         self._ensure_started()
-        self.ui.console.print(line, markup=False, highlight=False)
+        if self.in_code:
+            self.ui.code_line(line, self.language)
+        else:
+            self.ui.console.print(line, markup=False, highlight=False)
 
     def _ensure_started(self) -> None:
         if not self.started:
             self.ui.console.print()
             self.started = True
 
-    def _flush_code(self) -> None:
-        """Replace the dimmed preview with the highlighted block."""
-        if not self.code_lines:
-            return
-        # Move back over the preview lines and overwrite them.
-        if self._code_line_count and self.ui.console.is_terminal:
-            self.ui.console.control(Control.move(0, -self._code_line_count))
-            self.ui.console.control(Control.clear_lines(self._code_line_count))
-        self.ui.code("\n".join(self.code_lines), self.language)
-        self.code_lines = []
-        self._code_line_count = 0
-
     def finish(self) -> str:
-        """Flush anything left. Returns nothing; output has already gone out."""
+        """Flush a trailing partial line. Output has already gone out."""
         if self.buffer:
             self._line(self.buffer)
             self.buffer = ""
-        if self.in_code:
-            self.in_code = False
-            self._flush_code()
+        self.in_code = False
         if self.started:
             self.ui.console.print()
         return ""
 
 
-class ActivityBar:
-    """A live status line: what is happening now, and what keys do.
+def _language(tag: str) -> str:
+    """Normalise a fence tag to something pygments knows."""
+    tag = (tag or "text").split()[0].lower() if tag else "text"
+    return {"sh": "bash", "shell": "bash", "console": "bash", "py": "python",
+            "js": "javascript", "ts": "typescript", "yml": "yaml",
+            "": "text"}.get(tag, tag)
 
-    Runs as a rich Live region at the bottom of the screen while a turn is in
-    flight. Everything else prints above it.
+
+class ActivityBar:
+    """The pinned bar: what is happening, and the tokens as they arrive.
+
+    It holds the bottom line while output scrolls above it, and is styled to
+    match the prompt's toolbar so the two read as one continuous strip -- the
+    bar is there while you type, and stays there while the answer streams.
     """
 
-    def __init__(self, ui: "UI", effort: str, hint: str = ""):
+    SPINNER = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
+    SPINNER_ASCII = "|/-\\"
+
+    def __init__(self, ui: "UI", effort: str, hint: str = "", model: str = ""):
         self.ui = ui
         self.effort = effort
         self.hint = hint
+        self.model = model
         self.activity = "thinking"
         self.detail = ""
         self.tokens = 0
+        self.context_pct = 0.0
         self.started = time.monotonic()
         self._live: Live | None = None
         self._frame = 0
 
-    SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    SPINNER_ASCII = "|/-\\"
+    # -- content -----------------------------------------------------------
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+    def rate(self) -> float:
+        seconds = self.elapsed()
+        return self.tokens / seconds if seconds > 0.4 and self.tokens else 0.0
+
+    def _segments(self) -> list[tuple[str, str]]:
+        """(text, style) pairs, most important first, for a fit-aware build."""
+        out: list[tuple[str, str]] = []
+        if self.tokens:
+            out.append((f"{self.tokens} tok", "bold"))
+        if rate := self.rate():
+            out.append((f"{rate:.0f} tok/s", ""))
+        out.append((f"{self.elapsed():.0f}s", ""))
+        out.append((self.effort, ""))
+        if self.context_pct:
+            out.append((f"ctx {self.context_pct:.0f}%", ""))
+        return out
 
     def _render(self) -> Text:
         self._frame += 1
         frames = self.SPINNER if self.ui.g.unicode else self.SPINNER_ASCII
         spin = frames[self._frame % len(frames)]
-        elapsed = time.monotonic() - self.started
+        width = max(20, self.ui.width)
 
-        line = Text()
-        line.append(f"  {spin} ", style=ACCENT)
-        line.append(self.activity, style=f"bold {ACCENT}")
+        left = Text(style=BAR_STYLE)
+        left.append(f" {spin} ", style=f"bold {BAR_ACCENT}")
+        left.append(self.activity, style="bold")
         if self.detail:
-            line.append(f"  {self.detail[:60]}", style="")
+            left.append("  ")
+            left.append(self.detail, style=BAR_DIM)
 
-        stats = [f"{elapsed:.0f}s"]
-        if self.tokens:
-            stats.append(f"{self.tokens} tok")
-            if elapsed > 0.5:
-                stats.append(f"{self.tokens / elapsed:.0f} tok/s")
-        stats.append(self.effort)
-        line.append(f"   {' · '.join(stats)}", style=MUTED)
-        if self.hint and not self.ui.narrow:
-            line.append(f"   {self.hint}", style=MUTED)
-        return line
+        # The stats claim their space before the activity text does. The token
+        # counter is the point of this bar, so a long file path must lose its
+        # tail rather than push the numbers off the end.
+        candidates = self._segments()
+        if self.hint:
+            candidates.append((self.hint, BAR_DIM))
+        stats_budget = max(0, width - MIN_ACTIVITY_WIDTH)
+
+        stats = Text(style=BAR_STYLE)
+        for text, style in candidates:
+            piece = Text(style=BAR_STYLE)
+            if stats.cell_len:
+                piece.append(f"  {self.ui.g.dot}  ", style=BAR_DIM)
+            piece.append(text, style=style)
+            if stats.cell_len + piece.cell_len + 1 > stats_budget:
+                break
+            stats.append_text(piece)
+        stats.append(" ")
+
+        room = width - stats.cell_len
+        if left.cell_len > room:
+            left.truncate(max(1, room - 1), overflow="ellipsis")
+        left.append(" " * max(1, room - left.cell_len))
+        left.append_text(stats)
+        return left
+
+    # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
         if not self.ui.console.is_terminal:
             return
         self._live = Live(self._render(), console=self.ui.console,
-                          refresh_per_second=8, transient=True)
+                          refresh_per_second=12, transient=True)
         self._live.start()
 
     def update(self, activity: str | None = None, detail: str | None = None,
-               tokens: int | None = None) -> None:
+               tokens: int | None = None, context_pct: float | None = None) -> None:
         if activity is not None:
             self.activity = activity
         if detail is not None:
             self.detail = detail
         if tokens is not None:
             self.tokens = tokens
-        if self._live is not None:
-            self._live.update(self._render())
+        if context_pct is not None:
+            self.context_pct = context_pct
+        self.refresh()
+
+    def add_token(self, count: int = 1) -> None:
+        """One streamed chunk is one token, near enough, for a live counter.
+        The exact figure arrives with the final chunk and replaces it."""
+        self.tokens += count
+        self.refresh()
 
     def refresh(self) -> None:
         if self._live is not None:

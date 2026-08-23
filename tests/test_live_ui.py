@@ -54,11 +54,46 @@ class TestActivityBar:
         assert "120 tok" in text
         assert "high" in text
 
-    def test_hint_is_dropped_on_a_narrow_screen(self, monkeypatch):
+    def test_hint_is_dropped_on_a_narrow_screen(self):
         ui = UI()
-        ui.narrow = True
+        ui.width = 46
         bar = ActivityBar(ui, "low", "^O thinking  ^T detail")
+        bar.update(tokens=812)
         assert "^O thinking" not in bar._render().plain
+
+    def test_tokens_survive_when_space_is_tight(self):
+        """Live tokens are the point of the bar; they go last, not first."""
+        ui = UI()
+        ui.width = 46
+        bar = ActivityBar(ui, "low", "^O thinking  ^T detail")
+        bar.update(activity="editing", detail="src/a.py", tokens=812)
+        assert "812 tok" in bar._render().plain
+
+    def test_bar_fills_the_width(self):
+        """A filled strip is what makes it read as pinned rather than as a
+        line that scrolled past."""
+        ui = UI()
+        ui.width = 80
+        bar = ActivityBar(ui, "medium")
+        bar.update(tokens=100)
+        assert bar._render().cell_len == 80
+
+    def test_left_side_is_truncated_not_the_stats(self):
+        ui = UI()
+        ui.width = 50
+        bar = ActivityBar(ui, "medium")
+        bar.update(activity="editing", detail="a/very/long/path/that/keeps/going.py",
+                   tokens=999)
+        rendered = bar._render().plain
+        assert "999 tok" in rendered
+        assert rendered.rstrip().endswith(("tok", "s", "%", "medium", "tok/s"))
+
+    def test_rate_is_not_reported_before_it_is_meaningful(self):
+        bar = ActivityBar(UI(), "low")
+        bar.tokens = 5
+        assert bar.rate() == 0.0     # too early to divide by
+        bar.started -= 10
+        assert bar.rate() > 0
 
     def test_start_stop_without_a_terminal_is_safe(self):
         bar = ActivityBar(UI(), "low")
