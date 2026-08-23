@@ -8,13 +8,14 @@ what it finds, and remembers every server it has seen.
 
 from __future__ import annotations
 
+import contextlib
+
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.formatted_text import HTML
 
 from .config import (
     DEFAULT_CONTEXT,
-    DEFAULT_MODEL,
     Config,
     Endpoint,
     MIN_USABLE_CONTEXT,
@@ -23,7 +24,9 @@ from .config import (
 from .effort import ORDER, resolve
 from .discovery import Found, private_subnets, scan_loopback, scan_subnets, verify
 from .platforms import ollama_server_help as server_help  # re-exported
-from .provider import OllamaClient, ProviderError
+from .provider import OllamaClient, ProviderError, inspect_all
+from rich.text import Text
+
 from .ui import ACCENT, MUTED, UI
 
 # Models worth recommending, best first, with why.
@@ -163,79 +166,175 @@ async def ask_endpoint(ui: UI, prompt_session: PromptSession) -> Endpoint:
     return Endpoint(name=name, url=url, api_key=api_key)
 
 
-async def ask_model(ui: UI, prompt_session: PromptSession, config: Config) -> str:
-    """Pick a model from what the server actually has installed."""
+@contextlib.asynccontextmanager
+async def _client_for(config: Config, client: OllamaClient | None):
+    """Reuse a caller's client, or open one and close it again.
+
+    Each wizard step opening its own connection was wasteful, and made the
+    steps impossible to drive against a stub.
+    """
+    if client is not None:
+        yield client
+        return
+    owned = OllamaClient(config)
+    try:
+        yield owned
+    finally:
+        await owned.aclose()
+
+
+def _badge(model) -> tuple[str, str]:
+    """(text, style) for what this model can do. Short: it must always fit."""
+    if not model.capabilities_known:
+        return "unknown", MUTED
+    if not model.supports_tools:
+        return "no tools", "yellow"
+    return ("tools + think", "green") if model.supports_thinking else ("tools", "green")
+
+
+def _print_model_rows(ui: UI, models: list) -> None:
+    """One line per model, never wrapped.
+
+    The name and what it can do always survive; the size and quantisation are
+    trimmed away first, because a wrapped row turns the list into a wall.
+    """
+    badge_width = max(len(_badge(m)[0]) for m in models)
+    # "    NN  " is 8 cells, then name, two spaces, badge.
+    overhead = 8 + 2 + badge_width
+    # A very long name must not squeeze the badge off the line: the badge is
+    # the column that decides whether a model is usable at all.
+    name_width = min(max(len(m.name) for m in models),
+                     max(12, ui.width - overhead - 2))
+    room = ui.width - overhead - name_width - 2
+    if room < 6:
+        room = 0        # no space for details worth showing
+
+    for i, model in enumerate(models, 1):
+        facts = [model.human_size(), model.parameter_size,
+                 _humanise_context(model.context_length), model.quantization]
+        detail = ""
+        for fact in facts:
+            if not fact:
+                continue
+            candidate = f"{detail}  {fact}" if detail else fact
+            if len(candidate) > room:
+                break
+            detail = candidate
+
+        name = model.name
+        if len(name) > name_width:
+            name = name[: name_width - 1] + "\u2026"
+
+        badge, style = _badge(model)
+        line = Text("    ")
+        line.append(f"{i:2}", style="bold")
+        line.append("  ")
+        line.append(name.ljust(name_width))
+        line.append("  ")
+        line.append(badge.ljust(badge_width), style=style)
+        if detail:
+            line.append("  ")
+            line.append(detail, style=MUTED)
+        ui.console.print(line, no_wrap=True, overflow="ellipsis")
+
+
+def _humanise_context(tokens: int) -> str:
+    if not tokens:
+        return ""
+    if tokens >= 1000:
+        return f"{tokens // 1024}k ctx"
+    return f"{tokens} ctx"
+
+
+async def ask_model(ui: UI, prompt_session: PromptSession, config: Config,
+                    client: OllamaClient | None = None) -> str:
+    """Pick from what the server actually has.
+
+    No recommendations and no downloads: the server is the source of truth,
+    and it changes without asking us. What the picker does add is whether each
+    model can call tools -- the one property that decides whether it can drive
+    an agent at all, and the one you cannot tell from the name.
+    """
     ui.console.print()
     ui.console.print(f"[bold {ACCENT}]Which model?[/]")
 
-    installed = []
-    async with OllamaClient(config) as client:
+    installed: list = []
+    async with _client_for(config, client) as session_client:
         try:
             with ui.status("asking the server what it has..."):
-                installed = await client.list_models()
+                installed = await session_client.list_models()
         except ProviderError as exc:
             ui.warn(str(exc))
+        if installed:
+            with ui.status(f"checking what {len(installed)} model(s) can do..."):
+                installed = await inspect_all(session_client, installed)
 
-    if installed:
-        ui.console.print()
-        ui.console.print(f"  [{MUTED}]Installed on that server:[/]")
-        for i, model in enumerate(installed, 1):
-            # Exact tag only. Prefix matching described qwen3.5:0.8b as a
-            # "Dense 32B" because it starts with "qwen3", which is worse than
-            # saying nothing: a wrong blurb is read as fact.
-            note = ""
-            if why := describe_model(model.name):
-                note = f"  [{MUTED}]{why}[/]"
-            size = f"[{MUTED}]{model.human_size()}[/]"
-            ui.console.print(f"    [bold]{i:2}[/]  {model.name:32} {size}{note}")
-        ui.console.print(f"    [bold] p[/]  [{MUTED}]pull a model that is not listed[/]")
-        ui.console.print()
+    if not installed:
+        return await _no_models(ui, prompt_session, config)
 
-        names = [m.name for m in installed]
-        default_index = next(
-            (i for i, n in enumerate(names, 1) if n.startswith("qwen3-coder")), 1
-        )
+    # Tool-capable models first: those are the ones that can actually work.
+    def sort_key(model):
+        return (not model.supports_tools, model.name)
 
-        while True:
-            answer = (await prompt_session.prompt_async(
-                HTML(f'<ansicyan>  choose [1-{len(names)} or p, default {default_index}]: </ansicyan>')
-            )).strip().lower()
-            if answer == "":
-                return names[default_index - 1]
-            if answer == "p":
-                break
-            if answer.isdigit() and 1 <= int(answer) <= len(names):
-                return names[int(answer) - 1]
-            if answer in names:
-                return answer
-            ui.warn("Pick a number from the list, or p to pull something new.")
+    installed.sort(key=sort_key)
+    usable = [m for m in installed if m.supports_tools]
 
-    # Nothing installed, or the user chose to pull.
     ui.console.print()
-    ui.console.print(f"  [{MUTED}]Worth pulling, best first:[/]")
-    for name, why in RECOMMENDED:
-        ui.console.print(f"    [bold]{name:20}[/] [{MUTED}]{why}[/]")
+    _print_model_rows(ui, installed)
+
+    ui.console.print()
+    if not usable:
+        ui.warn("None of these advertise tool calling.")
+        ui.console.print(
+            f"  [{MUTED}]wynxo will fall back to Hermes-style prompted tool calls, "
+            f"which often work but\n  are less reliable. A tool-tuned model "
+            f"(qwen3-coder, devstral) is a large upgrade.[/]")
+        ui.console.print()
+    elif len(usable) < len(installed):
+        ui.console.print(
+            f"  [{MUTED}]Models marked 'no tool calling' cannot drive the agent "
+            f"reliably.[/]")
+        ui.console.print()
+
+    names = [m.name for m in installed]
+    default_index = 1 if usable else 1
+
+    while True:
+        answer = (await prompt_session.prompt_async(
+            HTML(f'<ansicyan>  choose [1-{len(names)}, default {default_index}]: </ansicyan>')
+        )).strip()
+        if answer == "":
+            return names[default_index - 1]
+        if answer.isdigit() and 1 <= int(answer) <= len(names):
+            return names[int(answer) - 1]
+        if answer in names:
+            return answer
+        matches = [n for n in names if n.startswith(answer)]
+        if len(matches) == 1:
+            return matches[0]
+        ui.warn(f"Pick a number from 1 to {len(names)}, or type a model name.")
+
+
+async def _no_models(ui: UI, prompt_session: PromptSession, config: Config) -> str:
+    """The server answered but has nothing installed."""
+    ui.console.print()
+    ui.warn("That server has no models installed.")
+    ui.console.print()
+    ui.console.print(f"  [{MUTED}]Pull one there, then come back. Any of these work "
+                     f"well for coding:[/]")
+    for name, why in RECOMMENDED[:4]:
+        ui.console.print(f"    [bold]ollama pull {name}[/]  [{MUTED}]{why}[/]")
     ui.console.print()
 
     completer = WordCompleter([name for name, _ in RECOMMENDED])
-    model = (await prompt_session.prompt_async(
-        HTML(f'<ansicyan>  model [{DEFAULT_MODEL}]: </ansicyan>'), completer=completer
-    )).strip() or DEFAULT_MODEL
-
-    pull = (await prompt_session.prompt_async(
-        HTML(f'<ansicyan>  pull {model} now? [Y/n]: </ansicyan>')
-    )).strip().lower()
-    if pull not in ("n", "no"):
-        config.model = model
-        async with OllamaClient(config) as client:
-            try:
-                with ui.status(f"pulling {model} ...") as status:
-                    async for line in client.pull(model):
-                        status.update(f"pulling {model}: {line}")
-                ui.success(f"pulled {model}")
-            except ProviderError as exc:
-                ui.warn(f"{exc}\nYou can pull it later with: ollama pull {model}")
-    return model
+    answer = (await prompt_session.prompt_async(
+        HTML('<ansicyan>  model name to use once pulled [blank to cancel]: </ansicyan>'),
+        completer=completer,
+    )).strip()
+    if not answer:
+        raise SystemExit(
+            "No model selected. Pull one with `ollama pull <name>`, then run wynxo again.")
+    return answer
 
 
 async def ask_effort(ui: UI, prompt_session: PromptSession) -> str:
@@ -262,7 +361,8 @@ async def ask_effort(ui: UI, prompt_session: PromptSession) -> str:
             ui.warn(f"Choose one of: {', '.join(ORDER)}")
 
 
-async def ask_context(ui: UI, prompt_session: PromptSession, config: Config) -> int:
+async def ask_context(ui: UI, prompt_session: PromptSession, config: Config,
+                      client: OllamaClient | None = None) -> int:
     """Set num_ctx, with the warning that this deserves."""
     ui.console.print()
     ui.console.print(f"[bold {ACCENT}]Context window[/]")
@@ -275,9 +375,9 @@ async def ask_context(ui: UI, prompt_session: PromptSession, config: Config) -> 
     ui.console.print()
 
     native = 0
-    async with OllamaClient(config) as client:
+    async with _client_for(config, client) as session_client:
         try:
-            info = await client.show(config.model)
+            info = await session_client.show(config.model)
             native = info.context_length
         except ProviderError:
             pass
@@ -318,9 +418,10 @@ async def run_wizard(ui: UI) -> Config:
     config.endpoints = [endpoint]
     config.active_endpoint = endpoint.name
 
-    config.model = await ask_model(ui, prompt_session, config)
-    config.effort = await ask_effort(ui, prompt_session)
-    config.num_ctx = await ask_context(ui, prompt_session, config)
+    async with OllamaClient(config) as client:
+        config.model = await ask_model(ui, prompt_session, config, client)
+        config.effort = await ask_effort(ui, prompt_session)
+        config.num_ctx = await ask_context(ui, prompt_session, config, client)
 
     path = config.save()
     ui.console.print()

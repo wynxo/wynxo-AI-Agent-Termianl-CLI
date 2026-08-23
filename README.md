@@ -42,10 +42,19 @@ high > add a retry to the upload path
 
 ## Quick start
 
-One command. It installs everything, gets Ollama running, pulls a model that
-fits your machine, and checks it all works.
+Two things, in this order.
 
-**Windows** — in Command Prompt or PowerShell:
+**1. Have Ollama running with a model.** wynxo does not install Ollama and
+does not download models — that is yours to choose.
+
+```bash
+ollama serve                      # if it is not already running
+ollama pull qwen3-coder:30b       # any tool-capable model
+```
+
+**2. Install the agent.**
+
+Windows — Command Prompt or PowerShell:
 
 ```
 git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
@@ -53,7 +62,7 @@ cd wynxo-AI-Agent-Termianl-CLI
 install.bat
 ```
 
-**Linux, macOS, Termux**:
+Linux, macOS, Termux:
 
 ```bash
 git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
@@ -65,7 +74,7 @@ Copy the block for your system. `./install.sh` is not a command Windows
 understands, and `install.bat` is not one Linux understands.
 
 ```
-  wynxo setup
+  wynxo
   A local AI coding agent. Nothing leaves your machine.
 
   1. Checking Python
@@ -79,45 +88,22 @@ understands, and `install.bat` is not one Linux understands.
   4. Making `wynxo` available everywhere
      OK  installed ~/.local/bin/wynxo
      OK  added to your PATH
-  5. Setting up Ollama
-     OK  Ollama 0.12.0 is serving
-  6. Getting a model
-         this machine has about 32GB of memory
-     Recommended: qwen3-coder:30b -- 30B MoE, tool-tuned. The one to want.
-     Pull qwen3-coder:30b now? (a few GB, takes a while) [Y/n]
-  7. Checking everything works
-     ...
-  Done. Everything checks out.
+
+  wynxo is installed.
 ```
 
-Every run reports what it loaded:
+That is the whole installer. It touches Python, a virtualenv, and your PATH —
+nothing else. `--yes` accepts every prompt, `--no-link` skips the PATH command.
 
-```
-[  OK  ] ollama 0.12.0 http://127.0.0.1:11434
-[  OK  ] qwen3-coder:30b completion, tools, thinking
-[  OK  ] context 32768
-[  OK  ] 10 tools native
-[  OK  ] scope folder /home/you/code/myproject
-[  OK  ] mode manual asks before every write and command
-[  OK  ] memory 4 project, 2 user
-```
-
-Then open a **new** terminal and run:
+Then open a **new** terminal, go to your project, and run it:
 
 ```bash
+cd ~/code/myproject
 wynxo
 ```
 
-The installer puts a `wynxo` command on your PATH and offers to add that
-directory to PATH for you, so that is all there is to it. The new terminal
-matters: PATH changes only apply to terminals opened afterwards.
-
-About five minutes, most of it the model download. `--yes` accepts every
-recommendation, `--no-ollama` installs only wynxo, `--no-link` skips the PATH
-command entirely.
-
-Nothing that touches the network or writes outside the repo happens without
-asking you first.
+On first run it asks where Ollama is, lists the models that server actually
+has, and you pick one.
 
 ---
 
@@ -183,7 +169,7 @@ so tell it PowerShell syntax when you ask it to run something.
 pkg update && pkg install python git
 git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
 cd wynxo-AI-Agent-Termianl-CLI
-./install.sh --no-ollama
+./install.sh
 ```
 
 That is the whole thing — **no `pkg install rust`, no build step.** Most
@@ -199,8 +185,8 @@ stacked layout on narrow screens instead of tables that would wrap into
 confetti.
 
 > Running a 30B model *on the phone itself* is not realistic. The normal
-> setup is Ollama on a desktop or homelab box and wynxo in Termux talking to
-> it over Wi-Fi. See [step 2](#2-set-up-ollama).
+> setup is Ollama on a desktop or a box in the house, with wynxo in Termux
+> talking to it over Wi-Fi. See [Ollama](#2-ollama).
 
 ### Check the install
 
@@ -213,10 +199,10 @@ If `wynxo` is not found, your Python scripts directory is not on `PATH`. Use
 
 ---
 
-## 2. Set up Ollama
+## 2. Ollama
 
-wynxo does not run models; Ollama does. You need Ollama running somewhere
-wynxo can reach.
+wynxo does not run models; Ollama does. wynxo never installs it, never starts
+it, and never downloads a model — your server, your models, your choice.
 
 ### Install Ollama
 
@@ -227,23 +213,18 @@ wynxo can reach.
 
 ### Pull a model
 
+Anything you like. The one property that matters is **tool calling** — a model
+that will not reliably emit a tool call cannot drive an agent, however good its
+prose is. wynxo shows you which of your models can, so you do not have to guess.
+
+Known-good for coding:
+
 ```bash
-ollama pull qwen3-coder:30b
+ollama pull qwen3-coder:30b     # 30B MoE, ~3B active. Tool-tuned, fast.
+ollama pull devstral:24b        # built for agent loops
+ollama pull qwen3:14b           # fits a 12GB card
+ollama pull qwen3:8b            # runs on almost anything
 ```
-
-| model | size | why |
-|---|---|---|
-| `qwen3-coder:30b` | ~18GB | 30B MoE, ~3B active. Tool-tuned, fast. **Start here.** |
-| `qwen3:32b` | ~20GB | Dense 32B. Stronger reasoning, noticeably slower. |
-| `qwen3:30b-a3b` | ~18GB | General-purpose MoE. Good for chat as well as code. |
-| `devstral:24b` | ~14GB | Built for agent loops. Excellent tool discipline. |
-| `gpt-oss:20b` | ~13GB | Has a true native reasoning dial. |
-| `qwen3:14b` | ~9GB | Fits comfortably in 12GB VRAM. |
-| `qwen3:8b` | ~5GB | Runs on almost anything, CPU included. |
-
-The one property that matters is **tool calling**. A model that will not
-reliably emit a tool call cannot drive an agent loop, however good its prose
-is. Step 4 checks this directly.
 
 ### If Ollama is on another machine
 
@@ -318,8 +299,25 @@ This machine:   127.0.0.1
 Another box:    192.168.1.50      (or 192.168.1.50:11434)
 ```
 
-**Which model?** It lists what that server actually has, so there is nothing
-to remember or spell correctly. It can pull one for you if the list is empty.
+**Which model?** It asks the server what it has, then asks the server what
+each one can *do*, and shows you both:
+
+```
+Which model?
+
+     1  qwen3-coder:30b       tools          18.6GB  30.5B  256k ctx  Q4_K_M
+     2  qwen3.8:27b           tools + think  17.7GB  27.2B  128k ctx  Q4_K_M
+     3  gemma4:latest         no tools       9.6GB   12.2B  8k ctx    Q4_K_M
+     4  qwen3.5:0.8b          no tools       1.0GB   0.8B   32k ctx   Q4_K_M
+
+  Models marked 'no tool calling' cannot drive the agent reliably.
+
+  choose [1-4, default 1]:
+```
+
+Tool-capable models sort first. Nothing is recommended and nothing is
+downloaded — the list is your server's, and it stays right as your models
+change. Pick by number, by name, or by any unambiguous prefix.
 
 **Default effort level?** `medium` is the right answer to start.
 See [section 6](#6-effort-levels).
@@ -817,7 +815,7 @@ requires auth; it is sent as `Authorization: Bearer …`.
 
 Is `ollama serve` running there? If it is on another machine, it must be
 started with `OLLAMA_HOST=0.0.0.0:11434` — see
-[step 2](#if-ollama-is-on-another-machine). Check the firewall allows 11434.
+[Ollama](#if-ollama-is-on-another-machine). Check the firewall allows 11434.
 From Termux, confirm the phone is on Wi-Fi and not mobile data.
 
 ```bash
@@ -964,7 +962,7 @@ a backup. Commit early if the work matters.
 ### The network scan found nothing
 
 The other machine must be running Ollama with `OLLAMA_HOST=0.0.0.0:11434` —
-see [step 2](#if-ollama-is-on-another-machine). Both devices must be on the
+see [Ollama](#if-ollama-is-on-another-machine). Both devices must be on the
 same network; from a phone that means Wi-Fi, not mobile data. Some networks
 (guest Wi-Fi, and most corporate ones) block device-to-device traffic
 entirely, in which case no scan will ever find it. You can always type the

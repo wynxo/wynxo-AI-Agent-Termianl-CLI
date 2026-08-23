@@ -350,6 +350,32 @@ class OllamaClient:
         return f"Ollama returned {status}: {text}"
 
 
+async def inspect_all(client: "OllamaClient", models: list[ModelInfo],
+                      timeout: float = 20.0) -> list[ModelInfo]:
+    """Fill in capabilities and context length for every model, concurrently.
+
+    A server with a dozen models would take a dozen round trips in sequence.
+    Failures are left as-is rather than raised: an unknown capability is a
+    blank column, not a reason to fail the whole picker.
+    """
+    import asyncio
+
+    async def one(model: ModelInfo) -> ModelInfo:
+        try:
+            detail = await asyncio.wait_for(client.show(model.name), timeout=timeout)
+        except (ProviderError, asyncio.TimeoutError):
+            return model
+        model.capabilities = detail.capabilities
+        model.context_length = detail.context_length
+        if detail.parameter_size:
+            model.parameter_size = detail.parameter_size
+        if detail.quantization:
+            model.quantization = detail.quantization
+        return model
+
+    return list(await asyncio.gather(*(one(m) for m in models)))
+
+
 async def check_context(client: OllamaClient, config: Config) -> str | None:
     """Warn when the configured context is smaller than an agent needs.
 
