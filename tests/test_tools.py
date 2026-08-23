@@ -97,7 +97,7 @@ class TestWriteAndEdit:
     async def test_escape_outside_workspace_is_blocked(self, tmp_path):
         result = await WriteFile(tmp_path).invoke(
             {"path": "../evil.txt", "content": "x"})
-        assert not result.ok and "outside the workspace" in result.output
+        assert not result.ok and "outside the project directory" in result.output
 
 
 class TestSearch:

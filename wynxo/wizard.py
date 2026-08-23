@@ -8,9 +8,6 @@ what it finds, and remembers every server it has seen.
 
 from __future__ import annotations
 
-import asyncio
-import socket
-
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.formatted_text import HTML
@@ -24,22 +21,10 @@ from .config import (
     normalise_url,
 )
 from .effort import ORDER, resolve
+from .discovery import Found, private_subnets, scan_loopback, scan_subnets, verify
 from .platforms import ollama_server_help as server_help  # re-exported
 from .provider import OllamaClient, ProviderError
 from .ui import ACCENT, MUTED, UI
-
-# Names worth trying before making the user type anything. Covers the common
-# homelab conventions and the two container-to-host bridges.
-AUTODETECT = [
-    "http://localhost:11434",
-    "http://127.0.0.1:11434",
-    "http://ollama:11434",
-    "http://ollama.local:11434",
-    "http://homelab:11434",
-    "http://nas:11434",
-    "http://server.local:11434",
-    "http://host.docker.internal:11434",
-]
 
 # Models worth recommending, best first, with why.
 RECOMMENDED = [
@@ -47,7 +32,7 @@ RECOMMENDED = [
     ("qwen3:32b", "Dense 32B. Stronger reasoning, noticeably slower."),
     ("qwen3:30b-a3b", "General-purpose MoE sibling of qwen3-coder. Good for chat."),
     ("devstral:24b", "Built for agent loops. Excellent tool discipline."),
-    ("gpt-oss:20b", "Has a real native reasoning_effort dial (low/medium/high)."),
+    ("gpt-oss:20b", "Has a real native reasoning dial (low/medium/high)."),
     ("qwen3:14b", "Fits comfortably in 12GB VRAM."),
     ("qwen3:8b", "Runs on almost anything, including CPU-only."),
 ]
@@ -55,37 +40,7 @@ RECOMMENDED = [
 
 async def probe(url: str, timeout: float = 2.0) -> str | None:
     """Return the Ollama version at ``url``, or None."""
-    import httpx
-
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(f"{url}/api/version")
-            if response.status_code == 200:
-                return response.json().get("version", "unknown")
-    except (httpx.HTTPError, ValueError, KeyError):
-        return None
-    return None
-
-
-async def autodetect(ui: UI) -> list[tuple[str, str]]:
-    """Probe the usual suspects in parallel. Returns [(url, version)]."""
-    # Resolve names first so a DNS timeout on `nas` does not stall everything.
-    candidates = []
-    for url in AUTODETECT:
-        host = url.split("://", 1)[1].split(":")[0]
-        try:
-            await asyncio.wait_for(
-                asyncio.get_running_loop().getaddrinfo(host, None), timeout=1.0
-            )
-            candidates.append(url)
-        except (socket.gaierror, asyncio.TimeoutError, OSError):
-            continue
-
-    if not candidates:
-        return []
-
-    results = await asyncio.gather(*(probe(url) for url in candidates))
-    return [(url, version) for url, version in zip(candidates, results) if version]
+    return await verify(url, timeout=timeout)
 
 
 async def ask_endpoint(ui: UI, prompt_session: PromptSession) -> Endpoint:
@@ -97,15 +52,23 @@ async def ask_endpoint(ui: UI, prompt_session: PromptSession) -> Endpoint:
     )
     ui.console.print()
 
-    found: list[tuple[str, str]] = []
-    with ui.status("looking for Ollama on this machine and the usual homelab names..."):
-        found = await autodetect(ui)
+    found: list[Found] = []
+    with ui.status("checking this machine...") as status:
+        found = await scan_loopback()
+
+        subnets = private_subnets()
+        if subnets:
+            names = ", ".join(str(n) for n in subnets[:2])
+            def progress(done: int, total: int) -> None:
+                status.update(f"scanning {names} for Ollama... {done}/{total}")
+            status.update(f"scanning {names} for Ollama...")
+            found.extend(await scan_subnets(subnets, on_progress=progress))
 
     if found:
         ui.console.print(f"  [{ACCENT}]Found:[/]")
-        for i, (url, version) in enumerate(found, 1):
-            where = "this machine" if "localhost" in url or "127.0.0.1" in url else "network"
-            ui.console.print(f"    [bold]{i}[/]  {url}  [{MUTED}]v{version} · {where}[/]")
+        for i, hit in enumerate(found, 1):
+            ui.console.print(
+                f"    [bold]{i}[/]  {hit.url}  [{MUTED}]v{hit.version} · {hit.where}[/]")
         ui.console.print(f"    [bold]m[/]  [{MUTED}]enter a different address[/]")
         ui.console.print()
 
@@ -114,21 +77,22 @@ async def ask_endpoint(ui: UI, prompt_session: PromptSession) -> Endpoint:
                 HTML(f'<ansicyan>  choose [1-{len(found)} or m]: </ansicyan>')
             )).strip().lower()
             if answer in ("", "1"):
-                url = found[0][0]
+                url = found[0].url
                 break
             if answer == "m":
                 url = ""
                 break
             if answer.isdigit() and 1 <= int(answer) <= len(found):
-                url = found[int(answer) - 1][0]
+                url = found[int(answer) - 1].url
                 break
             ui.warn("Pick a number from the list, or m to type an address.")
     else:
-        ui.console.print(f"  [{MUTED}]Nothing found automatically.[/]")
+        ui.console.print(f"  [{MUTED}]Nothing found.[/]")
         ui.console.print(
-            f"  [{MUTED}]If it is on another machine, that machine needs to be started"
-            f"\n  with OLLAMA_HOST=0.0.0.0:11434 -- by default Ollama only listens"
-            f"\n  on its own loopback and nothing else on the network can reach it.[/]"
+            f"  [{MUTED}]If Ollama runs on another machine, that machine must be"
+            f"\n  started with OLLAMA_HOST=0.0.0.0:11434 -- by default it listens"
+            f"\n  only on its own loopback and nothing on the network can reach it."
+            f"\n  Then give its LAN address below.[/]"
         )
         ui.console.print()
         url = ""
@@ -136,8 +100,10 @@ async def ask_endpoint(ui: UI, prompt_session: PromptSession) -> Endpoint:
     while True:
         if not url:
             ui.console.print(
-                f"  [{MUTED}]Examples: localhost · 192.168.1.50 · homelab:11434 · "
-                f"https://ollama.mydomain.com[/]"
+                f"  [{MUTED}]This machine:   127.0.0.1[/]"
+            )
+            ui.console.print(
+                f"  [{MUTED}]Another box:    192.168.1.50   (or 192.168.1.50:11434)[/]"
             )
             raw = (await prompt_session.prompt_async(
                 HTML('<ansicyan>  address: </ansicyan>')
@@ -157,10 +123,10 @@ async def ask_endpoint(ui: UI, prompt_session: PromptSession) -> Endpoint:
         ui.error(
             f"Nothing answering at {url}.\n\n"
             "  - Is `ollama serve` running there?\n"
-            "  - Remote box: it must start with OLLAMA_HOST=0.0.0.0:11434,\n"
+            "  - Another machine: it must start with OLLAMA_HOST=0.0.0.0:11434,\n"
             "    otherwise it only listens on its own loopback.\n"
             "  - Firewall open on 11434?\n"
-            "  - Behind a reverse proxy on 443? Give the full https:// URL."
+            "  - Right IP? Run `ip addr` (or `ipconfig`) on that machine."
         )
         retry = (await prompt_session.prompt_async(
             HTML('<ansicyan>  try another address? [Y/n]: </ansicyan>')
@@ -179,8 +145,8 @@ async def ask_endpoint(ui: UI, prompt_session: PromptSession) -> Endpoint:
             is_password=True,
         )).strip() or None
 
-    is_local = any(h in url for h in ("localhost", "127.0.0.1", "::1"))
-    name = "local" if is_local else "remote"
+    is_local = any(h in url for h in ("127.0.0.1", "localhost", "::1"))
+    name = "local" if is_local else url.split("://", 1)[1].split(":")[0].replace(".", "-")
     return Endpoint(name=name, url=url, api_key=api_key)
 
 
@@ -352,4 +318,4 @@ async def run_wizard(ui: UI) -> Config:
     ui.console.print()
     return config
 
-__all__ = ["run_wizard", "probe", "autodetect", "server_help", "RECOMMENDED"]
+__all__ = ["run_wizard", "probe", "server_help", "RECOMMENDED"]

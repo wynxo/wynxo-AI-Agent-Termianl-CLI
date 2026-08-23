@@ -12,7 +12,7 @@ dependencies, no toolchain required.
 │  wynxo  a local coding agent                     │
 │                                                  │
 │  model    qwen3-coder:30b                        │
-│  server   http://homelab:11434                   │
+│  server   http://192.168.1.50:11434              │
 │  effort   high                                   │
 │  project  ~/code/myproject                       │
 ╰──────────────────────────────────────────────────╯
@@ -40,6 +40,67 @@ high > add a retry to the upload path
 
 ---
 
+## Quick start
+
+One command. It installs everything, gets Ollama running, pulls a model that
+fits your machine, and checks it all works.
+
+```bash
+git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
+cd wynxo-AI-Agent-Termianl-CLI
+./install.sh          # Windows: .\install.ps1
+```
+
+```
+  wynxo setup
+  A local AI coding agent. Nothing leaves your machine.
+
+  1. Checking Python
+     OK  Python 3.12.3 on Linux (x86_64)
+  2. Setting up the environment
+     OK  virtualenv ready at .venv
+  3. Installing wynxo
+     OK  wynxo and its dependencies installed
+         no compiled extensions -- nothing was built from source
+  4. Setting up Ollama
+     OK  Ollama 0.12.0 is serving
+  5. Getting a model
+         this machine has about 32GB of memory
+     Recommended: qwen3-coder:30b -- 30B MoE, tool-tuned. The one to want.
+     Pull qwen3-coder:30b now? (a few GB, takes a while) [Y/n]
+  6. Checking everything works
+     ...
+  Done. Everything checks out.
+```
+
+Every run reports what it loaded:
+
+```
+[  OK  ] ollama 0.12.0 http://127.0.0.1:11434
+[  OK  ] qwen3-coder:30b completion, tools, thinking
+[  OK  ] context 32768
+[  OK  ] 10 tools native
+[  OK  ] scope folder /home/you/code/myproject
+[  OK  ] mode manual asks before every write and command
+[  OK  ] memory 4 project, 2 user
+```
+
+Then, from anywhere:
+
+```bash
+wynxo
+```
+
+The installer puts a `wynxo` command on your PATH, so that is all there is to
+it. About five minutes, most of it the model download. `--yes` accepts every
+recommendation, `--no-ollama` installs only wynxo, `--no-link` skips the PATH
+command.
+
+Nothing that touches the network or writes outside the repo happens without
+asking you first.
+
+---
+
 ## Contents
 
 1. [Install](#1-install)
@@ -48,28 +109,23 @@ high > add a retry to the upload path
 4. [Check it works](#4-check-it-works)
 5. [Using it](#5-using-it)
 6. [Effort levels](#6-effort-levels)
-7. [Tools and permissions](#7-tools-and-permissions)
-8. [Commands](#8-commands)
-9. [Configuration](#9-configuration)
-10. [Troubleshooting](#10-troubleshooting)
-11. [How it works](#11-how-it-works)
-
----
+7. [Keys](#7-keys)
+8. [Scope and modes](#8-scope-and-modes)
+9. [Memory](#9-memory)
+10. [Tools and permissions](#10-tools-and-permissions)
+11. [Commands](#11-commands)
+12. [Configuration](#12-configuration)
+13. [Troubleshooting](#13-troubleshooting)
+14. [How it works](#14-how-it-works)
 
 ## 1. Install
+
+`./install.sh` above does all of this. This section is for doing it by hand.
 
 Python 3.10 or newer. Nothing here compiles, so there is no build toolchain
 to install on any platform.
 
 ### Linux and macOS
-
-```bash
-git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
-cd wynxo-AI-Agent-Termianl-CLI
-pip install -e .
-```
-
-A virtualenv, if you prefer to keep things separate:
 
 ```bash
 python3 -m venv .venv
@@ -82,9 +138,9 @@ pip install -e .
 PowerShell:
 
 ```powershell
-git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
-cd wynxo-AI-Agent-Termianl-CLI
-py -m pip install -e .
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e .
 ```
 
 Use Windows Terminal rather than the old console host — colours and box
@@ -97,7 +153,7 @@ so tell it PowerShell syntax when you ask it to run something.
 pkg update && pkg install python git
 git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
 cd wynxo-AI-Agent-Termianl-CLI
-pip install -e .
+./install.sh --no-ollama
 ```
 
 That is the whole thing — **no `pkg install rust`, no build step.** Most
@@ -205,27 +261,31 @@ wynxo
 
 Four questions, all changeable later. Only the first really matters.
 
-**Where does Ollama serve?** wynxo probes `localhost`, `ollama`, `homelab`,
-`nas`, `host.docker.internal` and the other usual names in parallel, and shows
-what answered:
+**Where does Ollama serve?** wynxo checks this machine, then sweeps your local
+network for anything answering on 11434 and asks each hit whether it is really
+Ollama. A /24 takes a couple of seconds.
 
 ```
 Where does Ollama serve?
 Your own machine, or a box on your network. Either is fine.
 
   Found:
-    1  http://localhost:11434    v0.12.0 · this machine
-    2  http://homelab:11434      v0.12.0 · network
+    1  http://127.0.0.1:11434     v0.12.0 · this machine
+    2  http://192.168.1.50:11434  v0.12.0 · network
     m  enter a different address
 
   choose [1-2 or m]:
 ```
 
-Nothing found? Type an address. All of these work — wynxo normalises them:
+It scans by IP rather than guessing hostnames like `homelab` or
+`ollama.local` — those depend on your DNS being set up the way we assumed,
+and on a phone there is usually no mDNS at all.
+
+Nothing found? Type an address:
 
 ```
-localhost          192.168.1.50        homelab:11434
-10.0.0.4:8080      https://ollama.mydomain.com
+This machine:   127.0.0.1
+Another box:    192.168.1.50      (or 192.168.1.50:11434)
 ```
 
 **Which model?** It lists what that server actually has, so there is nothing
@@ -243,6 +303,7 @@ Already know your setup? Pass it and the wizard never appears:
 
 ```bash
 wynxo --endpoint 192.168.1.50 --model qwen3-coder:30b
+wynxo --endpoint 127.0.0.1                       # this machine
 ```
 
 Or set it in the environment:
@@ -265,7 +326,7 @@ Every assumption wynxo makes, checked one at a time, with a concrete fix for
 each failure:
 
 ```
-  ✓ server reachable      ollama 0.12.0 at http://homelab:11434
+  ✓ server reachable      ollama 0.12.0 at http://192.168.1.50:11434
   ✓ model installed       qwen3-coder:30b  18.6GB  30.5B Q4_K_M
   ✓ model capabilities    completion, tools, thinking
   ✓ context window        32768 tokens
@@ -388,14 +449,14 @@ Most local models expose no native reasoning budget at all, so a setting that
 only forwarded a number would collapse into two or three real behaviours.
 Instead, effort controls how many chances the model gets to be right:
 
-| level    | plan                 | tool iters | verify      | plan consensus | `think`    |
-|----------|----------------------|-----------:|-------------|---------------:|------------|
-| `low`    | none                 |          6 | none        |              1 | off        |
-| `medium` | inline               |         16 | none        |              1 | off        |
-| `high`   | separate pass        |         40 | 1 round     |              1 | `"medium"` |
-| `xhigh`  | separate pass        |         80 | 2 rounds    |              1 | `"high"`   |
-| `max`    | plan + self-critique |        150 | until clean |              2 | `"max"`    |
-| `ultra`  | plan + self-critique |        400 | until clean |              3 | `"max"`    |
+| level | in plain terms | plan | tool iters | verify | consensus | `think` |
+|---|---|---|---:|---|---:|---|
+| `low` | **least thinking, fastest, least smart** | none | 6 | none | 1 | off |
+| `medium` | a little thinking, quick, reasonably smart | inline | 16 | none | 1 | off |
+| `high` | real thinking, slower, noticeably smarter | separate pass | 40 | 1 round | 1 | `"medium"` |
+| `xhigh` | hard thinking, slow, very thorough | separate pass | 80 | 2 rounds | 1 | `"high"` |
+| `max` | maximum thinking, very slow, near its best | plan + self-critique | 150 | until clean | 2 | `"max"` |
+| `ultra` | **most thinking possible, slowest, smartest** | plan + self-critique | 400 | until clean | 3 | `"max"` |
 
 At `low` the agent reads what it needs, makes the change and stops.
 
@@ -440,18 +501,129 @@ server accepts.
 
 ---
 
-## 7. Tools and permissions
+## 7. Keys
+
+These work **while the agent is answering**, not just at the prompt — press
+Ctrl-O mid-reply and the thinking appears or disappears immediately.
+
+| key | does |
+|---|---|
+| `Ctrl-O` | show or hide the model's thinking |
+| `Ctrl-T` | full tool output, or a one-line summary |
+| `Ctrl-E` | step effort up |
+| `Ctrl-B` | step effort down |
+| `Ctrl-C` | interrupt this turn, keep the conversation |
+| `Alt-Enter` | newline instead of submitting |
+| `↑` `↓` | history |
+
+While a turn runs there is a live status line showing what is happening right
+now:
+
+```
+  ⠹ editing  src/transfer.py   14s · 812 tok · 58 tok/s · high   ^O thinking  ^T detail
+```
+
+Code streams as it is written, and each fenced block is re-rendered with
+syntax highlighting the moment it closes.
+
+---
+
+## 8. Scope and modes
+
+Two separate dials, on purpose.
+
+**Scope is the wall.** Where may tools go at all?
+
+```bash
+wynxo --scope folder    # only where you started it (default)
+wynxo --scope repo      # the whole git repository
+wynxo --scope machine   # no path restriction
+```
+
+`repo` walks up to find `.git`, so starting in a subdirectory still lets it
+see a sibling package. If there is no repository it falls back to `folder`
+rather than silently granting more than you asked for.
+
+**Mode is the friction inside that wall.** How much does it ask first?
+
+| mode | behaviour |
+|---|---|
+| `plan` | read-only — investigates and proposes, never writes |
+| `manual` | asks before every write and command **(default)** |
+| `auto` | edits freely in scope, still asks to run commands |
+| `yolo` | never asks |
+
+```bash
+wynxo --mode plan       # let it study the codebase and propose
+wynxo --mode auto       # trust it with edits, keep a hand on commands
+```
+
+Change either mid-conversation:
+
+```
+/scope repo
+/mode auto
+```
+
+**A mode can never widen a scope.** `--mode yolo` approves everything inside
+the boundary and still cannot write a byte outside it — the path check lives
+in the tools and is not waivable. Widening to `--scope machine` from inside a
+session asks you to confirm.
+
+`plan` mode is the only one that refuses rather than asks. A prompt would
+defeat the point of it.
+
+---
+
+## 9. Memory
+
+The agent keeps notes between sessions, in two markdown files it edits itself:
+
+```
+<project>/.wynxo/memory.md    what it learned about this codebase
+<config>/user.md              what it learned about you, everywhere
+```
+
+It writes to them with the `remember` tool when it learns something durable —
+a build command, a convention, a decision and why, a trap it hit. You can read
+and edit them yourself; they are just markdown.
+
+```
+/memory                          what it currently knows
+/memory add always run ruff before committing
+/memory add user: prefers terse answers, no preamble
+/memory forget ruff
+/memory edit                     the file path, to open in your editor
+/memory reload                   after editing by hand
+```
+
+**Why it is not slow.** Retrieval before every turn is what makes memory
+laggy, and on local hardware you feel it. So this does none of that: two
+capped files, read once at startup, inlined into the system prompt. No
+embeddings, no vector store, no background index. Reading costs a couple of
+milliseconds and a few hundred tokens.
+
+The cap is what keeps that true — past the limit the oldest entries are
+dropped, so memory can never grow into your context budget. Near-duplicates
+are rejected on the way in, with numbers treated as distinguishing so
+"port 8080" and "port 9090" stay separate facts.
+
+---
+
+## 10. Tools and permissions
 
 | tool | writes? | what it does |
 |---|---|---|
 | `read_file` | | Read with line numbers, offset/limit for big files |
 | `write_file` | ✓ | Create or replace a file |
 | `edit_file` | ✓ | Exact-match replacement, with a diff |
+| `multi_edit` | ✓ | Several replacements in one file, all-or-nothing |
 | `list_dir` | | Tree view, skipping vcs and build noise |
 | `glob` | | Find files by name pattern |
 | `grep` | | Regex search across the project |
 | `shell` | ✓ | Run a command — PowerShell on Windows, your login shell elsewhere |
 | `todo_write` | | The visible plan, which also survives compaction |
+| `remember` | ✓ | Write a durable fact to memory, or forget one |
 
 **Reads are free. Writes ask**, and show you the diff before you answer:
 
@@ -498,7 +670,7 @@ effort-level setting.
 
 ---
 
-## 8. Commands
+## 11. Commands
 
 ```
 /help                    everything below
@@ -507,6 +679,10 @@ effort-level setting.
 /endpoint ...            list | test | add <url> [name] | use <name>
 /ctx [n]                 show or set the context window
 /doctor                  check the server and model for problems
+/mode [plan|manual|auto|yolo]   how much it asks first
+/scope [folder|repo|machine]    what it may touch
+/undo [n|list]           revert the last file change
+/memory ...              show | add <note> | forget <text> | edit | reload
 /tools                   what the agent can call
 /thinking                show or hide the model's reasoning
 /plan                    the current todo list
@@ -540,17 +716,19 @@ wynxo [prompt]
       --endpoint URL   Ollama server
       --ctx N          context window
   -C, --cwd DIR        project directory
+      --mode MODE      plan | manual | auto | yolo
+      --scope SCOPE    folder | repo | machine
       --doctor         run the checks and exit
       --setup          re-run first-time setup
       --no-stream      wait for the full response
       --no-thinking    hide model reasoning
-      --yolo           never ask permission
+      --yolo           never ask permission (same as --mode yolo)
       --version
 ```
 
 ---
 
-## 9. Configuration
+## 12. Configuration
 
 | platform | location |
 |---|---|
@@ -592,7 +770,7 @@ requires auth; it is sent as `Authorization: Bearer …`.
 
 ---
 
-## 10. Troubleshooting
+## 13. Troubleshooting
 
 ### "Cannot reach an Ollama server"
 
@@ -665,11 +843,48 @@ Use Windows Terminal rather than the legacy console host.
 
 ### `wynxo: command not found`
 
-Your Python scripts directory is not on `PATH`. Use `python -m wynxo`.
+Your Python scripts directory is not on `PATH`. Use `python -m wynxo`, or the
+one inside the virtualenv the installer made: `.venv/bin/wynxo`.
+
+### `./install.sh: Permission denied`
+
+```bash
+chmod +x install.sh && ./install.sh
+```
+
+Or skip the wrapper entirely: `python3 install.py`.
+
+### install.ps1 is blocked by execution policy
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Or: `py -3 install.py`.
+
+### It made a change I did not want
+
+```
+/undo          revert the last file change
+/undo 3        revert the last three
+/undo list     what it would revert
+```
+
+Snapshots are in memory for the session, so this is an undo button rather than
+a backup. Commit early if the work matters.
+
+### The network scan found nothing
+
+The other machine must be running Ollama with `OLLAMA_HOST=0.0.0.0:11434` —
+see [step 2](#if-ollama-is-on-another-machine). Both devices must be on the
+same network; from a phone that means Wi-Fi, not mobile data. Some networks
+(guest Wi-Fi, and most corporate ones) block device-to-device traffic
+entirely, in which case no scan will ever find it. You can always type the
+address by hand.
 
 ---
 
-## 11. How it works
+## 14. How it works
 
 ```
 your message
@@ -703,6 +918,11 @@ wynxo/
   platforms.py   Linux / macOS / Windows / Termux differences
   session.py     history, token accounting, compaction
   permissions.py what needs asking about, and what is remembered
+  scope.py       the boundary (folder/repo/machine) and modes
+  memory.py      the two markdown files, capped and inlined
+  checkpoints.py snapshots behind /undo
+  keys.py        mid-turn keystrokes
+  status.py      the [  OK  ] lines
   prompts.py     system prompts and stage prompts
   doctor.py      the pre-flight checks
   wizard.py      first-run setup

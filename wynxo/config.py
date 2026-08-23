@@ -20,7 +20,7 @@ from typing import Any
 from .schema import Field, Schema
 
 DEFAULT_MODEL = "qwen3-coder:30b"
-DEFAULT_ENDPOINT = "http://localhost:11434"
+DEFAULT_ENDPOINT = "http://127.0.0.1:11434"
 
 # Ollama's default context is small enough (2048 on many builds) that an agent
 # silently loses its history with no error at all. This is the single most
@@ -42,8 +42,11 @@ def config_path() -> Path:
 
 
 class Endpoint(Schema):
-    """One Ollama server. Users often have more than one -- a laptop for
-    quick things and a homelab box with the big GPU."""
+    """One Ollama server.
+
+    Either this machine (``http://127.0.0.1:11434``) or another box on the
+    LAN by IP (``http://192.168.1.50:11434``). Most people end up with both:
+    the laptop they type on, and the machine with the GPU."""
 
     name = Field(str, "Short name you refer to this server by.", default="local")
     url = Field(str, "Base URL.", default=DEFAULT_ENDPOINT, transform=lambda v: normalise_url(v))
@@ -95,8 +98,8 @@ class Config(Schema):
 def normalise_url(raw: str) -> str:
     """Accept the many shapes a person types a server address in.
 
-    ``homelab:11434``, ``http://homelab``, ``192.168.1.5``, and a trailing
-    ``/v1`` or ``/api`` all land on the same base URL.
+    ``192.168.1.50``, ``192.168.1.50:11434``, ``http://192.168.1.50`` and a
+    trailing ``/v1`` or ``/api`` all land on the same base URL.
     """
     v = raw.strip().rstrip("/")
     if not v:

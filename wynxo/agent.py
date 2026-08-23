@@ -17,8 +17,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .checkpoints import Checkpoints
 from .config import Config
 from .effort import EffortPolicy, override
+from .memory import Memory
 from .parsing import ParsedTurn, parse_turn
 from .permissions import Decision, PermissionStore, summarise_call
 from .prompts import (
@@ -31,6 +33,7 @@ from .prompts import (
     build_system_prompt,
 )
 from .provider import OllamaClient, ProviderError
+from .scope import Boundary
 from .session import Session
 from .tools import Registry, build_registry
 
@@ -77,13 +80,20 @@ class Agent:
         workspace: Path,
         callbacks: Callbacks | None = None,
         registry: Registry | None = None,
+        boundary: Boundary | None = None,
+        memory: Memory | None = None,
     ):
         self.client = client
         self.config = config
         self.policy = policy
         self.workspace = workspace
         self.cb = callbacks or Callbacks()
-        self.tools = registry or build_registry(workspace, allow_shell=config.allow_shell)
+        self.boundary = boundary
+        self.memory = memory or Memory(workspace)
+        self.checkpoints = Checkpoints()
+        self.tools = registry or build_registry(
+            workspace, allow_shell=config.allow_shell,
+            boundary=boundary, memory=self.memory)
         self.permissions = PermissionStore()
         self.permissions.preapprove(config.auto_approve)
 
@@ -102,6 +112,9 @@ class Agent:
             self.policy,
             tools_description=self.tools.describe(),
             native_tools=self.native_tools,
+            memory=self.memory.prompt_section(),
+            boundary=self.boundary,
+            mode=self.permissions.mode,
         )
 
     def set_effort(self, policy: EffortPolicy) -> None:
@@ -260,7 +273,13 @@ class Agent:
 
             summary = summarise_call(call.name, call.arguments)
 
-            if self.permissions.needs_prompt(call.name, tool.mutating, call.arguments):
+            if refusal := self.permissions.blocked(call.name, tool.mutating, tool.internal):
+                await self.cb.on_tool_result(call.name, False, refusal, refusal)
+                self.session.add_tool_result(call.name, f"ERROR: {refusal}", call.call_id)
+                continue
+
+            if self.permissions.needs_prompt(
+                call.name, tool.mutating, call.arguments, tool.internal):
                 preview = await self._permission_preview(call.name, call.arguments)
                 decision = await self.cb.ask_permission(call.name, summary, preview)
                 if decision is Decision.ABORT:
@@ -281,6 +300,7 @@ class Agent:
                     self.permissions.remember(call.name, call.arguments)
 
             await self.cb.on_tool_start(call.name, summary)
+            self._checkpoint(tool, call)
             result = await tool.invoke(call.arguments)
             self.session.usage.tool_calls += 1
 
@@ -300,6 +320,19 @@ class Agent:
                 await self.cb.on_todos(result.display)
 
         return True
+
+    def _checkpoint(self, tool, call) -> None:
+        """Snapshot a file before a tool changes it, so /undo can put it back."""
+        if call.name not in ("write_file", "edit_file", "multi_edit"):
+            return
+        raw = str(call.arguments.get("path", ""))
+        if not raw:
+            return
+        try:
+            path = tool.resolve_path(raw)
+        except (PermissionError, OSError):
+            return
+        self.checkpoints.capture(path, call.name, label=tool.relative(path))
 
     async def _permission_preview(self, name: str, args: dict) -> str:
         """Show the user what a write would actually do, before they approve it."""

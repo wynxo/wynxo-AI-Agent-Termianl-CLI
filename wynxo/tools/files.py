@@ -273,3 +273,70 @@ class ListDir(Tool):
                 if self._walk(entry, depth - 1, prefix + ("    " if last else "|   "), out):
                     return True
         return False
+
+
+class EditOp(Schema):
+    old_text = Field(str, "Exact text to replace, including indentation.")
+    new_text = Field(str, "Replacement text.")
+    replace_all = Field(bool, "Replace every occurrence of this one.", default=False)
+
+
+class MultiEditInput(Schema):
+    path = Field(str, "File path, relative to the project root.")
+    edits = Field(list, "Edits to apply in order, each an exact-match replacement.",
+                  item_type=EditOp, default_factory=list)
+
+
+class MultiEdit(Tool):
+    name = "multi_edit"
+    description = (
+        "Apply several exact-match replacements to one file in a single pass. "
+        "Use this instead of calling edit_file repeatedly on the same file: it "
+        "is one round trip, one diff, and either every edit applies or none do."
+    )
+    Input = MultiEditInput
+    mutating = True
+    concurrency_safe = False
+
+    async def run(self, args: MultiEditInput) -> ToolResult:
+        path = self.resolve_path(args.path)
+        rel = self.relative(path)
+        if not path.exists():
+            return ToolResult.failure(f"{rel} does not exist. Use write_file to create it.")
+        if not args.edits:
+            return ToolResult.failure("No edits given.")
+
+        before = _read_text(path)
+        text = before
+
+        # Validate every edit against the running text first. All-or-nothing:
+        # a half-applied batch leaves the file in a state nobody planned.
+        for i, edit in enumerate(args.edits, 1):
+            if edit.old_text == edit.new_text:
+                return ToolResult.failure(f"edit {i}: old_text and new_text are identical.")
+            count = text.count(edit.old_text)
+            if count == 0:
+                hint = EditFile._near_miss(text, edit.old_text)
+                return ToolResult.failure(
+                    f"edit {i}: old_text not found in {rel}. {hint} "
+                    "No edits were applied."
+                )
+            if count > 1 and not edit.replace_all:
+                return ToolResult.failure(
+                    f"edit {i}: old_text appears {count} times. Include surrounding "
+                    "lines to make it unique, or set replace_all on that edit. "
+                    "No edits were applied."
+                )
+            text = (text.replace(edit.old_text, edit.new_text)
+                    if edit.replace_all
+                    else text.replace(edit.old_text, edit.new_text, 1))
+
+        with path.open("w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+
+        return ToolResult.success(
+            f"applied {len(args.edits)} edit(s) to {rel}",
+            display=make_diff(before, text, rel),
+            path=rel,
+            edits=len(args.edits),
+        )
