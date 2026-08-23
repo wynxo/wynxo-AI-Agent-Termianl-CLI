@@ -19,10 +19,12 @@ from wynxo.tools import build_registry
 class FakeOllama:
     """Serves a scripted list of assistant turns over Ollama's wire format."""
 
-    def __init__(self, turns, model_capabilities=("tools",)):
+    def __init__(self, turns, model_capabilities=("tools",), think_levels=True):
         self.turns = list(turns)
         self.requests = []
         self.capabilities = list(model_capabilities)
+        self.think_levels = think_levels
+        """False emulates an older Ollama that only understands think: bool."""
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -46,6 +48,10 @@ class FakeOllama:
         if path == "/api/chat":
             body = json.loads(request.content)
             self.requests.append(body)
+            if not self.think_levels and isinstance(body.get("think"), str):
+                return httpx.Response(400, json={
+                    "error": 'invalid think value: "medium" (must be "high", '
+                             '"medium", "low", "max", true, or false)'})
             turn = self.turns.pop(0) if self.turns else {"content": "Done."}
             message = {"role": "assistant", "content": turn.get("content", "")}
             if turn.get("thinking"):
@@ -89,8 +95,9 @@ class RecordingCallbacks(Callbacks):
         return self.permission
 
 
-def make_agent(tmp_path, turns, effort="low", capabilities=("tools",), callbacks=None):
-    fake = FakeOllama(turns, capabilities)
+def make_agent(tmp_path, turns, effort="low", capabilities=("tools",),
+               callbacks=None, think_levels=True):
+    fake = FakeOllama(turns, capabilities, think_levels)
     config = Config(
         endpoints=[Endpoint(name="t", url="http://fake:11434")],
         active_endpoint="t",
@@ -337,15 +344,65 @@ class TestWireFormat:
         assert fake.requests[0]["keep_alive"] == "30m"
         await agent.client.aclose()
 
-    async def test_thinking_flag_follows_effort(self, tmp_path):
+    async def test_thinking_is_omitted_at_low_effort(self, tmp_path):
         agent, fake, _ = make_agent(tmp_path, [{"content": "hi"}], effort="low")
         await agent.run("x")
-        assert fake.requests[0].get("think") is None
+        assert "think" not in fake.requests[0]
         await agent.client.aclose()
 
-        agent2, fake2, _ = make_agent(tmp_path, [
+    async def test_think_level_is_a_string_at_high_effort(self, tmp_path):
+        """Ollama's `think` takes "low"|"medium"|"high"|"max" as well as a bool."""
+        agent, fake, _ = make_agent(tmp_path, [
             {"content": "plan"}, {"content": "done"}, {"content": "VERIFIED"},
         ], effort="high")
-        await agent2.run("x")
-        assert fake2.requests[0].get("think") is True
-        await agent2.client.aclose()
+        await agent.run("x")
+        assert fake.requests[0]["think"] == "medium"
+        await agent.client.aclose()
+
+    async def test_max_effort_sends_the_top_think_level(self, tmp_path):
+        turns = [{"content": f"p{i}"} for i in range(3)] + [
+            {"content": "merged"}, {"content": "critique"},
+            {"content": "done"}, {"content": "VERIFIED"}]
+        agent, fake, _ = make_agent(tmp_path, turns, effort="max")
+        await agent.run("x")
+        assert fake.requests[0]["think"] == "max"
+        await agent.client.aclose()
+
+    async def test_tool_results_use_tool_name_not_name(self, tmp_path):
+        """`name` is silently ignored by Ollama; the field is `tool_name`."""
+        (tmp_path / "a.txt").write_text("hi\n")
+        agent, _, _ = make_agent(tmp_path, [
+            {"tool_calls": [{"function": {"name": "read_file",
+                                          "arguments": {"path": "a.txt"}}}]},
+            {"content": "done"},
+        ])
+        await agent.run("read it")
+        tool_messages = [m for m in agent.session.messages if m.get("role") == "tool"]
+        assert tool_messages[0]["tool_name"] == "read_file"
+        assert "name" not in tool_messages[0]
+        await agent.client.aclose()
+
+
+class TestOlderServerCompatibility:
+    async def test_string_think_level_downgrades_to_bool(self, tmp_path):
+        """An older Ollama rejects think:"medium". Retry as think:true, once."""
+        agent, fake, _ = make_agent(tmp_path, [
+            {"content": "plan"}, {"content": "done"}, {"content": "VERIFIED"},
+        ], effort="high", think_levels=False)
+        result = await agent.run("x")
+        assert result.content == "done"
+        assert fake.requests[0]["think"] == "medium"   # first attempt
+        assert fake.requests[1]["think"] is True       # retried
+        assert agent.client.think_levels_supported is False
+        await agent.client.aclose()
+
+    async def test_downgrade_is_remembered_for_the_session(self, tmp_path):
+        agent, fake, _ = make_agent(tmp_path, [
+            {"content": "plan"}, {"content": "done"}, {"content": "VERIFIED"},
+        ], effort="high", think_levels=False)
+        await agent.run("x")
+        before = len(fake.requests)
+        await agent.run("again")
+        # Every later request goes straight out as a boolean: no repeat 400s.
+        assert all(r["think"] is True for r in fake.requests[before:])
+        await agent.client.aclose()

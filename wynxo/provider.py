@@ -71,6 +71,10 @@ class Chunk:
 class OllamaClient:
     def __init__(self, config: Config):
         self.config = config
+        self.think_levels_supported = True
+        """Ollama gained string think levels ("low"/"medium"/"high"/"max")
+        after the plain boolean. An older server rejects the string outright,
+        so the first rejection downgrades this for the rest of the session."""
         ep = config.endpoint()
         self.base_url = ep.url
         headers = {"Content-Type": "application/json"}
@@ -199,7 +203,7 @@ class OllamaClient:
         *,
         model: str | None = None,
         tools: list[dict] | None = None,
-        think: bool | None = None,
+        think: bool | str | None = None,
         temperature: float = 0.4,
         num_predict: int = -1,
         num_ctx: int | None = None,
@@ -226,15 +230,42 @@ class OllamaClient:
         if tools:
             payload["tools"] = tools
         if think is not None:
+            if isinstance(think, str) and not self.think_levels_supported:
+                think = True
             payload["think"] = think
 
         try:
-            async with self._client.stream(
-                "POST", "/api/chat", json=payload, timeout=None
-            ) as response:
-                if response.status_code >= 400:
-                    body = (await response.aread()).decode("utf-8", "replace")
-                    raise ProviderError(self._explain_error(response.status_code, body, payload))
+            async for chunk in self._stream_chat(payload):
+                yield chunk
+        except httpx.ReadTimeout as exc:
+            raise ProviderError(
+                f"The model did not respond within {self.config.request_timeout:.0f}s. "
+                "On CPU or a loaded GPU this can be normal for a 30B -- raise "
+                "`request_timeout` in your config, or use a smaller model."
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"Request to {self.base_url} failed: {exc}") from exc
+
+    async def _stream_chat(self, payload: dict) -> AsyncIterator[Chunk]:
+        """Issue the request, retrying once without a string think level.
+
+        The retry is safe because a rejected request fails on the status line,
+        before any chunk has been yielded -- nothing has been emitted that a
+        second attempt could duplicate.
+        """
+        async with self._client.stream(
+            "POST", "/api/chat", json=payload, timeout=None
+        ) as response:
+            if response.status_code >= 400:
+                body = (await response.aread()).decode("utf-8", "replace")
+                if self._is_think_level_rejection(body, payload):
+                    self.think_levels_supported = False
+                    payload = {**payload, "think": True}
+                else:
+                    raise ProviderError(
+                        self._explain_error(response.status_code, body, payload)
+                    )
+            else:
                 async for line in response.aiter_lines():
                     if not line.strip():
                         continue
@@ -245,14 +276,32 @@ class OllamaClient:
                     if err := data.get("error"):
                         raise ProviderError(str(err))
                     yield self._to_chunk(data)
-        except httpx.ReadTimeout as exc:
-            raise ProviderError(
-                f"The model did not respond within {self.config.request_timeout:.0f}s. "
-                "On CPU or a loaded GPU this can be normal for a 30B -- raise "
-                "`request_timeout` in your config, or use a smaller model."
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise ProviderError(f"Request to {self.base_url} failed: {exc}") from exc
+                return
+
+        # Only reached after a think-level downgrade.
+        async with self._client.stream(
+            "POST", "/api/chat", json=payload, timeout=None
+        ) as response:
+            if response.status_code >= 400:
+                body = (await response.aread()).decode("utf-8", "replace")
+                raise ProviderError(self._explain_error(response.status_code, body, payload))
+            async for line in response.aiter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if err := data.get("error"):
+                    raise ProviderError(str(err))
+                yield self._to_chunk(data)
+
+    @staticmethod
+    def _is_think_level_rejection(body: str, payload: dict) -> bool:
+        """Did this fail only because `think` was a string rather than a bool?"""
+        if not isinstance(payload.get("think"), str):
+            return False
+        return "think" in body.lower()
 
     @staticmethod
     def _to_chunk(data: dict) -> Chunk:

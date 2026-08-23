@@ -83,7 +83,10 @@ class Session:
         self.messages.append(message)
 
     def add_tool_result(self, name: str, content: str, call_id: str = "") -> None:
-        message: dict[str, Any] = {"role": "tool", "content": content, "name": name}
+        # Ollama's Message type names this field `tool_name` (api/types.go).
+        # `name` is silently ignored, so the model cannot tell which tool a
+        # result came from -- which matters as soon as a turn calls two.
+        message: dict[str, Any] = {"role": "tool", "content": content, "tool_name": name}
         if call_id:
             message["tool_call_id"] = call_id
         self.messages.append(message)

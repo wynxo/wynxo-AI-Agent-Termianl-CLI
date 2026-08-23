@@ -143,7 +143,7 @@ class Agent:
             messages if messages is not None else self.session.wire(),
             model=self.config.model,
             tools=self.tools.ollama_schemas() if (use_tools and self.native_tools) else None,
-            think=self.policy.thinking if self.policy.thinking else None,
+            think=self._think_value(),
             temperature=self.policy.temperature if temperature is None else temperature,
             num_predict=self.policy.num_predict if num_predict is None else num_predict,
             stream=self.config.stream,
@@ -165,6 +165,17 @@ class Agent:
                 )
 
         return parse_turn("".join(content_parts), "".join(thinking_parts), native_calls)
+
+    def _think_value(self) -> bool | str | None:
+        """What to send as Ollama's ``think``.
+
+        A string level where the policy has one, so models that support the
+        native dial get it; a plain ``True`` otherwise; and nothing at all when
+        thinking is off, so models without the capability are unaffected.
+        """
+        if not self.policy.thinking:
+            return None
+        return self.policy.think_level or True
 
     # -- stages ------------------------------------------------------------
 

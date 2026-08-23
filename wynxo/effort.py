@@ -67,9 +67,16 @@ class EffortPolicy:
     thinking: bool
     """Qwen3 / DeepSeek-style thinking mode."""
 
-    native_effort: str | None
-    """Forwarded as ``reasoning_effort`` for models that support it (gpt-oss).
-    Ignored by models that do not."""
+    think_level: str | None
+    """Ollama's native reasoning dial, sent as ``think``. It accepts
+    ``"low" | "medium" | "high" | "max"`` as well as a plain boolean
+    (api/types.go, ThinkValue). Older servers only understand the boolean, so
+    the client downgrades automatically if a level is rejected.
+
+    The mapping is deliberately graduated rather than name-matched: by the
+    time you are at wynxo's ``high`` you are already getting a planning pass
+    and a verification round, which is more added rigour than the raw
+    thinking dial contributes."""
 
     temperature: float
     num_predict: int
@@ -118,7 +125,7 @@ POLICIES: dict[EffortName, EffortPolicy] = {
         context_budget=8_000,
         max_tool_output=4_000,
         thinking=False,
-        native_effort="low",
+        think_level=None,
         temperature=0.3,
         num_predict=1_024,
         repair_attempts=1,
@@ -133,7 +140,7 @@ POLICIES: dict[EffortName, EffortPolicy] = {
         context_budget=16_000,
         max_tool_output=8_000,
         thinking=False,
-        native_effort="medium",
+        think_level=None,
         temperature=0.4,
         num_predict=2_048,
         repair_attempts=2,
@@ -148,7 +155,7 @@ POLICIES: dict[EffortName, EffortPolicy] = {
         context_budget=32_000,
         max_tool_output=12_000,
         thinking=True,
-        native_effort="high",
+        think_level="medium",
         temperature=0.5,
         num_predict=4_096,
         repair_attempts=3,
@@ -163,7 +170,7 @@ POLICIES: dict[EffortName, EffortPolicy] = {
         context_budget=64_000,
         max_tool_output=16_000,
         thinking=True,
-        native_effort="high",
+        think_level="high",
         temperature=0.5,
         num_predict=8_192,
         repair_attempts=3,
@@ -178,7 +185,7 @@ POLICIES: dict[EffortName, EffortPolicy] = {
         context_budget=0,
         max_tool_output=24_000,
         thinking=True,
-        native_effort="high",
+        think_level="max",
         temperature=0.6,
         num_predict=-1,
         repair_attempts=4,
@@ -193,7 +200,7 @@ POLICIES: dict[EffortName, EffortPolicy] = {
         context_budget=0,
         max_tool_output=32_000,
         thinking=True,
-        native_effort="high",
+        think_level="max",
         temperature=0.7,
         num_predict=-1,
         repair_attempts=5,
