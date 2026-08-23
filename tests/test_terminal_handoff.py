@@ -7,7 +7,6 @@ go to whichever wins the race. The observable symptom was typed characters
 vanishing: "/quit" arriving as "quit".
 """
 
-import asyncio
 
 from prompt_toolkit import PromptSession
 
