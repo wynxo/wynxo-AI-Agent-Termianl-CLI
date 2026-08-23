@@ -137,6 +137,56 @@ def is_narrow() -> bool:
     return terminal_width() < 60
 
 
+def looks_like_a_project(path: Path) -> bool:
+    """Whether this directory plausibly contains work to do.
+
+    Someone who installs a `wynxo` command and then runs it from wherever they
+    happened to be gets an agent pointed at an install folder or their home
+    directory. It works, which is the problem -- it quietly operates on the
+    wrong files. Cheap markers, no guessing.
+    """
+    markers = (
+        ".git", "package.json", "pyproject.toml", "setup.py", "Cargo.toml",
+        "go.mod", "pom.xml", "build.gradle", "Makefile", "CMakeLists.txt",
+        "composer.json", "Gemfile", "requirements.txt", "WYNXO.md",
+        "AGENTS.md", "CLAUDE.md", ".wynxo.json",
+    )
+    try:
+        for marker in markers:
+            if (path / marker).exists():
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def suspicious_workspace(path: Path) -> str | None:
+    """A reason this directory is probably not where you meant to work."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+
+    if resolved == home().resolve():
+        return "this is your home directory"
+
+    # The directory wynxo's own launcher was installed into.
+    for name in ("wynxo", "wynxo.cmd", "wynxo.exe"):
+        if (resolved / name).is_file() and not (resolved / "pyproject.toml").exists():
+            return "this is where wynxo itself is installed"
+
+    parts = {p.lower() for p in resolved.parts}
+    for marker in ("appdata", "system32", "windows", "program files"):
+        if marker in parts:
+            return f"this is inside {marker}"
+    if str(resolved) in ("/", "/usr", "/etc", "/bin", "/tmp"):
+        return "this is a system directory"
+
+    if not looks_like_a_project(resolved):
+        return "no project files here (no .git, no package manifest)"
+    return None
+
+
 # -- setup hints -----------------------------------------------------------
 
 def ollama_server_help() -> str:

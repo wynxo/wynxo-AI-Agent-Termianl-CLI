@@ -38,6 +38,19 @@ RECOMMENDED = [
 ]
 
 
+def describe_model(tag: str) -> str:
+    """The one-line note for a model, or "" when it is not one we know.
+
+    Matched on the exact tag. Anything looser mislabels neighbouring models --
+    qwen3.5, qwen3.8 and qwen3-coder all begin with "qwen3" but are different
+    models of different sizes.
+    """
+    for name, why in RECOMMENDED:
+        if tag == name:
+            return why
+    return ""
+
+
 async def probe(url: str, timeout: float = 2.0) -> str | None:
     """Return the Ollama version at ``url``, or None."""
     return await verify(url, timeout=timeout)
@@ -167,11 +180,12 @@ async def ask_model(ui: UI, prompt_session: PromptSession, config: Config) -> st
         ui.console.print()
         ui.console.print(f"  [{MUTED}]Installed on that server:[/]")
         for i, model in enumerate(installed, 1):
+            # Exact tag only. Prefix matching described qwen3.5:0.8b as a
+            # "Dense 32B" because it starts with "qwen3", which is worse than
+            # saying nothing: a wrong blurb is read as fact.
             note = ""
-            for name, why in RECOMMENDED:
-                if model.name.startswith(name.split(":")[0]):
-                    note = f"  [{MUTED}]{why}[/]"
-                    break
+            if why := describe_model(model.name):
+                note = f"  [{MUTED}]{why}[/]"
             size = f"[{MUTED}]{model.human_size()}[/]"
             ui.console.print(f"    [bold]{i:2}[/]  {model.name:32} {size}{note}")
         ui.console.print(f"    [bold] p[/]  [{MUTED}]pull a model that is not listed[/]")

@@ -45,19 +45,24 @@ high > add a retry to the upload path
 One command. It installs everything, gets Ollama running, pulls a model that
 fits your machine, and checks it all works.
 
-```bash
-git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
-cd wynxo-AI-Agent-Termianl-CLI
-./install.sh
-```
-
-On Windows, from cmd or PowerShell:
+**Windows** — in Command Prompt or PowerShell:
 
 ```
 git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
 cd wynxo-AI-Agent-Termianl-CLI
 install.bat
 ```
+
+**Linux, macOS, Termux**:
+
+```bash
+git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
+cd wynxo-AI-Agent-Termianl-CLI
+./install.sh
+```
+
+Copy the block for your system. `./install.sh` is not a command Windows
+understands, and `install.bat` is not one Linux understands.
 
 ```
   wynxo setup
@@ -70,13 +75,17 @@ install.bat
   3. Installing wynxo
      OK  wynxo and its dependencies installed
          no compiled extensions -- nothing was built from source
-  4. Setting up Ollama
+     OK  verified: wynxo 0.1.0 imports and runs
+  4. Making `wynxo` available everywhere
+     OK  installed ~/.local/bin/wynxo
+     OK  added to your PATH
+  5. Setting up Ollama
      OK  Ollama 0.12.0 is serving
-  5. Getting a model
+  6. Getting a model
          this machine has about 32GB of memory
      Recommended: qwen3-coder:30b -- 30B MoE, tool-tuned. The one to want.
      Pull qwen3-coder:30b now? (a few GB, takes a while) [Y/n]
-  6. Checking everything works
+  7. Checking everything works
      ...
   Done. Everything checks out.
 ```
@@ -93,16 +102,19 @@ Every run reports what it loaded:
 [  OK  ] memory 4 project, 2 user
 ```
 
-Then, from anywhere:
+Then open a **new** terminal and run:
 
 ```bash
 wynxo
 ```
 
-The installer puts a `wynxo` command on your PATH, so that is all there is to
-it. About five minutes, most of it the model download. `--yes` accepts every
+The installer puts a `wynxo` command on your PATH and offers to add that
+directory to PATH for you, so that is all there is to it. The new terminal
+matters: PATH changes only apply to terminals opened afterwards.
+
+About five minutes, most of it the model download. `--yes` accepts every
 recommendation, `--no-ollama` installs only wynxo, `--no-link` skips the PATH
-command.
+command entirely.
 
 Nothing that touches the network or writes outside the repo happens without
 asking you first.
@@ -385,12 +397,23 @@ at a real server whenever you have one; nothing else changes.
 
 ## 5. Using it
 
-Start it in the project you want to work on:
+Start it **in the project you want to work on** — wynxo reads and writes in
+the directory it was started from:
 
 ```bash
 cd ~/code/myproject
 wynxo
 ```
+
+Or point it somewhere without moving:
+
+```bash
+wynxo -C ~/code/myproject
+```
+
+If you start it somewhere that does not look like a project — your home
+directory, the folder wynxo was installed into — it says so at startup rather
+than quietly working on the wrong files.
 
 Then just talk to it.
 
@@ -871,6 +894,32 @@ chmod +x install.sh && ./install.sh
 ```
 
 Or skip the wrapper entirely: `python3 install.py`.
+
+### `'.' is not recognized as an internal or external command`
+
+You ran `./install.sh` on Windows. That is the Linux/macOS command. Use:
+
+```
+install.bat
+```
+
+Also make sure you did not paste a trailing `# comment` into Command Prompt —
+cmd treats it as part of the command.
+
+### `'wynxo' is not recognized` after a successful install
+
+The launcher exists but its directory is not on your PATH yet. Two fixes:
+
+1. **Open a new terminal.** PATH changes only apply to terminals started
+   afterwards, so the one you installed from will never see it.
+2. **Re-run the installer** and answer yes to "Add it to your PATH now?" — it
+   edits your user PATH for you.
+
+Until then you can run it by full path:
+
+```
+%LOCALAPPDATA%\Programs\wynxo\wynxo.cmd
+```
 
 ### Windows: the install did nothing / `pip` is not recognised
 

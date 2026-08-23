@@ -140,3 +140,46 @@ class TestTerminalWidth:
             raise OSError("no tty")
         monkeypatch.setattr(platforms.shutil, "get_terminal_size", boom)
         assert platforms.terminal_width(default=72) == 72
+
+
+class TestWorkspaceSanity:
+    """Running `wynxo` from wherever you happen to be points the agent at the
+    wrong files, and it works -- which is the problem. It should say so."""
+
+    def test_a_real_project_is_fine(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        assert platforms.suspicious_workspace(tmp_path) is None
+
+    def test_a_python_project_is_fine(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text("[project]\n")
+        assert platforms.suspicious_workspace(tmp_path) is None
+
+    def test_an_empty_directory_is_flagged(self, tmp_path):
+        assert "no project files" in platforms.suspicious_workspace(tmp_path)
+
+    def test_the_install_directory_is_flagged(self, tmp_path):
+        """The exact case: a launcher was installed here, then run here."""
+        (tmp_path / "wynxo.cmd").write_text("@echo off\n")
+        assert "wynxo itself is installed" in platforms.suspicious_workspace(tmp_path)
+
+    def test_the_repo_itself_is_not_mistaken_for_an_install_dir(self, tmp_path):
+        (tmp_path / "wynxo").mkdir()
+        (tmp_path / "pyproject.toml").write_text("[project]\n")
+        assert platforms.suspicious_workspace(tmp_path) is None
+
+    def test_home_is_flagged(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".git").mkdir()   # even a repo: still your home directory
+        assert "home directory" in platforms.suspicious_workspace(tmp_path)
+
+    def test_appdata_is_flagged(self, tmp_path):
+        target = tmp_path / "AppData" / "Local" / "Programs" / "wynxo"
+        target.mkdir(parents=True)
+        assert "appdata" in platforms.suspicious_workspace(target)
+
+    def test_project_markers_are_recognised(self, tmp_path):
+        for marker in ("package.json", "Cargo.toml", "go.mod", "Makefile", "WYNXO.md"):
+            directory = tmp_path / marker.replace(".", "_")
+            directory.mkdir()
+            (directory / marker).write_text("")
+            assert platforms.looks_like_a_project(directory), marker

@@ -44,7 +44,7 @@ _LANGUAGE = {"read_file": "python", "shell": "console"}
 
 # Keys that work *while the agent is running*, not just at the prompt.
 LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail"}
-from .platforms import ollama_server_help as server_help
+from .platforms import ollama_server_help as server_help, suspicious_workspace
 from .wizard import probe, run_wizard
 
 COMMANDS = {
@@ -315,7 +315,12 @@ class Repl:
             f"{len(self.agent.tools)} tools",
             "native" if self.agent.native_tools else "hermes (prompted)")
 
-        status.ok(f"scope {self.boundary.scope.value}", self.boundary.describe())
+        if reason := suspicious_workspace(self.workspace):
+            status.warn(f"scope {self.boundary.scope.value}", str(self.workspace))
+            status.note(f"{reason} -- the agent will read and write here")
+            status.note("cd into your project first, or start wynxo with -C <path>")
+        else:
+            status.ok(f"scope {self.boundary.scope.value}", self.boundary.describe())
         status.ok(f"mode {self.mode.value}", self.mode.describe())
 
         project, user = self.memory.counts()

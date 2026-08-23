@@ -26,6 +26,40 @@ _COLOURS = {OK: "32", WARN: "33", FAILED: "31", BUSY: "36", SKIP: "90"}
 _WIDTH = 6   # the widest label, "FAILED"
 
 
+def enable_windows_vt() -> bool:
+    """Turn on VT processing for this console.
+
+    Without it the old console host prints the escape sequences literally, so
+    every status line reads like `[<-[1;32m  OK  <-[0m]`. The usual trick is
+    ``os.system("")``, which works but spawns a whole cmd.exe to do it; this
+    asks the console directly.
+    """
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        for handle_id in (-11, -12):          # stdout, stderr
+            handle = kernel32.GetStdHandle(handle_id)
+            if handle in (0, -1):
+                continue
+            mode = wintypes.DWORD()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                continue
+            kernel32.SetConsoleMode(
+                handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+        return True
+    except Exception:
+        try:
+            os.system("")     # last resort
+            return True
+        except Exception:
+            return False
+
+
 def _supports_colour() -> bool:
     if os.environ.get("NO_COLOR") is not None:
         return False
@@ -34,8 +68,7 @@ def _supports_colour() -> bool:
     if not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
         return False
     if sys.platform == "win32":
-        # Ask the console to interpret VT sequences; harmless if already on.
-        os.system("")
+        return enable_windows_vt()
     return os.environ.get("TERM") != "dumb"
 
 

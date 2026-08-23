@@ -152,7 +152,7 @@ class TestLauncher:
         monkeypatch.setattr(install, "user_bin_dir", lambda: tmp_path / "bin")
         monkeypatch.setattr(install, "ask", lambda *a, **k: True)
         python = tmp_path / "venv" / "bin" / "python"
-        launcher = install.link_command(python, tmp_path / "venv", assume_yes=True)
+        launcher, _ = install.link_command(python, tmp_path / "venv", assume_yes=True)
         assert launcher is not None
         body = launcher.read_text()
         assert str(python) in body and "-m wynxo" in body
@@ -161,7 +161,7 @@ class TestLauncher:
     def test_declining_the_link_returns_none(self, monkeypatch, tmp_path):
         monkeypatch.setattr(install, "user_bin_dir", lambda: tmp_path / "bin")
         monkeypatch.setattr(install, "ask", lambda *a, **k: False)
-        assert install.link_command(Path("/x/python"), tmp_path, False) is None
+        assert install.link_command(Path("/x/python"), tmp_path, False) == (None, False)
 
     def test_shell_rc_hint_matches_the_shell(self, monkeypatch, tmp_path):
         monkeypatch.setenv("SHELL", "/usr/bin/zsh")
@@ -248,3 +248,75 @@ class TestWindowsEntryPoints:
     def test_readme_gives_the_full_path_pip_invocation(self):
         readme = (ROOT / "README.md").read_text()
         assert ".venv\\Scripts\\python.exe -m pip install -e ." in readme
+
+
+class TestPathHandling:
+    """The transcript failure: the launcher was installed somewhere not on
+    PATH, and the user was told to go edit Settings. `wynxo` then did not
+    exist, and a successful install looked broken."""
+
+    def test_posix_path_is_added_to_the_shell_rc(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(install.sys, "platform", "linux")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("SHELL", "/bin/bash")
+        monkeypatch.setattr(install.Path, "home", staticmethod(lambda: tmp_path))
+        assert install._add_to_path_posix(tmp_path / "bin")
+        assert str(tmp_path / "bin") in (tmp_path / ".bashrc").read_text()
+
+    def test_posix_path_is_not_added_twice(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SHELL", "/bin/bash")
+        monkeypatch.setattr(install.Path, "home", staticmethod(lambda: tmp_path))
+        install._add_to_path_posix(tmp_path / "bin")
+        install._add_to_path_posix(tmp_path / "bin")
+        assert (tmp_path / ".bashrc").read_text().count("added by wynxo") == 1
+
+    def test_fish_uses_its_own_syntax(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SHELL", "/usr/bin/fish")
+        monkeypatch.setattr(install.Path, "home", staticmethod(lambda: tmp_path))
+        install._add_to_path_posix(tmp_path / "bin")
+        config = tmp_path / ".config" / "fish" / "config.fish"
+        assert "fish_add_path" in config.read_text()
+        assert "export PATH" not in config.read_text()
+
+    def test_windows_prefers_a_directory_already_on_path(self, monkeypatch, tmp_path):
+        """WindowsApps is on PATH for every user out of the box, so a shim
+        there works with no PATH edit at all."""
+        monkeypatch.setattr(install.sys, "platform", "win32")
+        windows_apps = tmp_path / "Microsoft" / "WindowsApps"
+        windows_apps.mkdir(parents=True)
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+        monkeypatch.setenv("PATH", str(windows_apps))
+        assert install.user_bin_dir() == windows_apps
+
+    def test_windows_falls_back_when_windowsapps_is_not_on_path(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(install.sys, "platform", "win32")
+        (tmp_path / "Microsoft" / "WindowsApps").mkdir(parents=True)
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+        monkeypatch.setenv("PATH", "/somewhere/else")
+        assert install.user_bin_dir() == tmp_path / "Programs" / "wynxo"
+
+
+class TestModelRanking:
+    """Recommendations are sized from system memory, which under-reads a
+    machine with a big GPU. Never talk someone down to a weaker model than
+    the one they already run."""
+
+    def test_stronger_installed_model_wins(self, monkeypatch, capsys):
+        monkeypatch.setattr(install, "installed_models",
+                            lambda: ["qwen3-coder:30b-32k", "gemma4:latest"])
+        monkeypatch.setattr(install, "ask", lambda *a, **k: False)
+        chosen = install.ensure_model("qwen3:14b", "why", False)
+        assert chosen == "qwen3-coder:30b-32k"
+        assert "stronger" in capsys.readouterr().out
+
+    def test_weaker_installed_model_still_offers_the_upgrade(self, monkeypatch):
+        monkeypatch.setattr(install, "installed_models", lambda: ["qwen3:1.7b"])
+        asked = []
+        monkeypatch.setattr(install, "ask",
+                            lambda q, *a, **k: asked.append(q) or False)
+        install.ensure_model("qwen3-coder:30b", "why", False)
+        assert asked, "should have offered the stronger model"
+
+    def test_rank_matches_family_not_prefix(self):
+        assert install._rank("qwen3-coder:30b-32k") == install._rank("qwen3-coder:30b")
+        assert install._rank("gemma4:latest") == len(install.MODELS)

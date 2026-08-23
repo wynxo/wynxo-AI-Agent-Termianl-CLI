@@ -46,11 +46,35 @@ MODELS = [
 
 # -- output ----------------------------------------------------------------
 
+def _enable_windows_vt() -> bool:
+    """Ask the console to interpret escape sequences, so colour works rather
+    than printing as literal `<-[1;32m` noise."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        for handle_id in (-11, -12):
+            handle = kernel32.GetStdHandle(handle_id)
+            if handle in (0, -1):
+                continue
+            mode = wintypes.DWORD()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+        return True
+    except Exception:
+        try:
+            os.system("")
+            return True
+        except Exception:
+            return False
+
+
 class Style:
     def __init__(self) -> None:
         self.on = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
         if sys.platform == "win32" and self.on:
-            os.system("")     # enable VT processing on older consoles
+            self.on = _enable_windows_vt()
 
     def _wrap(self, text: str, code: str) -> str:
         return f"\033[{code}m{text}\033[0m" if self.on else text
@@ -296,14 +320,110 @@ def verify_install(python: Path) -> None:
 
 
 def user_bin_dir() -> Path:
-    """Where a user-level command should go on this platform."""
+    """Where a user-level command should go on this platform.
+
+    On Windows, WindowsApps is on PATH out of the box for every user, so a
+    shim placed there works immediately. Anywhere else needs PATH edited,
+    which is the step people never do -- and then `wynxo` is not found and the
+    install looks broken even though it succeeded.
+    """
     if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
-        return Path(base) / "Programs" / "wynxo"
+        base = Path(os.environ.get("LOCALAPPDATA")
+                    or (Path.home() / "AppData" / "Local"))
+        windows_apps = base / "Microsoft" / "WindowsApps"
+        if windows_apps.is_dir() and on_path(windows_apps):
+            return windows_apps
+        return base / "Programs" / "wynxo"
     if is_termux():
         prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
         return Path(prefix) / "bin"
     return Path.home() / ".local" / "bin"
+
+
+def add_to_user_path(directory: Path) -> bool:
+    """Add ``directory`` to the user's PATH, permanently.
+
+    Telling someone to open Settings and edit environment variables is where a
+    "five minute setup" goes to die, so do it for them.
+    """
+    if sys.platform == "win32":
+        return _add_to_path_windows(directory)
+    return _add_to_path_posix(directory)
+
+
+def _add_to_path_windows(directory: Path) -> bool:
+    """setx writes HKCU\Environment and survives reboots.
+
+    It truncates at 1024 characters, so read the existing value from the
+    registry (not the expanded process PATH, which includes the machine-wide
+    half) and refuse rather than corrupt a long PATH.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return False
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                            winreg.KEY_READ) as key:
+            try:
+                current, kind = winreg.QueryValueEx(key, "Path")
+            except FileNotFoundError:
+                current, kind = "", winreg.REG_EXPAND_SZ
+    except OSError:
+        return False
+
+    entries = [e for e in str(current).split(";") if e.strip()]
+    if any(e.rstrip("\\").lower() == str(directory).rstrip("\\").lower()
+           for e in entries):
+        return True
+
+    updated = ";".join(entries + [str(directory)])
+    if len(updated) > 1000:
+        warn("Your user PATH is very long; not editing it automatically.")
+        return False
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                            winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, "Path", 0, kind or winreg.REG_EXPAND_SZ, updated)
+    except OSError:
+        return False
+
+    # Tell running shells so a new terminal picks it up without a logout.
+    try:
+        import ctypes
+
+        HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG = 0xFFFF, 0x1A, 0x0002
+        ctypes.windll.user32.SendMessageTimeoutW(
+            HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment",
+            SMTO_ABORTIFHUNG, 5000, None)
+    except Exception:
+        pass
+    return True
+
+
+def _add_to_path_posix(directory: Path) -> bool:
+    """Append an export line to the shell's rc file, once."""
+    shell = os.path.basename(os.environ.get("SHELL", "")) or "bash"
+    rc = {"zsh": Path.home() / ".zshrc",
+          "fish": Path.home() / ".config" / "fish" / "config.fish",
+          "bash": Path.home() / ".bashrc"}.get(shell, Path.home() / ".profile")
+    line = (f"fish_add_path {directory}" if shell == "fish"
+            else f'export PATH="{directory}:$PATH"')
+    marker = "# added by wynxo installer"
+
+    try:
+        existing = rc.read_text(encoding="utf-8") if rc.exists() else ""
+        if str(directory) in existing:
+            return True
+        rc.parent.mkdir(parents=True, exist_ok=True)
+        with rc.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n{marker}\n{line}\n")
+    except OSError:
+        return False
+    info(f"added to {rc}")
+    return True
 
 
 def on_path(directory: Path) -> bool:
@@ -331,7 +451,8 @@ def shell_rc_hint(directory: Path) -> str:
     return f"{line}    # add to {rc}"
 
 
-def link_command(python: Path, venv_dir: Path, assume_yes: bool) -> Path | None:
+def link_command(python: Path, venv_dir: Path,
+                 assume_yes: bool) -> tuple[Path | None, bool]:
     """Put a `wynxo` command somewhere on PATH, so `wynxo` just works.
 
     A launcher script rather than a symlink: it pins the interpreter, so the
@@ -345,7 +466,7 @@ def link_command(python: Path, venv_dir: Path, assume_yes: bool) -> Path | None:
 
     if not ask(f"Install a `wynxo` command into {target}?", True, assume_yes):
         info("Skipped.")
-        return None
+        return None, False
 
     try:
         target.mkdir(parents=True, exist_ok=True)
@@ -358,18 +479,27 @@ def link_command(python: Path, venv_dir: Path, assume_yes: bool) -> Path | None:
             launcher.chmod(0o755)
     except OSError as exc:
         warn(f"Could not write {launcher}: {exc}")
-        return None
+        return None, False
 
     ok(f"installed {launcher}")
 
-    if not on_path(target):
-        warn(f"{target} is not on your PATH yet, so `wynxo` will not be found.")
-        if sys.platform == "win32":
-            info("Add it: Settings -> Edit environment variables -> Path")
-        else:
-            info(shell_rc_hint(target))
-            info("Then restart the shell, or run that line now.")
-    return launcher
+    if on_path(target):
+        info("it is already on your PATH -- just run `wynxo`")
+        return launcher, False
+
+    warn(f"{target} is not on your PATH, so `wynxo` would not be found.")
+    if ask("Add it to your PATH now?", True, assume_yes):
+        if add_to_user_path(target):
+            ok("added to your PATH")
+            info("Open a NEW terminal, then run `wynxo`.")
+            return launcher, True
+        warn("Could not edit your PATH automatically.")
+
+    if sys.platform == "win32":
+        info("Add it by hand: Settings -> Edit environment variables -> Path")
+    else:
+        info(shell_rc_hint(target))
+    return launcher, False
 
 
 def find_ollama() -> str | None:
@@ -477,6 +607,14 @@ def installed_models() -> list[str]:
         return []
 
 
+def _rank(tag: str) -> int:
+    """Position in MODELS, strongest first. Unknown models rank last."""
+    for i, (name, _, _) in enumerate(MODELS):
+        if tag == name or tag.split(":")[0] == name.split(":")[0]:
+            return i
+    return len(MODELS)
+
+
 def best_installed(installed: list[str]) -> str | None:
     """Pick the strongest model already present, by our own ranking."""
     for tag, _, _ in MODELS:
@@ -503,7 +641,15 @@ def ensure_model(preferred: str, why: str, assume_yes: bool) -> str | None:
              if m == preferred or m.split(":")[0] == preferred.split(":")[0]), None)
         if already:
             return already
+
         current = best_installed(installed)
+        # Never talk someone down to a weaker model than one they already run.
+        # Recommendations are sized from memory, which under-reads a machine
+        # with a big GPU.
+        if current and _rank(current) < _rank(preferred):
+            info(f"{current} is already installed and stronger than the "
+                 f"{preferred} this machine's memory suggests. Keeping it.")
+            return current
         print(f"     Recommended for this machine: {S.bold(preferred)} -- {why}")
         if not ask(f"Pull {preferred} as well?", False, assume_yes):
             info(f"Keeping {current}.")
@@ -541,7 +687,8 @@ def run_doctor(python: Path, model: str) -> bool:
 
 
 def finish(python: Path, venv_dir: Path, served: bool, healthy: bool,
-           model: str | None, checked: bool, launcher: Path | None = None) -> None:
+           model: str | None, checked: bool, launcher: Path | None = None,
+           path_was_updated: bool = False) -> None:
     print()
     if healthy:
         print(S.green(S.bold("  Done. Everything checks out.")))
@@ -559,6 +706,14 @@ def finish(python: Path, venv_dir: Path, served: bool, healthy: bool,
         print("    Run it from anywhere:")
         print()
         print(f"      {S.bold('wynxo')}")
+    elif launcher is not None and path_was_updated:
+        print("    Open a NEW terminal, then:")
+        print()
+        print(f"      {S.bold('wynxo')}")
+        print()
+        print(S.dim("    (PATH changes only apply to terminals opened after the change.)"))
+        print(S.dim("    In this one:"))
+        print(S.dim(f"      {launcher}"))
     elif launcher is not None:
         print("    Once " + str(launcher.parent) + " is on your PATH:")
         print()
@@ -602,7 +757,8 @@ def main() -> int:
     venv_dir = (ROOT / args.venv) if not os.path.isabs(args.venv) else Path(args.venv)
     python = make_venv(venv_dir, args.yes)
     install_wynxo(python, into_user=(python == Path(sys.executable) and not os.environ.get("VIRTUAL_ENV")))
-    launcher = None if args.no_link else link_command(python, venv_dir, args.yes)
+    launcher, path_was_updated = (
+        (None, False) if args.no_link else link_command(python, venv_dir, args.yes))
 
     served = False
     healthy = False
@@ -620,7 +776,8 @@ def main() -> int:
                 checked = True
                 healthy = run_doctor(python, model)
 
-    finish(python, venv_dir, served, healthy, model, checked, launcher)
+    finish(python, venv_dir, served, healthy, model, checked, launcher,
+           path_was_updated)
     return 0
 
 

@@ -16,6 +16,8 @@ import httpx
 
 from .config import Config, MIN_USABLE_CONTEXT
 
+LARGE_CONTEXT = 131_072
+
 
 class ProviderError(RuntimeError):
     """Anything that went wrong talking to the server, phrased for a human."""
@@ -370,5 +372,14 @@ async def check_context(client: OllamaClient, config: Config) -> str | None:
             f"num_ctx {config.num_ctx} exceeds what {config.model} was trained "
             f"for ({info.context_length}). Ollama will accept it, but quality "
             "degrades past the native window."
+        )
+    if config.num_ctx > LARGE_CONTEXT:
+        # KV cache grows linearly with the window and is allocated up front,
+        # so this is where a model that used to fit stops fitting.
+        return (
+            f"num_ctx is {config.num_ctx}. The KV cache scales with it and is "
+            "reserved up front, which on a 30B can be many gigabytes on top of "
+            "the weights. If loading gets slow or fails, drop to 32768 -- and "
+            "set OLLAMA_KV_CACHE_TYPE=q8_0 on the server to roughly halve it."
         )
     return None
