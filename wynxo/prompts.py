@@ -237,6 +237,41 @@ Nothing asks for approval. Be conservative with anything irreversible.
 """,
 }
 
+VOICES: dict[str, str] = {
+    "plain": "",
+    "warm": """
+## Voice
+
+Be warm and human about it. A short acknowledgement when something works, a
+plain word when it does not. Never gushing, never a cheerleader, and never at
+the cost of saying what actually happened.
+""",
+    "mentor": """
+## Voice
+
+Explain your reasoning as you go: why this approach and not the obvious
+alternative, what the trade-off was, what you would watch out for. One or two
+extra sentences, not a lecture, and only where there was a real decision.
+""",
+    "blunt": """
+## Voice
+
+Minimum words. State what you did or found, nothing else. No preamble, no
+sign-off, no restating the question.
+""",
+}
+"""Tone only.
+
+A voice changes how the agent sounds and nothing else. None of these may
+excuse skipping work, softening a real problem, or claiming something was
+done that was not -- that is the line between a personality and a liability.
+"""
+
+VOICE_FLOOR = """
+Whatever the voice, never soften a failure, never imply something worked when
+it did not, and never leave out what changed.
+"""
+
 MEMORY_TOOL_NOTE = """
 When you learn something durable -- a build command, a convention, a decision
 and its reason, a trap you hit -- write it down with `remember` so the next
@@ -252,6 +287,7 @@ def build_system_prompt(
     memory: str = "",
     boundary=None,
     mode=None,
+    voice: str = "plain",
 ) -> str:
     from .platforms import default_shell, describe
 
@@ -279,6 +315,9 @@ def build_system_prompt(
     parts.append(
         EFFORT_BLOCK.format(name=policy.name, guidance=EFFORT_GUIDANCE[policy.name])
     )
+    if block := VOICES.get(voice, ""):
+        parts.append(block)
+        parts.append(VOICE_FLOOR)
     parts.append(MEMORY_TOOL_NOTE)
     parts.append(memory)
     parts.append(project_context(workspace))

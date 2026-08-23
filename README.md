@@ -116,6 +116,7 @@ has, and you pick one.
 5. [Using it](#5-using-it)
 6. [Effort levels](#6-effort-levels)
 7. [Keys](#7-keys)
+7b. [The pet](#the-pet)
 8. [Scope and modes](#8-scope-and-modes)
 9. [Memory](#9-memory)
 10. [Tools and permissions](#10-tools-and-permissions)
@@ -567,6 +568,57 @@ syntax highlighting the moment it closes.
 
 ---
 
+## The pet
+
+There is a small face at the left of the status bar. It is not decoration —
+it changes with what the agent is doing, so a glance tells you the state
+without reading the words.
+
+```
+ (◐ᴗ◐) thinking                       12 tok  ·  2s  ·  medium
+ (◉ᴗ◉) reading   src/auth.py         147 tok  ·  33 tok/s  ·  4s  ·  medium
+ (¬ᴗ¬) editing   src/transfer.py     812 tok  ·  51 tok/s  ·  9s  ·  medium
+ (•ᴗ•)╭ running  pytest -q          1290 tok  ·  64 tok/s  ·  14s  ·  medium
+ (≧ᴗ≦) done                         1503 tok  ·  63 tok/s  ·  18s  ·  medium
+ (×ᴗ×) something broke
+```
+
+It blinks, and it falls back to `(o_o)` / `(^_^)` where the terminal cannot
+render the rest.
+
+```
+/pet                     see every mood, and the current settings
+/pet off                 no face; the spinner comes back
+/pet still               keep the face, stop the animation
+/pet name ada            call it what you like
+/pet voice warm          how the agent talks -- see below
+```
+
+### Voice
+
+How wynxo talks to you. Tone only.
+
+| voice | sounds like |
+|---|---|
+| `plain` | direct and professional **(default)** |
+| `warm` | friendly, still honest about failures |
+| `mentor` | explains the reasoning behind decisions |
+| `blunt` | the fewest words that say what happened |
+
+Every voice except `plain` carries the same floor, which no personality can
+override: never soften a failure, never imply something worked when it did
+not, never leave out what changed. A voice changes how it sounds, not how
+much it does or how honest it is.
+
+```bash
+/pet voice blunt
+```
+
+Set `"voice"`, `"pet"`, `"pet_name"` and `"animations"` in your config to make
+any of it permanent.
+
+---
+
 ## 8. Scope and modes
 
 Two separate dials, on purpose.
@@ -722,6 +774,7 @@ effort-level setting.
 /scope [folder|repo|machine]    what it may touch
 /undo [n|list]           revert the last file change
 /memory ...              show | add <note> | forget <text> | edit | reload
+/pet ...                 on | off | still | name <x> | voice <x>
 /tools                   what the agent can call
 /thinking                show or hide the model's reasoning
 /plan                    the current todo list
@@ -790,6 +843,10 @@ wynxo [prompt]
   "request_timeout": 600.0,
   "auto_approve": ["read_file", "grep", "glob"],
   "allow_shell": true,
+  "voice": "plain",
+  "pet": true,
+  "pet_name": "wyn",
+  "animations": true,
   "show_thinking": true,
   "stream": true
 }
@@ -1012,7 +1069,8 @@ wynxo/
   prompts.py     system prompts and stage prompts
   doctor.py      the pre-flight checks
   wizard.py      first-run setup
-  ui.py          rendering, including the narrow-screen layout
+  ui.py          rendering, the pinned bar, the narrow-screen layout
+  pet.py         the companion face and its moods
   cli.py         REPL and slash commands
   tools/         read, write, edit, list, glob, grep, shell, todo
 scripts/

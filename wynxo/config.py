@@ -72,6 +72,11 @@ class Config(Schema):
                          item_type=str, default_factory=list)
     allow_shell = Field(bool, "Whether the shell tool is available.", default=True)
     theme = Field(str, "dark or light.", default="dark")
+    voice = Field(str, "How the agent talks: plain, warm, mentor or blunt.",
+                  default="plain", choices=("plain", "warm", "mentor", "blunt"))
+    pet = Field(bool, "Show the companion face in the status bar.", default=True)
+    pet_name = Field(str, "What to call it.", default="wyn")
+    animations = Field(bool, "Animate the face and the startup.", default=True)
     show_thinking = Field(bool, "Display the model's reasoning.", default=True)
     stream = Field(bool, "Stream responses as they are written.", default=True)
 

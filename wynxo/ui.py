@@ -107,6 +107,32 @@ class UI:
         self.console.print(head, overflow="ellipsis", no_wrap=True)
         self.console.print(Rule(style=MUTED, characters="\u2500"))
 
+    def wake(self, pet, name: str) -> None:
+        """A short wake-up before the header.
+
+        Two thirds of a second, once per session, and skipped entirely when
+        animation is off or nothing is watching. Anything longer is a thing
+        you wait through rather than enjoy.
+        """
+        if not (pet and pet.enabled and pet.animate and self.console.is_terminal):
+            return
+        from .pet import Mood
+
+        sequence = [(Mood.SAD, 0.09), (Mood.IDLE, 0.09), (Mood.THINKING, 0.09),
+                    (Mood.READING, 0.09), (Mood.HAPPY, 0.16), (Mood.IDLE, 0.0)]
+        self.console.print()
+        with Live("", console=self.console, refresh_per_second=20,
+                  transient=True) as live:
+            for mood, pause in sequence:
+                pet.react(mood)
+                line = Text("  ")
+                line.append(pet.face(advance=False), style=f"bold {pet.style()}")
+                line.append(f"  {name}", style=MUTED)
+                live.update(line)
+                if pause:
+                    time.sleep(pause)
+        pet.rest()
+
     def shorten_path(self, path: str) -> str:
         """~/code/proj rather than /home/you/code/proj, and never the full
         thing when it would push everything else off the line."""
@@ -384,11 +410,15 @@ class ActivityBar:
     SPINNER = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
     SPINNER_ASCII = "|/-\\"
 
-    def __init__(self, ui: "UI", effort: str, hint: str = "", model: str = ""):
+    def __init__(self, ui: "UI", effort: str, hint: str = "", model: str = "",
+                 pet=None):
         self.ui = ui
         self.effort = effort
         self.hint = hint
         self.model = model
+        self.pet = pet
+        """When present it replaces the spinner: the face carries the same
+        information -- something is happening, and roughly what."""
         self.activity = "thinking"
         self.detail = ""
         self.tokens = 0
@@ -421,12 +451,17 @@ class ActivityBar:
 
     def _render(self) -> Text:
         self._frame += 1
-        frames = self.SPINNER if self.ui.g.unicode else self.SPINNER_ASCII
-        spin = frames[self._frame % len(frames)]
         width = max(20, self.ui.width)
 
         left = Text(style=BAR_STYLE)
-        left.append(f" {spin} ", style=f"bold {BAR_ACCENT}")
+        if self.pet is not None and self.pet.enabled:
+            left.append(" ")
+            left.append(self.pet.padded(), style=f"bold {self.pet.style()}")
+            left.append(" ")
+        else:
+            frames = self.SPINNER if self.ui.g.unicode else self.SPINNER_ASCII
+            left.append(f" {frames[self._frame % len(frames)]} ",
+                        style=f"bold {BAR_ACCENT}")
         left.append(self.activity, style="bold")
         if self.detail:
             left.append("  ")
@@ -471,6 +506,8 @@ class ActivityBar:
                tokens: int | None = None, context_pct: float | None = None) -> None:
         if activity is not None:
             self.activity = activity
+            if self.pet is not None:
+                self.pet.set_activity(activity)
         if detail is not None:
             self.detail = detail
         if tokens is not None:

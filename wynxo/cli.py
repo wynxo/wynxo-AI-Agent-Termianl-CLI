@@ -29,9 +29,12 @@ from .provider import OllamaClient, ProviderError, check_context
 from .session import Session
 from .keys import KeyWatcher, describe_bindings
 from .memory import Memory
+from .pet import Mood, Pet
 from .scope import Mode, Scope, resolve as resolve_scope
 from .status import Status
 from .tools import build_registry
+from rich.text import Text
+
 from .ui import ACCENT, MUTED, ActivityBar, CodeStreamer, UI
 
 # What the activity bar says while each tool runs.
@@ -47,6 +50,15 @@ LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail"}
 from .platforms import ollama_server_help as server_help, suspicious_workspace
 from .wizard import probe, run_wizard
 
+def _voice_summary(voice: str) -> str:
+    return {
+        "plain": "direct and professional (default)",
+        "warm": "friendly, still honest about failures",
+        "mentor": "explains the reasoning behind decisions",
+        "blunt": "the fewest words that say what happened",
+    }.get(voice, "")
+
+
 def _escape(text: str) -> str:
     """prompt_toolkit's HTML helper parses its input, so a model tag with an
     angle bracket in it would raise rather than render."""
@@ -60,6 +72,7 @@ COMMANDS = {
     "/endpoint": "list | use <name> | add <url> | test -- where Ollama serves",
     "/ctx": "show or set the context window (num_ctx)",
     "/tools": "list the tools the agent can call",
+    "/pet": "the companion: on | off | name <x> | voice <x>",
     "/mode": "plan | manual | auto | yolo -- how much it asks first",
     "/scope": "folder | repo | machine -- what it may touch",
     "/undo": "revert the last file change",
@@ -244,6 +257,12 @@ class Repl:
         self.boundary = resolve_scope(workspace, scope)
         self.mode = mode
         self.memory = Memory(workspace)
+        self.pet = Pet(
+            name=config.pet_name,
+            enabled=config.pet,
+            animate=config.animations,
+            unicode=ui.g.unicode,
+        )
 
         history_file = data_dir() / "history"
         history_file.parent.mkdir(parents=True, exist_ok=True)
@@ -341,12 +360,19 @@ class Repl:
 
         status.close()
 
+        self.ui.wake(self.pet, self.pet.name)
         self.ui.banner(
             self.config.model,
             f"{self.client.base_url} (ollama {version})",
             self.policy.name,
             str(self.workspace),
         )
+        if self.pet.enabled:
+            self.ui.console.print(
+                Text("  ") + Text(self.pet.face(advance=False),
+                                  style=f"bold {self.pet.style()}")
+                + Text(f"  {self.pet.name} — {self.pet.remark('greet')}", style=MUTED))
+            self.ui.console.print()
         return True
 
     async def start(self) -> int:
@@ -392,7 +418,7 @@ class Repl:
         self.callbacks._thinking_chars = 0
 
         bar = ActivityBar(self.ui, self.policy.name, describe_bindings(LIVE_KEYS),
-                          model=self.config.model)
+                          model=self.config.model, pet=self.pet)
         used = self.agent.session.token_estimate()
         limit = self.policy.context_budget or self.config.num_ctx
         bar.context_pct = 100 * used / max(1, limit)
@@ -410,6 +436,7 @@ class Repl:
         try:
             result = await self._task
         except (asyncio.CancelledError, Interrupted):
+            self.pet.react(Mood.IDLE)
             self.ui.console.print()
             self.ui.warn("Interrupted. The conversation is intact; ask me something else.")
             return
@@ -425,8 +452,10 @@ class Repl:
         self.callbacks._end_stream()
 
         if result.errors:
+            self.pet.react(Mood.SAD)
             self.ui.error("\n".join(result.errors))
             return
+        self.pet.react(Mood.HAPPY if not result.interrupted else Mood.IDLE)
 
         if result.content and not self.config.stream:
             self.ui.assistant_markdown(result.content)
@@ -575,6 +604,9 @@ class Repl:
             return self.cmd_undo(args)
         if name == "/memory":
             return self.cmd_memory(args)
+
+        if name == "/pet":
+            return self.cmd_pet(args)
 
         if name == "/yolo":
             self.agent.permissions.yolo = not self.agent.permissions.yolo
@@ -833,6 +865,71 @@ class Repl:
                 self.ui.info(message)
                 break
             self.ui.success(message)
+        return True
+
+    def cmd_pet(self, args: list[str]) -> bool:
+        from .prompts import VOICES
+
+        if not args:
+            self.ui.console.print()
+            for mood in Mood:
+                self.pet.react(mood)
+                self.pet._frame = 0
+                frames = "  ".join(self.pet.face() for _ in range(0, 12, 3))
+                self.ui.console.print(
+                    f"    [{self.pet.style()}]{frames}[/]  [{MUTED}]{mood.value}[/]")
+            self.pet.rest()
+            self.ui.console.print()
+            self.ui.info(f"name: {self.pet.name}   voice: {self.config.voice}   "
+                         f"{'on' if self.pet.enabled else 'off'}"
+                         f"{'' if self.pet.animate else ', still'}")
+            self.ui.info("/pet off · /pet name <x> · /pet voice "
+                         + " | ".join(VOICES))
+            return True
+
+        action = args[0].lower()
+
+        if action in ("on", "off"):
+            self.pet.enabled = action == "on"
+            self.config.pet = self.pet.enabled
+            self.config.save()
+            self.ui.success(f"pet {action}")
+            return True
+
+        if action in ("still", "animate"):
+            self.pet.animate = action == "animate"
+            self.config.animations = self.pet.animate
+            self.config.save()
+            self.ui.success(f"animation {'on' if self.pet.animate else 'off'}")
+            return True
+
+        if action == "name" and len(args) > 1:
+            self.pet.name = " ".join(args[1:])[:24]
+            self.config.pet_name = self.pet.name
+            self.config.save()
+            self.ui.success(f"{self.pet.face(advance=False)}  hello, {self.pet.name}")
+            return True
+
+        if action == "voice":
+            if len(args) < 2:
+                self.ui.table(
+                    ["voice", "sounds like"],
+                    [(v + ("  <-" if v == self.config.voice else ""),
+                      _voice_summary(v)) for v in VOICES],
+                    title="voice",
+                )
+                return True
+            choice = args[1].lower()
+            if choice not in VOICES:
+                self.ui.warn(f"unknown voice; choose one of {', '.join(VOICES)}")
+                return True
+            self.config.voice = choice
+            self.config.save()
+            self.agent.refresh_system_prompt()
+            self.ui.success(f"voice: {choice} -- {_voice_summary(choice)}")
+            return True
+
+        self.ui.warn("usage: /pet [on|off|still|animate|name <x>|voice <x>]")
         return True
 
     def cmd_memory(self, args: list[str]) -> bool:

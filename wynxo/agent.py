@@ -115,6 +115,7 @@ class Agent:
             memory=self.memory.prompt_section(),
             boundary=self.boundary,
             mode=self.permissions.mode,
+            voice=self.config.voice,
         )
 
     def set_effort(self, policy: EffortPolicy) -> None:
