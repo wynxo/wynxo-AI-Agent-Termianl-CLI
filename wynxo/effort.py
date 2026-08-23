@@ -1,0 +1,225 @@
+"""Effort levels.
+
+Effort is a *scheduler policy*, not a single model knob. Local models mostly do
+not expose a native reasoning budget, so a level that only forwarded a
+``reasoning_effort`` field would collapse into two or three real settings.
+
+Instead each level controls how many chances the model gets to be right:
+how much it plans, how many tool iterations it may spend, how many times it
+re-checks its own work, how wide it fans out, and how much context it is
+allowed to keep. A 30B model at ``max`` genuinely beats itself at ``low``,
+not because it thinks harder per token but because it catches its own mistakes.
+
+Where a model *does* have a native dial (Qwen3's thinking mode, gpt-oss's
+``reasoning_effort``) the policy drives that too, via `native_effort` and
+`thinking`.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from typing import Literal
+
+EffortName = Literal["low", "medium", "high", "xhigh", "max", "ultra"]
+
+ORDER: tuple[EffortName, ...] = ("low", "medium", "high", "xhigh", "max", "ultra")
+
+PlanMode = Literal["none", "inline", "explicit", "critique"]
+
+
+@dataclass(frozen=True)
+class EffortPolicy:
+    """How hard the agent is allowed to work on one request."""
+
+    name: EffortName
+
+    # --- loop shape -------------------------------------------------------
+    plan: PlanMode
+    """``none`` acts immediately. ``inline`` asks for a one-line plan in the
+    same turn. ``explicit`` runs a separate read-only planning pass first.
+    ``critique`` additionally has the model attack its own plan before acting."""
+
+    max_iterations: int
+    """Hard ceiling on tool-call round trips for a single user request."""
+
+    verify_rounds: int
+    """Self-review passes after the model believes it is done. -1 = until the
+    review comes back clean (bounded by ``max_verify_rounds``)."""
+
+    max_verify_rounds: int
+    """Absolute ceiling when ``verify_rounds`` is -1, so 'until clean' cannot
+    spin forever on a model that never admits it is done."""
+
+    parallel_samples: int
+    """Independent attempts at the *plan*, reconciled by the model before it
+    acts. >1 costs real time on a local box; only the top levels use it."""
+
+    # --- context ----------------------------------------------------------
+    context_budget: int
+    """Tokens of conversation to keep before compaction kicks in. ``0`` means
+    use the whole served context window."""
+
+    max_tool_output: int
+    """Characters of a single tool result kept verbatim before truncation.
+    Low effort keeps less so the window lasts longer."""
+
+    # --- model knobs ------------------------------------------------------
+    thinking: bool
+    """Qwen3 / DeepSeek-style thinking mode."""
+
+    native_effort: str | None
+    """Forwarded as ``reasoning_effort`` for models that support it (gpt-oss).
+    Ignored by models that do not."""
+
+    temperature: float
+    num_predict: int
+    """Max tokens per single model response. -1 = model default."""
+
+    # --- behaviour --------------------------------------------------------
+    repair_attempts: int
+    """How many times a malformed tool call is handed back for repair before
+    the turn is failed. Local models emit bad JSON often enough that this
+    matters more than anything else on this list."""
+
+    def bump(self, delta: int) -> "EffortPolicy":
+        """Return the policy ``delta`` steps up or down the ladder."""
+        i = ORDER.index(self.name)
+        j = max(0, min(len(ORDER) - 1, i + delta))
+        return POLICIES[ORDER[j]]
+
+    def describe(self) -> str:
+        plan = {
+            "none": "no planning",
+            "inline": "inline plan",
+            "explicit": "planning pass",
+            "critique": "plan + self-critique",
+        }[self.plan]
+        if self.verify_rounds < 0:
+            verify = f"verify until clean (cap {self.max_verify_rounds})"
+        elif self.verify_rounds == 0:
+            verify = "no verification"
+        else:
+            verify = f"{self.verify_rounds} verify round(s)"
+        bits = [plan, f"{self.max_iterations} tool iters", verify]
+        if self.parallel_samples > 1:
+            bits.append(f"{self.parallel_samples}x plan consensus")
+        bits.append("thinking on" if self.thinking else "thinking off")
+        return ", ".join(bits)
+
+
+POLICIES: dict[EffortName, EffortPolicy] = {
+    "low": EffortPolicy(
+        name="low",
+        plan="none",
+        max_iterations=6,
+        verify_rounds=0,
+        max_verify_rounds=0,
+        parallel_samples=1,
+        context_budget=8_000,
+        max_tool_output=4_000,
+        thinking=False,
+        native_effort="low",
+        temperature=0.3,
+        num_predict=1_024,
+        repair_attempts=1,
+    ),
+    "medium": EffortPolicy(
+        name="medium",
+        plan="inline",
+        max_iterations=16,
+        verify_rounds=0,
+        max_verify_rounds=0,
+        parallel_samples=1,
+        context_budget=16_000,
+        max_tool_output=8_000,
+        thinking=False,
+        native_effort="medium",
+        temperature=0.4,
+        num_predict=2_048,
+        repair_attempts=2,
+    ),
+    "high": EffortPolicy(
+        name="high",
+        plan="explicit",
+        max_iterations=40,
+        verify_rounds=1,
+        max_verify_rounds=1,
+        parallel_samples=1,
+        context_budget=32_000,
+        max_tool_output=12_000,
+        thinking=True,
+        native_effort="high",
+        temperature=0.5,
+        num_predict=4_096,
+        repair_attempts=3,
+    ),
+    "xhigh": EffortPolicy(
+        name="xhigh",
+        plan="explicit",
+        max_iterations=80,
+        verify_rounds=2,
+        max_verify_rounds=2,
+        parallel_samples=1,
+        context_budget=64_000,
+        max_tool_output=16_000,
+        thinking=True,
+        native_effort="high",
+        temperature=0.5,
+        num_predict=8_192,
+        repair_attempts=3,
+    ),
+    "max": EffortPolicy(
+        name="max",
+        plan="critique",
+        max_iterations=150,
+        verify_rounds=-1,
+        max_verify_rounds=4,
+        parallel_samples=2,
+        context_budget=0,
+        max_tool_output=24_000,
+        thinking=True,
+        native_effort="high",
+        temperature=0.6,
+        num_predict=-1,
+        repair_attempts=4,
+    ),
+    "ultra": EffortPolicy(
+        name="ultra",
+        plan="critique",
+        max_iterations=400,
+        verify_rounds=-1,
+        max_verify_rounds=8,
+        parallel_samples=3,
+        context_budget=0,
+        max_tool_output=32_000,
+        thinking=True,
+        native_effort="high",
+        temperature=0.7,
+        num_predict=-1,
+        repair_attempts=5,
+    ),
+}
+
+
+def resolve(name: str) -> EffortPolicy:
+    """Look up a policy, accepting a few obvious aliases."""
+    key = name.strip().lower()
+    aliases = {
+        "l": "low", "min": "low", "fast": "low", "quick": "low",
+        "m": "medium", "med": "medium", "normal": "medium", "default": "medium",
+        "h": "high",
+        "xh": "xhigh", "x": "xhigh", "extra": "xhigh", "extreme": "xhigh",
+        "maximum": "max",
+        "u": "ultra", "insane": "ultra",
+    }
+    key = aliases.get(key, key)
+    if key not in POLICIES:
+        raise KeyError(
+            f"unknown effort level {name!r}; choose one of {', '.join(ORDER)}"
+        )
+    return POLICIES[key]
+
+
+def override(policy: EffortPolicy, **kwargs) -> EffortPolicy:
+    """Per-session tweaks on top of a named level (e.g. thinking off at high)."""
+    return replace(policy, **kwargs)

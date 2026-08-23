@@ -1,0 +1,61 @@
+"""Tool registry."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from .base import Tool, ToolResult
+from .files import EditFile, ListDir, ReadFile, WriteFile
+from .search import Glob, Grep
+from .shell import Shell
+from .todo import TodoWrite
+
+__all__ = ["Tool", "ToolResult", "Registry", "build_registry"]
+
+
+class Registry:
+    def __init__(self, tools: list[Tool]):
+        self._tools = {t.name: t for t in tools}
+
+    def __contains__(self, name: str) -> bool:
+        return name in self._tools
+
+    def __iter__(self):
+        return iter(self._tools.values())
+
+    def __len__(self) -> int:
+        return len(self._tools)
+
+    def get(self, name: str) -> Tool | None:
+        return self._tools.get(name)
+
+    def names(self) -> list[str]:
+        return list(self._tools)
+
+    def ollama_schemas(self) -> list[dict]:
+        return [t.ollama_schema() for t in self._tools.values()]
+
+    def suggest(self, name: str) -> str | None:
+        """A model that invents a tool name usually invents a near miss."""
+        import difflib
+
+        close = difflib.get_close_matches(name, self.names(), n=1, cutoff=0.6)
+        return close[0] if close else None
+
+    def describe(self) -> str:
+        return "\n".join(f"  {t.signature()}\n      {t.description}" for t in self._tools.values())
+
+
+def build_registry(workspace: Path, allow_shell: bool = True) -> Registry:
+    tools: list[Tool] = [
+        ReadFile(workspace),
+        WriteFile(workspace),
+        EditFile(workspace),
+        ListDir(workspace),
+        Glob(workspace),
+        Grep(workspace),
+        TodoWrite(workspace),
+    ]
+    if allow_shell:
+        tools.append(Shell(workspace))
+    return Registry(tools)
