@@ -72,7 +72,19 @@ class ReadFile(Tool):
             hint = f" Did you mean {near}?" if near else ""
             return ToolResult.failure(f"{rel} does not exist.{hint}")
         if path.is_dir():
-            return ToolResult.failure(f"{rel} is a directory. Use list_dir.")
+            # Answer rather than refuse. A weaker model that asks to read a
+            # directory will ask again, and again, if all it gets back is a
+            # complaint -- it has no new information to act on. Handing it the
+            # listing ends the loop and is what it wanted anyway.
+            listing = await ListDir(self.workspace, self.boundary).run(
+                ListInput(path=args.path))
+            return ToolResult.success(
+                f"{rel} is a directory, so here is what is in it "
+                f"(use read_file on one of these files):\n\n{listing.output}",
+                display=f"listed {rel} (asked to read a directory)",
+                path=rel,
+                was_directory=True,
+            )
         if _looks_binary(path):
             size = path.stat().st_size
             return ToolResult.failure(f"{rel} is a binary file ({size} bytes).")
@@ -135,6 +147,10 @@ class WriteFile(Tool):
     async def run(self, args: WriteInput) -> ToolResult:
         path = self.resolve_path(args.path)
         rel = self.relative(path)
+        if path.is_dir():
+            return ToolResult.failure(
+                f"{rel} is a directory, not a file. Give the path of a file "
+                "inside it, for example {rel}/notes.md.".replace("{rel}", rel))
         existed = path.exists()
         before = _read_text(path) if existed and not _looks_binary(path) else ""
 
@@ -175,6 +191,10 @@ class EditFile(Tool):
     async def run(self, args: EditInput) -> ToolResult:
         path = self.resolve_path(args.path)
         rel = self.relative(path)
+        if path.is_dir():
+            return ToolResult.failure(
+                f"{rel} is a directory, not a file. Use list_dir to see what is "
+                "in it, then edit one of the files.")
         if not path.exists():
             return ToolResult.failure(f"{rel} does not exist. Use write_file to create it.")
         if args.old_text == args.new_text:
@@ -248,7 +268,7 @@ class ListDir(Tool):
         truncated = self._walk(root, args.depth, "", lines)
         if not lines:
             return ToolResult.success(f"{rel}/ is empty")
-        body = f"{rel}/\n" + "\n".join(lines)
+        body = f"{rel.rstrip('/')}/\n" + "\n".join(lines)
         if truncated:
             body += f"\n... (truncated at {MAX_ENTRIES} entries)"
         return ToolResult.success(body, display=f"listed {rel} ({len(lines)} entries)")
@@ -301,6 +321,8 @@ class MultiEdit(Tool):
     async def run(self, args: MultiEditInput) -> ToolResult:
         path = self.resolve_path(args.path)
         rel = self.relative(path)
+        if path.is_dir():
+            return ToolResult.failure(f"{rel} is a directory, not a file.")
         if not path.exists():
             return ToolResult.failure(f"{rel} does not exist. Use write_file to create it.")
         if not args.edits:

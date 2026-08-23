@@ -296,7 +296,7 @@ def add_to_user_path(directory: Path) -> bool:
 
 
 def _add_to_path_windows(directory: Path) -> bool:
-    """setx writes HKCU\Environment and survives reboots.
+    r"""Write HKCU\Environment directly, so it survives reboots.
 
     It truncates at 1024 characters, so read the existing value from the
     registry (not the expanded process PATH, which includes the machine-wide

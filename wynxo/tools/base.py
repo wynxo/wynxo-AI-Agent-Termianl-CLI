@@ -133,12 +133,19 @@ class Tool(ABC):
         return full
 
     def relative(self, path: Path) -> str:
-        """A short display path: relative to the workspace when it can be."""
+        """A short display path: relative to the workspace when it can be.
+
+        The workspace itself comes back as its own directory name rather than
+        ".", because "." is a directory' reads as a bug report about nothing.
+        """
+        resolved = path.resolve()
         for base in (self.workspace, self.boundary.root):
             try:
-                return str(path.resolve().relative_to(base))
+                relative = resolved.relative_to(base)
             except ValueError:
                 continue
+            text = str(relative)
+            return f"{resolved.name}/" if text == "." else text
         return str(path)
 
 

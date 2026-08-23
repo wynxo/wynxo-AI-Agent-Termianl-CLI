@@ -14,7 +14,8 @@ from pathlib import Path
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
-from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.shortcuts import CompleteStyle
+from prompt_toolkit.formatted_text import ANSI, HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -35,7 +36,8 @@ from .status import Status
 from .tools import build_registry
 from rich.text import Text
 
-from .ui import ACCENT, MUTED, ActivityBar, CodeStreamer, UI
+from .ui import (ACCENT, MUTED, ActivityBar, CodeStreamer, ThoughtStreamer,
+                 UI)
 
 # What the activity bar says while each tool runs.
 _ACTIVITY = {
@@ -98,8 +100,8 @@ class TerminalCallbacks(Callbacks):
         # None in non-interactive mode, where nothing can be asked anyway.
         self.prompt_session = prompt_session
         self._streaming = False
-        self._thinking_open = False
         self._thinking_chars = 0
+        self._thinker: ThoughtStreamer | None = None
         self.bar: ActivityBar | None = None
         self.watcher: KeyWatcher | None = None
         """Set while a turn runs. It holds the terminal in cbreak mode, so it
@@ -128,11 +130,8 @@ class TerminalCallbacks(Callbacks):
             self.ui.info(message)
 
     def _end_stream(self) -> None:
-        """Close whichever transient line is open, so the next block starts clean."""
-        if self._thinking_open:
-            self.ui.console.print(f" [{MUTED}]({self._thinking_chars} chars)[/]")
-            self._thinking_open = False
-            self._thinking_chars = 0
+        """Close whichever transient block is open, so the next starts clean."""
+        self._end_thinking()
         if self._streaming:
             if self.streamer is not None:
                 self.streamer.finish()
@@ -143,14 +142,23 @@ class TerminalCallbacks(Callbacks):
         self._thinking_chars += len(text)
         self.tokens += 1
         if self.bar is not None:
-            self.bar.update(activity="thinking", detail="reasoning", tokens=self.tokens)
+            self.bar.update(activity="thinking", tokens=self.tokens)
+
         if not self.ui.show_thinking:
             return
         if self._streaming:
             self._end_stream()
-        if not self._thinking_open and self.bar is None:
-            self.ui.console.print(f"  [{MUTED}]thinking...[/]", end="")
-            self._thinking_open = True
+        if self._thinker is None:
+            self.ui.console.print()
+            self.ui.console.print(Text("  thinking", style=f"bold {MUTED}"))
+            self._thinker = ThoughtStreamer(self.ui)
+        self._thinker.feed(text)
+
+    def _end_thinking(self) -> None:
+        if self._thinker is not None:
+            self._thinker.finish()
+            self._thinker = None
+            self._thinking_chars = 0
 
     async def on_content(self, text: str) -> None:
         # Ollama streams roughly one token per chunk, so counting chunks gives
@@ -300,6 +308,11 @@ class Repl:
             completer=WordCompleter(list(COMMANDS), sentence=True),
             key_bindings=bindings,
             multiline=False,
+            # The default reserves eight rows for a completion dropdown,
+            # which shows up as a slab of empty screen under every prompt.
+            # Readline-style completion prints inline and needs none.
+            reserve_space_for_menu=0,
+            complete_style=CompleteStyle.READLINE_LIKE,
         )
         self.callbacks = TerminalCallbacks(ui, self.prompt_session)
         self.agent = Agent(self.client, config, self.policy, workspace, self.callbacks,
@@ -383,6 +396,7 @@ class Repl:
     async def _loop(self) -> int:
         while True:
             try:
+                self._open_box()
                 text = await self.prompt_session.prompt_async(
                     self._prompt_message, bottom_toolbar=self._bottom_toolbar)
             except KeyboardInterrupt:
@@ -474,10 +488,56 @@ class Repl:
             self.ui.info("context was compacted during this turn")
 
     def _prompt_message(self) -> HTML:
-        """Evaluated on every redraw, so Ctrl-E/Ctrl-B show up at once."""
-        return HTML(f'<ansicyan><b>{self.policy.name}</b> &gt; </ansicyan>')
+        """The left edge of the input box.
 
-    def _bottom_toolbar(self) -> HTML:
+        Re-evaluated on every redraw, so a mid-prompt Ctrl-E shows up at once.
+        """
+        return HTML('<ansicyan>\u2502</ansicyan> <b><ansicyan>&gt;</ansicyan></b> ')
+
+    def _open_box(self) -> None:
+        """Top edge of the input box, printed just before the prompt."""
+        width = max(24, self.ui.width)
+        self.ui.console.print(
+            Text("\u256d" + "\u2500" * (width - 2) + "\u256e", style=ACCENT))
+
+    def _bottom_toolbar(self):
+        """The closing edge of the input box, with the status set into it.
+
+        One line rather than two: a multi-line toolbar does not render on
+        terminals that cannot answer a cursor-position request, and the border
+        is the natural place for the status anyway.
+        """
+        from rich.cells import cell_len
+
+        width = max(30, self.ui.width)
+        left = self._status_line()
+        hint = "^O thinking   ^C stop"
+
+        # "╰─ " + status + " " + fill + " " + hint + " ─╯"
+        def total(status: str, tail: str, fill: int) -> int:
+            head = 3 + cell_len(status) + 1 + fill
+            return head + (1 + len(tail) + 2 if tail else 1)
+
+        if total(left, hint, 1) > width:
+            hint = ""
+        if total(left, hint, 1) > width:
+            left = left[: max(0, width - 10)]
+        fill = max(1, width - total(left, hint, 0))
+
+        cyan, dim, reset = "\x1b[36m", "\x1b[38;5;247m", "\x1b[0m"
+        line = f"{cyan}\u2570\u2500{reset} {dim}{left}{reset} {cyan}" + "\u2500" * fill
+        if hint:
+            line += f"{reset} {dim}{hint}{reset} {cyan}\u2500"
+        line += f"\u256f{reset}"
+        return ANSI(line)
+
+    def _border_plain(self) -> str:
+        """The bottom border with the escapes stripped, for tests."""
+        import re
+
+        return re.sub(r"\x1b\[[0-9;]*m", "", self._bottom_toolbar().value)
+
+    def _status_line(self) -> str:
         """The idle half of the pinned bar.
 
         prompt_toolkit renders this immediately below the input, in the same
@@ -487,19 +547,19 @@ class Repl:
         usage = self.agent.session.usage
         used = self.agent.session.token_estimate()
         limit = self.policy.context_budget or self.config.num_ctx
-        pieces = [
-            _escape(self.config.model),
-            _escape(self.policy.name),
-            f"ctx {100 * used / max(1, limit):.0f}%",
-        ]
+        pieces = []
+        if self.pet.enabled:
+            pieces.append(f"{self.pet.face(advance=False)} {self.pet.name}")
+        pieces += [self.config.model, self.policy.name,
+                   f"ctx {100 * used / max(1, limit):.0f}%"]
         if usage.completion_tokens:
             pieces.append(f"{usage.completion_tokens} tok")
             if speed := usage.tokens_per_second():
                 pieces.append(f"{speed:.0f} tok/s")
         if self.agent.permissions.mode is not Mode.MANUAL:
-            pieces.append(_escape(self.agent.permissions.mode.value))
-        body = "  ·  ".join(pieces)
-        return HTML(f" {body}   <b>^O</b> thinking  <b>^T</b> detail  <b>^C</b> stop ")
+            pieces.append(self.agent.permissions.mode.value)
+
+        return "  ·  ".join(pieces)
 
     def _shift_effort(self, delta: int) -> None:
         """Step the effort level without typing a command."""

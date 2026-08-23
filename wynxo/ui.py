@@ -399,6 +399,63 @@ def _language(tag: str) -> str:
             "": "text"}.get(tag, tag)
 
 
+class ThoughtStreamer:
+    """Streams the model's reasoning as dim, indented, wrapped prose.
+
+    Reasoning arrives as a flood of tiny fragments with no line structure at
+    all, so it cannot be printed per-chunk like content: it has to be
+    accumulated and broken at word boundaries, or it turns into one
+    unreadable line the width of the transcript.
+    """
+
+    def __init__(self, ui: "UI", indent: str = "    "):
+        self.ui = ui
+        self.indent = indent
+        self.line = ""
+        self.pending = ""
+        """A trailing partial word. Fragments split mid-word constantly --
+        "what auth" then ".py does" -- and treating each fragment's pieces as
+        whole words inserts a space into the middle of every one."""
+        self.width = max(28, ui.width - len(indent) - 2)
+
+    def feed(self, text: str) -> None:
+        self.pending += text.replace("\r", "")
+        while True:
+            newline = self.pending.find("\n")
+            space = self.pending.rfind(" ")
+            if newline == -1 and space == -1:
+                return
+            if newline != -1 and (space == -1 or newline < space):
+                self._words(self.pending[:newline])
+                self._flush()
+                self.pending = self.pending[newline + 1:]
+                continue
+            self._words(self.pending[: space + 1])
+            self.pending = self.pending[space + 1:]
+            return
+
+    def _words(self, text: str) -> None:
+        for word in text.split():
+            candidate = f"{self.line} {word}".strip()
+            if len(candidate) > self.width:
+                self._flush()
+                candidate = word
+            self.line = candidate
+
+    def _flush(self) -> None:
+        if self.line:
+            self.ui.console.print(Text(self.indent + self.line, style=MUTED),
+                                  highlight=False)
+            self.line = ""
+
+    def finish(self) -> None:
+        if self.pending:
+            self._words(self.pending)
+            self.pending = ""
+        self._flush()
+        self.ui.console.print()
+
+
 class ActivityBar:
     """The pinned bar: what is happening, and the tokens as they arrive.
 
