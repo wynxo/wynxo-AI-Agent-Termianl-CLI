@@ -406,3 +406,180 @@ class TestOlderServerCompatibility:
         # Every later request goes straight out as a boolean: no repeat 400s.
         assert all(r["think"] is True for r in fake.requests[before:])
         await agent.client.aclose()
+
+
+class TestModesAndScopeInTheLoop:
+    """Scope and mode enforcement, exercised through the real agent loop
+    against a model that genuinely tries to write."""
+
+    def _agent(self, tmp_path, turns, mode=None, scope=None):
+        from wynxo.memory import Memory
+        from wynxo.scope import Mode, Scope, resolve as resolve_scope
+
+        boundary = resolve_scope(tmp_path, scope or Scope.FOLDER)
+        fake = FakeOllama(turns)
+        config = Config(endpoints=[Endpoint(name="t", url="http://fake:11434")],
+                        active_endpoint="t", model="qwen3-coder:30b", num_ctx=32768)
+        client = OllamaClient(config)
+        client._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(fake.handler), base_url="http://fake:11434")
+        cb = RecordingCallbacks()
+        agent = Agent(client, config, resolve("low"), tmp_path, cb,
+                      boundary=boundary, memory=Memory(tmp_path, tmp_path / "u"))
+        agent.permissions.mode = mode or Mode.MANUAL
+        return agent, cb
+
+    async def test_plan_mode_refuses_a_real_write(self, tmp_path):
+        from wynxo.scope import Mode
+
+        target = tmp_path / "a.py"
+        target.write_text("original\n")
+        agent, _ = self._agent(tmp_path, [
+            {"tool_calls": [{"function": {"name": "write_file", "arguments": {
+                "path": "a.py", "content": "rewritten\n"}}}]},
+            {"content": "I cannot write in plan mode."},
+        ], mode=Mode.PLAN)
+
+        await agent.run("rewrite it")
+        assert target.read_text() == "original\n", "plan mode let a write through"
+        tool_messages = [m for m in agent.session.messages if m.get("role") == "tool"]
+        assert "plan mode" in tool_messages[0]["content"]
+        await agent.client.aclose()
+
+    async def test_plan_mode_still_allows_reads(self, tmp_path):
+        from wynxo.scope import Mode
+
+        (tmp_path / "a.py").write_text("contents here\n")
+        agent, cb = self._agent(tmp_path, [
+            {"tool_calls": [{"function": {"name": "read_file",
+                                          "arguments": {"path": "a.py"}}}]},
+            {"content": "It contains that."},
+        ], mode=Mode.PLAN)
+        await agent.run("what is in a.py")
+        assert cb.tools and cb.tools[0][0] == "read_file"
+        await agent.client.aclose()
+
+    async def test_auto_mode_writes_without_a_prompt(self, tmp_path):
+        from wynxo.scope import Mode
+
+        agent, cb = self._agent(tmp_path, [
+            {"tool_calls": [{"function": {"name": "write_file", "arguments": {
+                "path": "new.py", "content": "x = 1\n"}}}]},
+            {"content": "Written."},
+        ], mode=Mode.AUTO)
+        await agent.run("create new.py")
+        assert (tmp_path / "new.py").read_text() == "x = 1\n"
+        assert cb.permission_asks == [], "auto mode should not have asked"
+        await agent.client.aclose()
+
+    async def test_auto_mode_still_asks_before_running_a_command(self, tmp_path):
+        from wynxo.scope import Mode
+
+        agent, cb = self._agent(tmp_path, [
+            {"tool_calls": [{"function": {"name": "shell",
+                                          "arguments": {"command": "make install"}}}]},
+            {"content": "Done."},
+        ], mode=Mode.AUTO)
+        await agent.run("build it")
+        assert cb.permission_asks, "auto mode must still gate shell commands"
+        await agent.client.aclose()
+
+    async def test_yolo_cannot_escape_the_scope(self, tmp_path):
+        """The invariant: approving everything is not being allowed everywhere."""
+        from wynxo.scope import Mode
+
+        work = tmp_path / "work"
+        work.mkdir()
+        agent, _ = self._agent(work, [
+            {"tool_calls": [{"function": {"name": "write_file", "arguments": {
+                "path": "../escaped.txt", "content": "nope"}}}]},
+            {"content": "Blocked."},
+        ], mode=Mode.YOLO)
+        await agent.run("escape")
+        assert not (tmp_path / "escaped.txt").exists()
+        await agent.client.aclose()
+
+
+class TestUndoInTheLoop:
+    async def test_a_write_can_be_undone(self, tmp_path):
+        target = tmp_path / "a.py"
+        target.write_text("before\n")
+        agent, _, _ = make_agent(tmp_path, [
+            {"tool_calls": [{"function": {"name": "write_file", "arguments": {
+                "path": "a.py", "content": "after\n"}}}]},
+            {"content": "Changed."},
+        ])
+        await agent.run("change it")
+        assert target.read_text() == "after\n"
+
+        done, _ = agent.checkpoints.undo()
+        assert done and target.read_text() == "before\n"
+        await agent.client.aclose()
+
+    async def test_a_created_file_is_removed_by_undo(self, tmp_path):
+        agent, _, _ = make_agent(tmp_path, [
+            {"tool_calls": [{"function": {"name": "write_file", "arguments": {
+                "path": "fresh.py", "content": "x\n"}}}]},
+            {"content": "Created."},
+        ])
+        await agent.run("create it")
+        assert (tmp_path / "fresh.py").exists()
+        agent.checkpoints.undo()
+        assert not (tmp_path / "fresh.py").exists()
+        await agent.client.aclose()
+
+    async def test_reads_are_not_checkpointed(self, tmp_path):
+        (tmp_path / "a.py").write_text("x\n")
+        agent, _, _ = make_agent(tmp_path, [
+            {"tool_calls": [{"function": {"name": "read_file",
+                                          "arguments": {"path": "a.py"}}}]},
+            {"content": "Read."},
+        ])
+        await agent.run("read it")
+        assert len(agent.checkpoints) == 0
+        await agent.client.aclose()
+
+
+class TestMemoryInTheLoop:
+    async def test_the_agent_can_write_to_memory(self, tmp_path):
+        from wynxo.memory import Memory
+
+        memory = Memory(tmp_path, tmp_path / "u")
+        fake = FakeOllama([
+            {"tool_calls": [{"function": {"name": "remember", "arguments": {
+                "note": "Tests run with pytest -q", "scope": "project"}}}]},
+            {"content": "Noted."},
+        ])
+        config = Config(endpoints=[Endpoint(name="t", url="http://fake:11434")],
+                        active_endpoint="t", model="qwen3-coder:30b", num_ctx=32768)
+        client = OllamaClient(config)
+        client._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(fake.handler), base_url="http://fake:11434")
+        agent = Agent(client, config, resolve("low"), tmp_path,
+                      RecordingCallbacks(), memory=memory)
+        agent.permissions.yolo = True
+
+        await agent.run("remember how tests run")
+        assert memory.counts()[0] == 1
+        assert "pytest" in memory.project.body()
+        await client.aclose()
+
+    async def test_memory_reaches_the_system_prompt(self, tmp_path):
+        from wynxo.memory import Memory
+
+        memory = Memory(tmp_path, tmp_path / "u")
+        memory.remember("Never edit files under generated/")
+        agent, _, _ = make_agent(tmp_path, [{"content": "ok"}])
+        agent.memory = memory
+        agent.refresh_system_prompt()
+        assert "generated/" in agent.session.system_prompt
+        await agent.client.aclose()
+
+    async def test_no_memory_costs_no_prompt_space(self, tmp_path):
+        from wynxo.memory import Memory
+
+        agent, _, _ = make_agent(tmp_path, [{"content": "ok"}])
+        agent.memory = Memory(tmp_path, tmp_path / "u")
+        agent.refresh_system_prompt()
+        assert "## Memory" not in agent.session.system_prompt
+        await agent.client.aclose()
