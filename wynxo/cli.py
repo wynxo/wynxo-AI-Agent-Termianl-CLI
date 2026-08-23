@@ -222,12 +222,14 @@ class Repl:
 
         @bindings.add("c-e")
         def _(event):
-            """Ctrl-E steps the effort level up; Ctrl-D steps it down."""
+            """Ctrl-E steps the effort level up; Ctrl-B steps it down."""
             self._shift_effort(1)
+            event.app.invalidate()
 
         @bindings.add("c-b")
         def _(event):
             self._shift_effort(-1)
+            event.app.invalidate()
 
         self.prompt_session: PromptSession = PromptSession(
             history=FileHistory(str(history_file)),
@@ -268,9 +270,7 @@ class Repl:
     async def _loop(self) -> int:
         while True:
             try:
-                text = await self.prompt_session.prompt_async(
-                    HTML(f'<ansicyan><b>{self.policy.name}</b> &gt; </ansicyan>')
-                )
+                text = await self.prompt_session.prompt_async(self._prompt_message)
             except KeyboardInterrupt:
                 continue
             except EOFError:
@@ -349,6 +349,10 @@ class Repl:
         )
         if result.compacted:
             self.ui.info("context was compacted during this turn")
+
+    def _prompt_message(self) -> HTML:
+        """Evaluated on every redraw, so Ctrl-E/Ctrl-B show up at once."""
+        return HTML(f'<ansicyan><b>{self.policy.name}</b> &gt; </ansicyan>')
 
     def _shift_effort(self, delta: int) -> None:
         """Step the effort level without typing a command."""

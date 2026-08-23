@@ -12,7 +12,7 @@ dependencies, no toolchain required.
 │  wynxo  a local coding agent                     │
 │                                                  │
 │  model    qwen3-coder:30b                        │
-│  server   http://homelab:11434                   │
+│  server   http://192.168.1.50:11434              │
 │  effort   high                                   │
 │  project  ~/code/myproject                       │
 ╰──────────────────────────────────────────────────╯
@@ -40,6 +40,53 @@ high > add a retry to the upload path
 
 ---
 
+## Quick start
+
+One command. It installs everything, gets Ollama running, pulls a model that
+fits your machine, and checks it all works.
+
+```bash
+git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
+cd wynxo-AI-Agent-Termianl-CLI
+./install.sh          # Windows: .\install.ps1
+```
+
+```
+  wynxo setup
+  A local AI coding agent. Nothing leaves your machine.
+
+  1. Checking Python
+     OK  Python 3.12.3 on Linux (x86_64)
+  2. Setting up the environment
+     OK  virtualenv ready at .venv
+  3. Installing wynxo
+     OK  wynxo and its dependencies installed
+         no compiled extensions -- nothing was built from source
+  4. Setting up Ollama
+     OK  Ollama 0.12.0 is serving
+  5. Getting a model
+         this machine has about 32GB of memory
+     Recommended: qwen3-coder:30b -- 30B MoE, tool-tuned. The one to want.
+     Pull qwen3-coder:30b now? (a few GB, takes a while) [Y/n]
+  6. Checking everything works
+     ...
+  Done. Everything checks out.
+```
+
+Then:
+
+```bash
+.venv/bin/wynxo          # Windows: .venv\Scripts\wynxo
+```
+
+About five minutes, most of it the model download. `--yes` accepts every
+recommendation; `--no-ollama` installs only wynxo.
+
+Nothing that touches the network or writes outside the repo happens without
+asking you first.
+
+---
+
 ## Contents
 
 1. [Install](#1-install)
@@ -48,28 +95,21 @@ high > add a retry to the upload path
 4. [Check it works](#4-check-it-works)
 5. [Using it](#5-using-it)
 6. [Effort levels](#6-effort-levels)
-7. [Tools and permissions](#7-tools-and-permissions)
-8. [Commands](#8-commands)
-9. [Configuration](#9-configuration)
-10. [Troubleshooting](#10-troubleshooting)
-11. [How it works](#11-how-it-works)
-
----
+7. [Keys](#7-keys)
+8. [Tools and permissions](#8-tools-and-permissions)
+9. [Commands](#9-commands)
+10. [Configuration](#10-configuration)
+11. [Troubleshooting](#11-troubleshooting)
+12. [How it works](#12-how-it-works)
 
 ## 1. Install
+
+`./install.sh` above does all of this. This section is for doing it by hand.
 
 Python 3.10 or newer. Nothing here compiles, so there is no build toolchain
 to install on any platform.
 
 ### Linux and macOS
-
-```bash
-git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
-cd wynxo-AI-Agent-Termianl-CLI
-pip install -e .
-```
-
-A virtualenv, if you prefer to keep things separate:
 
 ```bash
 python3 -m venv .venv
@@ -82,9 +122,9 @@ pip install -e .
 PowerShell:
 
 ```powershell
-git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
-cd wynxo-AI-Agent-Termianl-CLI
-py -m pip install -e .
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e .
 ```
 
 Use Windows Terminal rather than the old console host — colours and box
@@ -97,7 +137,7 @@ so tell it PowerShell syntax when you ask it to run something.
 pkg update && pkg install python git
 git clone https://github.com/wynxo/wynxo-AI-Agent-Termianl-CLI
 cd wynxo-AI-Agent-Termianl-CLI
-pip install -e .
+./install.sh --no-ollama
 ```
 
 That is the whole thing — **no `pkg install rust`, no build step.** Most
@@ -205,27 +245,31 @@ wynxo
 
 Four questions, all changeable later. Only the first really matters.
 
-**Where does Ollama serve?** wynxo probes `localhost`, `ollama`, `homelab`,
-`nas`, `host.docker.internal` and the other usual names in parallel, and shows
-what answered:
+**Where does Ollama serve?** wynxo checks this machine, then sweeps your local
+network for anything answering on 11434 and asks each hit whether it is really
+Ollama. A /24 takes a couple of seconds.
 
 ```
 Where does Ollama serve?
 Your own machine, or a box on your network. Either is fine.
 
   Found:
-    1  http://localhost:11434    v0.12.0 · this machine
-    2  http://homelab:11434      v0.12.0 · network
+    1  http://127.0.0.1:11434     v0.12.0 · this machine
+    2  http://192.168.1.50:11434  v0.12.0 · network
     m  enter a different address
 
   choose [1-2 or m]:
 ```
 
-Nothing found? Type an address. All of these work — wynxo normalises them:
+It scans by IP rather than guessing hostnames like `homelab` or
+`ollama.local` — those depend on your DNS being set up the way we assumed,
+and on a phone there is usually no mDNS at all.
+
+Nothing found? Type an address:
 
 ```
-localhost          192.168.1.50        homelab:11434
-10.0.0.4:8080      https://ollama.mydomain.com
+This machine:   127.0.0.1
+Another box:    192.168.1.50      (or 192.168.1.50:11434)
 ```
 
 **Which model?** It lists what that server actually has, so there is nothing
@@ -243,6 +287,7 @@ Already know your setup? Pass it and the wizard never appears:
 
 ```bash
 wynxo --endpoint 192.168.1.50 --model qwen3-coder:30b
+wynxo --endpoint 127.0.0.1                       # this machine
 ```
 
 Or set it in the environment:
@@ -265,7 +310,7 @@ Every assumption wynxo makes, checked one at a time, with a concrete fix for
 each failure:
 
 ```
-  ✓ server reachable      ollama 0.12.0 at http://homelab:11434
+  ✓ server reachable      ollama 0.12.0 at http://192.168.1.50:11434
   ✓ model installed       qwen3-coder:30b  18.6GB  30.5B Q4_K_M
   ✓ model capabilities    completion, tools, thinking
   ✓ context window        32768 tokens
@@ -388,14 +433,14 @@ Most local models expose no native reasoning budget at all, so a setting that
 only forwarded a number would collapse into two or three real behaviours.
 Instead, effort controls how many chances the model gets to be right:
 
-| level    | plan                 | tool iters | verify      | plan consensus | `think`    |
-|----------|----------------------|-----------:|-------------|---------------:|------------|
-| `low`    | none                 |          6 | none        |              1 | off        |
-| `medium` | inline               |         16 | none        |              1 | off        |
-| `high`   | separate pass        |         40 | 1 round     |              1 | `"medium"` |
-| `xhigh`  | separate pass        |         80 | 2 rounds    |              1 | `"high"`   |
-| `max`    | plan + self-critique |        150 | until clean |              2 | `"max"`    |
-| `ultra`  | plan + self-critique |        400 | until clean |              3 | `"max"`    |
+| level | in plain terms | plan | tool iters | verify | consensus | `think` |
+|---|---|---|---:|---|---:|---|
+| `low` | **least thinking, fastest, least smart** | none | 6 | none | 1 | off |
+| `medium` | a little thinking, quick, reasonably smart | inline | 16 | none | 1 | off |
+| `high` | real thinking, slower, noticeably smarter | separate pass | 40 | 1 round | 1 | `"medium"` |
+| `xhigh` | hard thinking, slow, very thorough | separate pass | 80 | 2 rounds | 1 | `"high"` |
+| `max` | maximum thinking, very slow, near its best | plan + self-critique | 150 | until clean | 2 | `"max"` |
+| `ultra` | **most thinking possible, slowest, smartest** | plan + self-critique | 400 | until clean | 3 | `"max"` |
 
 At `low` the agent reads what it needs, makes the change and stops.
 
@@ -440,7 +485,34 @@ server accepts.
 
 ---
 
-## 7. Tools and permissions
+## 7. Keys
+
+These work **while the agent is answering**, not just at the prompt — press
+Ctrl-O mid-reply and the thinking appears or disappears immediately.
+
+| key | does |
+|---|---|
+| `Ctrl-O` | show or hide the model's thinking |
+| `Ctrl-T` | full tool output, or a one-line summary |
+| `Ctrl-E` | step effort up |
+| `Ctrl-B` | step effort down |
+| `Ctrl-C` | interrupt this turn, keep the conversation |
+| `Alt-Enter` | newline instead of submitting |
+| `↑` `↓` | history |
+
+While a turn runs there is a live status line showing what is happening right
+now:
+
+```
+  ⠹ editing  src/transfer.py   14s · 812 tok · 58 tok/s · high   ^O thinking  ^T detail
+```
+
+Code streams as it is written, and each fenced block is re-rendered with
+syntax highlighting the moment it closes.
+
+---
+
+## 8. Tools and permissions
 
 | tool | writes? | what it does |
 |---|---|---|
@@ -498,7 +570,7 @@ effort-level setting.
 
 ---
 
-## 8. Commands
+## 9. Commands
 
 ```
 /help                    everything below
@@ -550,7 +622,7 @@ wynxo [prompt]
 
 ---
 
-## 9. Configuration
+## 10. Configuration
 
 | platform | location |
 |---|---|
@@ -592,7 +664,7 @@ requires auth; it is sent as `Authorization: Bearer …`.
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 ### "Cannot reach an Ollama server"
 
@@ -665,11 +737,37 @@ Use Windows Terminal rather than the legacy console host.
 
 ### `wynxo: command not found`
 
-Your Python scripts directory is not on `PATH`. Use `python -m wynxo`.
+Your Python scripts directory is not on `PATH`. Use `python -m wynxo`, or the
+one inside the virtualenv the installer made: `.venv/bin/wynxo`.
+
+### `./install.sh: Permission denied`
+
+```bash
+chmod +x install.sh && ./install.sh
+```
+
+Or skip the wrapper entirely: `python3 install.py`.
+
+### install.ps1 is blocked by execution policy
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Or: `py -3 install.py`.
+
+### The network scan found nothing
+
+The other machine must be running Ollama with `OLLAMA_HOST=0.0.0.0:11434` —
+see [step 2](#if-ollama-is-on-another-machine). Both devices must be on the
+same network; from a phone that means Wi-Fi, not mobile data. Some networks
+(guest Wi-Fi, and most corporate ones) block device-to-device traffic
+entirely, in which case no scan will ever find it. You can always type the
+address by hand.
 
 ---
 
-## 11. How it works
+## 12. How it works
 
 ```
 your message
