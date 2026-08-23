@@ -6,7 +6,6 @@ agent, and burying it inside the loop makes it impossible to tune.
 
 from __future__ import annotations
 
-import platform
 import sys
 from pathlib import Path
 
@@ -44,11 +43,11 @@ ENVIRONMENT = """
 ## Environment
 
 - Working directory: {workspace}
-- Platform: {platform} ({os_name})
+- Platform: {platform}
 - Shell for the `shell` tool: {shell}
 - Python: {python}
 {git}
-Write shell commands for this platform. On Windows that means PowerShell syntax, not bash.
+Write shell commands for this platform. On Windows that means PowerShell syntax, not bash. On Termux, binaries live under $PREFIX and there is no /tmp -- use $TMPDIR.
 """
 
 EFFORT_BLOCK = """
@@ -211,7 +210,7 @@ def build_system_prompt(
     tools_description: str = "",
     native_tools: bool = True,
 ) -> str:
-    from .tools.shell import default_shell
+    from .platforms import default_shell, describe
 
     shell, _ = default_shell()
     parts = [BASE]
@@ -219,8 +218,7 @@ def build_system_prompt(
     parts.append(
         ENVIRONMENT.format(
             workspace=workspace,
-            platform=platform.system(),
-            os_name=platform.release(),
+            platform=describe(),
             shell=shell,
             python=f"{sys.version_info.major}.{sys.version_info.minor}",
             git=git_context(workspace),

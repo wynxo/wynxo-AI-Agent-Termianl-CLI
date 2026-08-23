@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Type
 
-from pydantic import BaseModel, ValidationError
+from ..schema import Schema, ValidationError
 
 
 @dataclass
@@ -44,7 +44,7 @@ class ToolResult:
 class Tool(ABC):
     name: ClassVar[str]
     description: ClassVar[str]
-    Input: ClassVar[Type[BaseModel]]
+    Input: ClassVar[Type[Schema]]
 
     mutating: ClassVar[bool] = False
     """Whether this tool changes the world. Drives the permission prompt."""
@@ -57,16 +57,12 @@ class Tool(ABC):
         self.workspace = workspace.resolve()
 
     @abstractmethod
-    async def run(self, args: BaseModel) -> ToolResult: ...
+    async def run(self, args: Schema) -> ToolResult: ...
 
     # -- schema rendering --------------------------------------------------
 
     def json_schema(self) -> dict:
-        schema = self.Input.model_json_schema()
-        schema.pop("title", None)
-        for prop in schema.get("properties", {}).values():
-            prop.pop("title", None)
-        return schema
+        return self.Input.json_schema()
 
     def ollama_schema(self) -> dict:
         return {
@@ -90,8 +86,8 @@ class Tool(ABC):
 
     # -- invocation --------------------------------------------------------
 
-    def validate(self, raw: dict) -> BaseModel:
-        return self.Input.model_validate(raw)
+    def validate(self, raw: dict) -> Schema:
+        return self.Input.validate(raw)
 
     async def invoke(self, raw: dict, timeout: float = 120.0) -> ToolResult:
         """Validate, run, and turn every failure into a result the model can act on."""

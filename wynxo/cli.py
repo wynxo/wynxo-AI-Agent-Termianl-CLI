@@ -28,7 +28,8 @@ from .permissions import Decision
 from .provider import OllamaClient, ProviderError, check_context
 from .session import Session
 from .ui import ACCENT, MUTED, UI
-from .wizard import probe, run_wizard, server_help
+from .platforms import ollama_server_help as server_help
+from .wizard import probe, run_wizard
 
 COMMANDS = {
     "/help": "show this",

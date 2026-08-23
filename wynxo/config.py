@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
+
+from . import platforms
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from .schema import Field, Schema
 
 DEFAULT_MODEL = "qwen3-coder:30b"
 DEFAULT_ENDPOINT = "http://localhost:11434"
@@ -29,68 +30,47 @@ DEFAULT_CONTEXT = 32_768
 
 
 def config_dir() -> Path:
-    """Per-platform config directory. Windows, macOS and Linux all differ."""
-    if sys.platform == "win32":
-        base = os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming")
-        return Path(base) / "wynxo"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "wynxo"
-    base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
-    return Path(base) / "wynxo"
+    return platforms.config_dir()
 
 
 def data_dir() -> Path:
-    """Where sessions and logs are kept."""
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
-        return Path(base) / "wynxo"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "wynxo"
-    base = os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
-    return Path(base) / "wynxo"
+    return platforms.data_dir()
 
 
 def config_path() -> Path:
     return config_dir() / "config.json"
 
 
-class Endpoint(BaseModel):
+class Endpoint(Schema):
     """One Ollama server. Users often have more than one -- a laptop for
     quick things and a homelab box with the big GPU."""
 
-    name: str = "local"
-    url: str = DEFAULT_ENDPOINT
-    api_key: str | None = None
-    """Only needed when the server sits behind a reverse proxy that
-    requires auth. Sent as ``Authorization: Bearer ...``."""
-
-    @field_validator("url")
-    @classmethod
-    def _normalise(cls, v: str) -> str:
-        return normalise_url(v)
+    name = Field(str, "Short name you refer to this server by.", default="local")
+    url = Field(str, "Base URL.", default=DEFAULT_ENDPOINT, transform=lambda v: normalise_url(v))
+    api_key = Field(str, "Bearer token, when the server sits behind a proxy that "
+                         "requires auth.", default=None)
 
 
-class Config(BaseModel):
-    endpoints: list[Endpoint] = Field(default_factory=lambda: [Endpoint()])
-    active_endpoint: str = "local"
-    model: str = DEFAULT_MODEL
-    effort: str = "medium"
+class Config(Schema):
+    endpoints = Field(list, "Known Ollama servers.", item_type=Endpoint,
+                      default_factory=lambda: [Endpoint()])
+    active_endpoint = Field(str, "Which endpoint to use.", default="local")
+    model = Field(str, "Model tag.", default=DEFAULT_MODEL)
+    effort = Field(str, "Default effort level.", default="medium")
 
-    num_ctx: int = DEFAULT_CONTEXT
-    keep_alive: str = "30m"
-    """Passed to Ollama so the model is not unloaded between turns. A reload
-    of a 30B costs many seconds and makes the agent feel broken."""
-
-    request_timeout: float = 600.0
-    """Local generation on CPU can be genuinely slow; do not be stingy."""
-
-    auto_approve: list[str] = Field(default_factory=list)
-    """Tool names that never prompt for permission, e.g. ``["read_file"]``."""
-
-    allow_shell: bool = True
-    theme: str = "dark"
-    show_thinking: bool = True
-    stream: bool = True
+    num_ctx = Field(int, "Context window sent with every request.", default=DEFAULT_CONTEXT)
+    keep_alive = Field(str, "How long Ollama keeps the model resident. A reload of "
+                            "a 30B costs many seconds and makes the agent feel broken.",
+                       default="30m")
+    request_timeout = Field(float, "Seconds to wait for a response. Local generation "
+                                   "on CPU is genuinely slow; do not be stingy.",
+                            default=600.0)
+    auto_approve = Field(list, "Tool names that never prompt for permission.",
+                         item_type=str, default_factory=list)
+    allow_shell = Field(bool, "Whether the shell tool is available.", default=True)
+    theme = Field(str, "dark or light.", default="dark")
+    show_thinking = Field(bool, "Display the model's reasoning.", default=True)
+    stream = Field(bool, "Stream responses as they are written.", default=True)
 
     def endpoint(self) -> Endpoint:
         for ep in self.endpoints:
@@ -103,7 +83,7 @@ class Config(BaseModel):
     def save(self, path: Path | None = None) -> Path:
         path = path or config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = self.model_dump(mode="json")
+        payload = self.to_dict()
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         try:
             path.chmod(0o600)  # may hold an api key; no-op on Windows
@@ -171,7 +151,7 @@ def load(project_dir: Path | None = None) -> Config:
             pass
 
     try:
-        return Config.model_validate(data)
+        return Config.validate(data)
     except Exception:
         # A corrupt config file should never be fatal -- fall back to defaults
         # rather than leaving the user with an agent that will not start.

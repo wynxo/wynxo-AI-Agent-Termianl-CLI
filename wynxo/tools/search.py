@@ -7,8 +7,7 @@ import fnmatch
 import re
 from pathlib import Path
 
-from pydantic import BaseModel, Field
-
+from ..schema import Field, Schema
 from .base import Tool, ToolResult
 from .files import IGNORED, _looks_binary, _read_text
 
@@ -16,9 +15,9 @@ MAX_MATCHES = 200
 MAX_FILES_SCANNED = 20_000
 
 
-class GlobInput(BaseModel):
-    pattern: str = Field(description="Glob pattern, e.g. '**/*.py' or 'src/**/test_*.ts'.")
-    path: str = Field(".", description="Directory to search from.")
+class GlobInput(Schema):
+    pattern = Field(str, "Glob pattern, e.g. '**/*.py' or 'src/**/test_*.ts'.")
+    path = Field(str, "Directory to search from.", default=".")
 
 
 class Glob(Tool):
@@ -61,12 +60,12 @@ class Glob(Tool):
         return out
 
 
-class GrepInput(BaseModel):
-    pattern: str = Field(description="Regular expression to search for.")
-    path: str = Field(".", description="Directory or file to search in.")
-    glob: str = Field("", description="Only search files matching this pattern, e.g. '*.py'.")
-    ignore_case: bool = Field(False)
-    context: int = Field(0, ge=0, le=5, description="Lines of context around each match.")
+class GrepInput(Schema):
+    pattern = Field(str, "Regular expression to search for.")
+    path = Field(str, "Directory or file to search in.", default=".")
+    glob = Field(str, "Only search files matching this pattern, e.g. '*.py'.", default="")
+    ignore_case = Field(bool, "Case-insensitive search.", default=False)
+    context = Field(int, "Lines of context around each match.", default=0, ge=0, le=5)
 
 
 class Grep(Tool):

@@ -20,6 +20,8 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
+from .platforms import is_narrow, terminal_width
+
 ACCENT = "bright_cyan"
 MUTED = "grey58"
 GOOD = "green"
@@ -59,10 +61,26 @@ class UI:
         self.g = Glyphs(_supports_unicode())
         self.show_thinking = show_thinking
         self.code_theme = "monokai" if theme == "dark" else "friendly"
+        self.narrow = is_narrow()
+        """Phone-width terminals get a stacked layout instead of tables."""
+        self.width = terminal_width()
 
     # -- chrome ------------------------------------------------------------
 
     def banner(self, model: str, endpoint: str, effort: str, workspace: str) -> None:
+        rows = [("model", model), ("server", endpoint),
+                ("effort", effort), ("project", workspace)]
+
+        if self.narrow:
+            # A phone in portrait has no room for a box and two columns.
+            self.console.print()
+            self.console.print(Text("wynxo", style=f"bold {ACCENT}"))
+            for label, value in rows:
+                self.console.print(Text(f"{label} ", style=MUTED) + Text(str(value)))
+            self.console.print(Text("/help for commands", style=MUTED))
+            self.console.print()
+            return
+
         title = Text()
         title.append("wynxo", style=f"bold {ACCENT}")
         title.append("  a local coding agent", style=MUTED)
@@ -70,10 +88,9 @@ class UI:
         table = Table.grid(padding=(0, 2))
         table.add_column(style=MUTED)
         table.add_column()
-        table.add_row("model", Text(model, style="bold"))
-        table.add_row("server", Text(endpoint))
-        table.add_row("effort", Text(effort, style=f"bold {ACCENT}"))
-        table.add_row("project", Text(workspace))
+        for label, value in rows:
+            style = "bold" if label == "model" else (f"bold {ACCENT}" if label == "effort" else "")
+            table.add_row(label, Text(str(value), style=style))
 
         self.console.print()
         self.console.print(Panel(Group(title, "", table), border_style=ACCENT, padding=(1, 2)))
@@ -153,8 +170,9 @@ class UI:
     def diff(self, text: str) -> None:
         if not text.strip():
             return
+        limit = max(24, self.width - 6) if self.narrow else 10_000
         body = Text()
-        for line in text.splitlines()[:120]:
+        for line in (l[:limit] for l in text.splitlines()[:120]):
             if line.startswith("+++") or line.startswith("---"):
                 body.append(line + "\n", style=MUTED)
             elif line.startswith("+"):
@@ -192,11 +210,29 @@ class UI:
         self.console.print(text, end="", markup=False, highlight=False)
 
     def table(self, columns: Iterable[str], rows: Iterable[Iterable[str]], title: str = "") -> None:
+        columns = list(columns)
+        rows = [[str(c) for c in row] for row in rows]
+
+        if self.narrow:
+            # Stack each row as a labelled block; a grid this wide would wrap
+            # into unreadable confetti on a phone.
+            if title:
+                self.console.print(Text(title, style=f"bold {ACCENT}"))
+            for row in rows:
+                head, *rest = row
+                self.console.print(Text(head, style="bold"))
+                for label, value in zip(columns[1:], rest):
+                    if value:
+                        self.console.print(
+                            Text(f"  {label}: ", style=MUTED) + Text(value))
+            self.console.print()
+            return
+
         table = Table(title=title or None, border_style=MUTED, title_style=f"bold {ACCENT}")
         for column in columns:
             table.add_column(column)
         for row in rows:
-            table.add_row(*[str(c) for c in row])
+            table.add_row(*row)
         self.console.print(table)
 
     def stats(self, usage, elapsed: float, effort: str, context_pct: float) -> None:

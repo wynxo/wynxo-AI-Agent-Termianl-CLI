@@ -1,0 +1,172 @@
+"""Per-platform behaviour, in one place.
+
+wynxo runs on Linux, macOS, Windows and Termux. Termux is the awkward one:
+it is Linux-flavoured but its filesystem lives under an app-private prefix,
+it has no ``/tmp``, its shell is not in ``/bin``, and it renders on a phone
+screen forty columns wide. Treating it as "just Linux" breaks all four.
+"""
+
+from __future__ import annotations
+
+import os
+import platform as _platform
+import shutil
+import sys
+from pathlib import Path
+
+TERMUX_PREFIX = "/data/data/com.termux/files/usr"
+
+
+def is_termux() -> bool:
+    """Detect Termux.
+
+    ``TERMUX_VERSION`` is set by the app itself, but is lost by anything that
+    sanitises the environment (cron, some supervisors), so the prefix path is
+    checked as well.
+    """
+    if os.environ.get("TERMUX_VERSION"):
+        return True
+    prefix = os.environ.get("PREFIX", "")
+    return prefix.startswith("/data/data/com.termux") or os.path.isdir(TERMUX_PREFIX)
+
+
+def is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def is_macos() -> bool:
+    return sys.platform == "darwin"
+
+
+def name() -> str:
+    """A short human-readable platform name for the system prompt."""
+    if is_termux():
+        return "Termux (Android)"
+    if is_windows():
+        return "Windows"
+    if is_macos():
+        return "macOS"
+    return _platform.system() or "Linux"
+
+
+def describe() -> str:
+    if is_termux():
+        release = os.environ.get("TERMUX_VERSION", "")
+        machine = _platform.machine()
+        return f"Termux {release} on Android ({machine})".replace("  ", " ")
+    return f"{name()} ({_platform.release()})"
+
+
+# -- filesystem ------------------------------------------------------------
+
+def home() -> Path:
+    return Path(os.environ.get("HOME") or Path.home())
+
+
+def config_dir() -> Path:
+    """Where config.json lives."""
+    if is_windows():
+        base = os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming")
+        return Path(base) / "wynxo"
+    if is_macos():
+        return Path.home() / "Library" / "Application Support" / "wynxo"
+    # Termux included: XDG under the app-private home is correct and writable.
+    base = os.environ.get("XDG_CONFIG_HOME") or (home() / ".config")
+    return Path(base) / "wynxo"
+
+
+def data_dir() -> Path:
+    """Where sessions and history live."""
+    if is_windows():
+        base = os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
+        return Path(base) / "wynxo"
+    if is_macos():
+        return Path.home() / "Library" / "Application Support" / "wynxo"
+    base = os.environ.get("XDG_DATA_HOME") or (home() / ".local" / "share")
+    return Path(base) / "wynxo"
+
+
+def temp_dir() -> Path:
+    """Termux has no ``/tmp``; anything assuming otherwise fails at runtime."""
+    if is_termux():
+        return Path(os.environ.get("TMPDIR") or f"{TERMUX_PREFIX}/tmp")
+    return Path(os.environ.get("TMPDIR") or os.environ.get("TEMP") or "/tmp")
+
+
+# -- shell -----------------------------------------------------------------
+
+def default_shell() -> tuple[str, list[str]]:
+    """The shell to run commands with, and the flag that takes a command string."""
+    if is_windows():
+        # PowerShell where available -- cmd.exe quoting is a source of endless
+        # subtle breakage, and pwsh/powershell is on every supported Windows.
+        for exe in ("pwsh", "powershell"):
+            if shutil.which(exe):
+                return exe, ["-NoProfile", "-NonInteractive", "-Command"]
+        return os.environ.get("COMSPEC", "cmd.exe"), ["/c"]
+
+    shell = os.environ.get("SHELL")
+    if shell and shutil.which(shell):
+        return shell, ["-c"]
+
+    if is_termux():
+        # Termux's binaries are under $PREFIX, never /bin.
+        prefix = os.environ.get("PREFIX", TERMUX_PREFIX)
+        for exe in (f"{prefix}/bin/bash", f"{prefix}/bin/sh"):
+            if os.path.exists(exe):
+                return exe, ["-c"]
+
+    for exe in ("bash", "sh"):
+        if path := shutil.which(exe):
+            return path, ["-c"]
+    return "/bin/sh", ["-c"]
+
+
+# -- terminal --------------------------------------------------------------
+
+def terminal_width(default: int = 80) -> int:
+    try:
+        return shutil.get_terminal_size((default, 24)).columns
+    except (OSError, ValueError):
+        return default
+
+
+def is_narrow() -> bool:
+    """A phone in portrait is roughly 40-56 columns. Wide-terminal layout
+    (side-by-side tables, boxed banners) becomes unreadable below that."""
+    return terminal_width() < 60
+
+
+# -- setup hints -----------------------------------------------------------
+
+def ollama_server_help() -> str:
+    """Printed when a connection fails. The remote case trips everyone up."""
+    if is_termux():
+        return (
+            "Ollama only listens on loopback by default, so a server on another\n"
+            "machine is unreachable until you tell it otherwise.\n\n"
+            "  On the machine running Ollama (not the phone):\n"
+            "    OLLAMA_HOST=0.0.0.0:11434 ollama serve\n\n"
+            "  Then point wynxo at that machine's LAN address:\n"
+            "    wynxo --endpoint 192.168.1.50\n\n"
+            "  Find it by running `ip addr` or `ipconfig` on that machine.\n"
+            "  The phone must be on the same Wi-Fi, not mobile data."
+        )
+    if is_windows():
+        return (
+            "Ollama only listens on loopback by default, so a server on another\n"
+            "machine is unreachable until you tell it otherwise.\n\n"
+            "  On the remote machine (PowerShell, then restart Ollama):\n"
+            "    [Environment]::SetEnvironmentVariable("
+            "'OLLAMA_HOST','0.0.0.0:11434','User')"
+        )
+    return (
+        "Ollama only listens on loopback by default, so a server on another\n"
+        "machine is unreachable until you tell it otherwise.\n\n"
+        "  On the remote machine:\n"
+        "    OLLAMA_HOST=0.0.0.0:11434 ollama serve\n"
+        "  Or persist it (systemd):\n"
+        "    sudo systemctl edit ollama\n"
+        "    [Service]\n"
+        '    Environment="OLLAMA_HOST=0.0.0.0:11434"'
+    )

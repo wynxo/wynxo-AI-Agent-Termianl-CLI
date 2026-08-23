@@ -7,25 +7,22 @@ keeps a long ``max``-effort run from forgetting step three of five.
 
 from __future__ import annotations
 
-from typing import Literal
-
-from pydantic import BaseModel, Field
-
+from ..schema import Field, Schema
 from .base import Tool, ToolResult
 
-Status = Literal["pending", "in_progress", "done"]
+STATUSES = ("pending", "in_progress", "done")
 MARKS = {"pending": "[ ]", "in_progress": "[>]", "done": "[x]"}
 
 
-class TodoItem(BaseModel):
-    task: str = Field(description="One concrete step.")
-    status: Status = Field("pending")
+class TodoItem(Schema):
+    task = Field(str, "One concrete step.")
+    status = Field(str, "pending, in_progress or done.", default="pending",
+                   choices=STATUSES)
 
 
-class TodoInput(BaseModel):
-    items: list[TodoItem] = Field(
-        description="The complete list, every time. It replaces the previous one."
-    )
+class TodoInput(Schema):
+    items = Field(list, "The complete list, every time. It replaces the previous one.",
+                  item_type=TodoItem, default_factory=list)
 
 
 class TodoWrite(Tool):

@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
-import sys
 
-from pydantic import BaseModel, Field
-
+from ..platforms import default_shell
+from ..schema import Field, Schema
 from .base import Tool, ToolResult
 
 MAX_OUTPUT = 30_000
@@ -25,29 +23,10 @@ HARD_BLOCKED = (
 )
 
 
-def default_shell() -> tuple[str, list[str]]:
-    """Pick a shell and the flag that makes it run a command string."""
-    if sys.platform == "win32":
-        # PowerShell where available -- cmd.exe quoting is a source of
-        # endless subtle breakage, and pwsh/powershell is on every
-        # supported Windows.
-        for exe in ("pwsh", "powershell"):
-            if shutil.which(exe):
-                return exe, ["-NoProfile", "-NonInteractive", "-Command"]
-        return os.environ.get("COMSPEC", "cmd.exe"), ["/c"]
-    shell = os.environ.get("SHELL")
-    if shell and shutil.which(shell):
-        return shell, ["-c"]
-    for exe in ("bash", "sh"):
-        if path := shutil.which(exe):
-            return path, ["-c"]
-    return "/bin/sh", ["-c"]
-
-
-class ShellInput(BaseModel):
-    command: str = Field(description="The command line to run.")
-    timeout: int = Field(120, ge=1, le=900, description="Seconds before the command is killed.")
-    cwd: str = Field("", description="Working directory, relative to the project root.")
+class ShellInput(Schema):
+    command = Field(str, "The command line to run.")
+    timeout = Field(int, "Seconds before the command is killed.", default=120, ge=1, le=900)
+    cwd = Field(str, "Working directory, relative to the project root.", default="")
 
 
 class Shell(Tool):
@@ -55,8 +34,9 @@ class Shell(Tool):
     description = (
         "Run a shell command in the project directory and return its output. "
         "Use this for git, tests, linters, package managers and build tools. "
-        "It is PowerShell on Windows and your login shell elsewhere, so write "
-        "the command for the platform you were told you are on."
+        "It is PowerShell on Windows and your login shell elsewhere (Termux "
+        "included), so write the command for the platform you were told you "
+        "are on."
     )
     Input = ShellInput
     mutating = True

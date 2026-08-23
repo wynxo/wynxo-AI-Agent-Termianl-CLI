@@ -5,8 +5,7 @@ from __future__ import annotations
 import difflib
 from pathlib import Path
 
-from pydantic import BaseModel, Field
-
+from ..schema import Field, Schema
 from .base import Tool, ToolResult
 
 MAX_READ_BYTES = 400_000
@@ -51,10 +50,10 @@ def make_diff(before: str, after: str, path: str) -> str:
     return "".join(diff)
 
 
-class ReadInput(BaseModel):
-    path: str = Field(description="File path, relative to the project root.")
-    offset: int = Field(0, ge=0, description="First line to read (0-indexed).")
-    limit: int = Field(2000, gt=0, le=5000, description="How many lines to read.")
+class ReadInput(Schema):
+    path = Field(str, "File path, relative to the project root.")
+    offset = Field(int, "First line to read (0-indexed).", default=0, ge=0)
+    limit = Field(int, "How many lines to read.", default=2000, gt=0, le=5000)
 
 
 class ReadFile(Tool):
@@ -117,9 +116,9 @@ class ReadFile(Tool):
         return close[0] if close else None
 
 
-class WriteInput(BaseModel):
-    path: str = Field(description="File path, relative to the project root.")
-    content: str = Field(description="Full contents to write.")
+class WriteInput(Schema):
+    path = Field(str, "File path, relative to the project root.")
+    content = Field(str, "Full contents to write.")
 
 
 class WriteFile(Tool):
@@ -155,14 +154,12 @@ class WriteFile(Tool):
         )
 
 
-class EditInput(BaseModel):
-    path: str = Field(description="File path, relative to the project root.")
-    old_text: str = Field(
-        description="Exact text to replace, including indentation. Must appear "
-        "in the file exactly once unless replace_all is true."
-    )
-    new_text: str = Field(description="Replacement text.")
-    replace_all: bool = Field(False, description="Replace every occurrence.")
+class EditInput(Schema):
+    path = Field(str, "File path, relative to the project root.")
+    old_text = Field(str, "Exact text to replace, including indentation. Must appear "
+                          "in the file exactly once unless replace_all is true.")
+    new_text = Field(str, "Replacement text.")
+    replace_all = Field(bool, "Replace every occurrence.", default=False)
 
 
 class EditFile(Tool):
@@ -221,9 +218,9 @@ class EditFile(Tool):
         return "Re-read the file; it may have changed since you last saw it."
 
 
-class ListInput(BaseModel):
-    path: str = Field(".", description="Directory to list, relative to the project root.")
-    depth: int = Field(2, ge=1, le=5, description="How many levels deep to descend.")
+class ListInput(Schema):
+    path = Field(str, "Directory to list, relative to the project root.", default=".")
+    depth = Field(int, "How many levels deep to descend.", default=2, ge=1, le=5)
 
 
 IGNORED = {

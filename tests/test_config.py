@@ -173,7 +173,7 @@ class TestConfig:
         config = Config(model="qwen3:32b", effort="xhigh", num_ctx=65536)
         path = config.save(tmp_path / "config.json")
         import json
-        loaded = Config.model_validate(json.loads(path.read_text()))
+        loaded = Config.validate(json.loads(path.read_text()))
         assert loaded.model == "qwen3:32b"
         assert loaded.effort == "xhigh"
         assert loaded.num_ctx == 65536

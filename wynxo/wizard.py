@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import socket
-import sys
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
@@ -25,6 +24,7 @@ from .config import (
     normalise_url,
 )
 from .effort import ORDER, resolve
+from .platforms import ollama_server_help as server_help  # re-exported
 from .provider import OllamaClient, ProviderError
 from .ui import ACCENT, MUTED, UI
 
@@ -352,24 +352,4 @@ async def run_wizard(ui: UI) -> Config:
     ui.console.print()
     return config
 
-
-def server_help() -> str:
-    """Printed when a connection fails. The remote case trips everyone up."""
-    if sys.platform == "win32":
-        remote = (
-            "  On the remote machine (PowerShell, then restart Ollama):\n"
-            "    [Environment]::SetEnvironmentVariable('OLLAMA_HOST','0.0.0.0:11434','User')"
-        )
-    else:
-        remote = (
-            "  On the remote machine:\n"
-            "    OLLAMA_HOST=0.0.0.0:11434 ollama serve\n"
-            "  Or persist it (systemd):\n"
-            "    sudo systemctl edit ollama\n"
-            "    [Service]\n"
-            "    Environment=\"OLLAMA_HOST=0.0.0.0:11434\""
-        )
-    return (
-        "Ollama only listens on loopback by default, so a server on another\n"
-        "machine is unreachable until you tell it otherwise.\n\n" + remote
-    )
+__all__ = ["run_wizard", "probe", "autodetect", "server_help", "RECOMMENDED"]
