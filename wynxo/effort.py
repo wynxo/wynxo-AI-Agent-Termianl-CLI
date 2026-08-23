@@ -110,7 +110,12 @@ class EffortPolicy:
         bits = [plan, f"{self.max_iterations} tool iters", verify]
         if self.parallel_samples > 1:
             bits.append(f"{self.parallel_samples}x plan consensus")
-        bits.append("thinking on" if self.thinking else "thinking off")
+        if not self.thinking:
+            bits.append("no thinking")
+        elif self.think_level:
+            bits.append(f'think "{self.think_level}"')
+        else:
+            bits.append("thinking on")
         return ", ".join(bits)
 
 
