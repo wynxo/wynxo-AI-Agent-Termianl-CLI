@@ -96,17 +96,22 @@ EFFORT_GUIDANCE = {
     ),
 }
 
-PLAN_PROMPT = """Before touching anything, produce a short plan for this task.
+PLAN_PROMPT = """Read the user's most recent message above. Decide which of \
+these two it is, then do only that one.
 
-If the message is not a task at all -- a greeting, thanks, a question about \
-you rather than about the code -- reply "NO PLAN NEEDED" and nothing else. \
-Do not invent work that was not asked for.
+CASE A -- it asks for work on the code.
+Write a short plan: the concrete steps in order, the specific files you \
+expect to read or change, and anything you are unsure about. Do not modify \
+any files yet; reading them to inform the plan is encouraged, because a plan \
+written without looking is a guess. Under 200 words.
 
-List the concrete steps in order. Name the specific files you expect to read or change. Note anything you are unsure about.
+CASE B -- it is not a request for work: a greeting, small talk, thanks, or a \
+question about you rather than about the code.
+Your entire reply is exactly:
+NO PLAN NEEDED
 
-Do not call any tools that modify files yet. Read-only investigation is encouraged -- a plan built without looking at the code is a guess.
-
-Keep it under 200 words."""
+Nothing else. Do not explain the choice. Do not write a plan anyway. Do not \
+invent work that was not asked for."""
 
 CRITIQUE_PROMPT = """Now attack that plan before you act on it.
 

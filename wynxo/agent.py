@@ -50,7 +50,8 @@ _SMALL_TALK = re.compile(
     r"ok(?:ay)?|k|cool|nice|great|awesome|lol|lmao|haha+|hmm+|"
     r"bye|goodbye|gn|cya|see\s*ya|"
     r"who\s+are\s+you|what\s+are\s+you|what'?s?\s+your\s+name|"
-    r"how\s+are\s+you|how'?s\s+it\s+going|what'?s?\s+up|wyd|"
+    r"how\s+are\s+you(?:\s+(?:doing|today))?|how'?s\s+it\s+going|"
+    r"what'?s?\s+up|wyd|how\s+are\s+things|"
     r"are\s+you\s+(?:there|awake|ready|alive)|test(?:ing)?"
     r")"
     r"[\s!.?~,:;)（）\-]*$",
@@ -71,6 +72,50 @@ _TASK_SIGNAL = re.compile(
 )
 
 
+# Telling the agent who you are is conversation, not a task -- and it is the
+# one kind of conversation it should be paying attention to.
+#
+# Deliberately tight: each alternative must consume the whole clause. An
+# earlier version allowed "i'm <anything>", which swallowed "im going to need
+# a retry helper" -- a real task, silently demoted to chatter.
+_PERSONAL = re.compile(
+    r"^\s*(?:"
+    r"(?:my\s+name\s+is|call\s+me|i'?m|i\s+am)\s+[A-Za-z][\w'-]{0,30}"
+    r"|(?:i'?m|i\s+am)\s+\d{1,3}(?:\s*(?:years?\s*old|yo))?"
+    r"|my\s+(?:name|age)\s+is\s+[\w'-]{1,30}"
+    r"|i\s+am\s+\d{1,3}"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+# A greeting can lead into another conversational phrase with no punctuation
+# between them: "hey whats your name", "hi there".
+_GREETING_LEAD = re.compile(
+    r"^\s*(?:h[ei]y?|hey+|hi+|hello+|yo|sup|hiya|howdy|heya|"
+    r"good\s*(?:morning|afternoon|evening|night))"
+    r"(?:\s+(?:there|again|friend|buddy|mate))?\s*",
+    re.IGNORECASE,
+)
+
+_CLAUSE = re.compile(r"[,.!?;~]+")
+
+
+def _clauses(text: str) -> list[str]:
+    return [c.strip() for c in _CLAUSE.split(text) if c.strip()]
+
+
+def _is_chatter(clause: str) -> bool:
+    """One clause, with a leading greeting allowed to run into the rest."""
+    if _SMALL_TALK.match(clause) or _PERSONAL.match(clause):
+        return True
+    trimmed = _GREETING_LEAD.sub("", clause, count=1)
+    if trimmed != clause:
+        # "hey" on its own leaves nothing behind, which is still a greeting.
+        return not trimmed or bool(
+            _SMALL_TALK.match(trimmed) or _PERSONAL.match(trimmed))
+    return False
+
+
 def is_small_talk(request: str) -> bool:
     """Whether this is conversation rather than work.
 
@@ -84,11 +129,19 @@ def is_small_talk(request: str) -> bool:
     as a task is the bug, so any hint of real work wins.
     """
     text = request.strip()
-    if not text or len(text) > 60:
+    if not text or len(text) > 120:
         return False
     if _TASK_SIGNAL.search(text):
         return False
-    return bool(_SMALL_TALK.match(text))
+    if _PERSONAL.match(text):
+        return True
+    # People greet in pieces: "hi, how are you?" is two conversational
+    # clauses, and matching the whole string against one pattern missed
+    # every compound form -- which is how a greeting reached the planner.
+    parts = _clauses(text)
+    if not parts:
+        return False
+    return all(_is_chatter(part) for part in parts)
 
 
 class Interrupted(Exception):
