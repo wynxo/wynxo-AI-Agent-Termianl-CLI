@@ -154,6 +154,7 @@ has, and you pick one.
 14. [How it works](#14-how-it-works)
 
 [Uninstall](#uninstall) · [Working on a GitHub repo](#working-on-a-github-repo)
+· [Speaking out loud](#speaking-out-loud) · [Two models](#two-models-one-talks-one-codes)
 
 ## 1. Install
 
@@ -684,7 +685,12 @@ render the rest.
 
 ### Voice
 
-How wynxo talks to you. Tone only.
+How wynxo talks to you. **Tone only — this is the wording it uses, not
+sound.** For actual audio see [Speaking out loud](#speaking-out-loud).
+
+```
+/pet voice kawaii
+```
 
 | voice | sounds like |
 |---|---|
@@ -707,6 +713,81 @@ Set `"voice"`, `"pet"`, `"pet_name"` and `"animations"` in your config to make
 any of it permanent.
 
 ---
+
+## Speaking out loud
+
+She reads the answer to you. **You type; she talks** — there is no microphone
+anywhere in wynxo.
+
+```
+/speak on          # or start with: wynxo --speak
+/speak test        # say a line now, to check you can hear it
+/speak             # what is available on this machine
+```
+
+No new Python dependency. It uses a synthesiser that is already on your
+machine, or one you install deliberately:
+
+| platform | engine | notes |
+|---|---|---|
+| macOS | `say` | built in, good quality |
+| Windows | PowerShell | built in |
+| Termux | `termux-tts-speak` | `pkg install termux-api` + the Termux:API app |
+| Linux | `espeak-ng` | `sudo apt install espeak-ng` — robotic but always works |
+| any | `piper` | neural, by far the most natural — needs a voice model |
+
+Where the engine has a female voice it is chosen by default. Override with
+`/speak voice <name>`, and pick the engine with `/speak engine <name>`.
+
+If nothing is installed, wynxo stays silent and still works — speech never
+stops it starting.
+
+**It does not read code out.** An answer's fences, diffs, tables and file
+paths are stripped before a word reaches the synthesiser; a path read aloud
+is a stream of punctuation names, and the sentence around it already says
+what the file is. An answer that is nothing but a code block stays silent
+rather than reading a diff character by character.
+
+Ctrl-C silences her as well as cancelling the turn.
+
+## Two models: one talks, one codes
+
+A 30B coder is slow to first token and writes like a commit message. A 1B
+chat model answers instantly and sounds like a person, but must not be let
+near your files. Run both:
+
+```bash
+wynxo --talker qwen3:0.6b --coder qwen3-coder:30b
+```
+
+```
+/talker qwen3:0.6b     # turn it on mid-session
+/talker off            # back to one model doing both
+```
+
+```
+> make out.txt with hi in it
+
+  (•ᴗ•)  Okay, let me get that file made for you~
+  ● write_file  out.txt
+    ✓ created out.txt (1 lines)
+
+  (≧ᴗ≦)  All done! I made out.txt with 'hi' inside~
+```
+
+The talker speaks first — a small model is quick enough that the
+acknowledgement lands before the coder has produced a token — then says what
+happened at the end.
+
+**The talker has no tools.** Not restricted tools: none at all. There is no
+path by which the small, fast, easily-confused model can edit anything. It
+only reads what the coder did and says it back. That separation is the whole
+point.
+
+It pairs with speech: the coder's answer is paths and diffs, the talker's is
+two sentences, and the second one is what you want read aloud. So speech is
+fed from the talker when there is one, and from the coder when there is not
+— either works on its own.
 
 ## Working on a GitHub repo
 
