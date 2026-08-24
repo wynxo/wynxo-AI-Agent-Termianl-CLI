@@ -896,7 +896,7 @@ wynxo [prompt]
   "theme": "purple",
   "clear_on_start": true,
   "log": true,
-  "show_thinking": true,
+  "show_thinking": false,
   "stream": true
 }
 ```

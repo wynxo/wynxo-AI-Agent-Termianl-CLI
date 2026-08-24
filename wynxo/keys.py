@@ -37,8 +37,12 @@ class KeyWatcher:
     intended use.
     """
 
-    def __init__(self, handlers: dict[str, Callable[[], None]]):
+    def __init__(self, handlers: dict[str, Callable[[], None]],
+                 on_key: Callable[[str], None] | None = None):
         self.handlers = handlers
+        self.on_key = on_key
+        """Everything no binding claimed. This is how type-ahead gets its
+        characters without a second reader competing for stdin."""
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._saved = None
@@ -143,10 +147,13 @@ class KeyWatcher:
 
     def _dispatch(self, char: str) -> None:
         handler = self.handlers.get(key_name(char))
-        if handler is None:
+        if handler is not None:
+            with contextlib.suppress(Exception):
+                handler()
             return
-        with contextlib.suppress(Exception):
-            handler()
+        if self.on_key is not None:
+            with contextlib.suppress(Exception):
+                self.on_key(char)
 
     def _restore(self) -> None:
         if self._saved is None or self._fd is None:

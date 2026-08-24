@@ -512,6 +512,8 @@ class ActivityBar:
         self.detail = ""
         self.tokens = 0
         self.context_pct = 0.0
+        self.queued = ""
+        """What the user is typing, or how many messages are waiting."""
         self.started = time.monotonic()
         self._live: Live | None = None
         self._frame = 0
@@ -552,7 +554,12 @@ class ActivityBar:
             left.append(f" {frames[self._frame % len(frames)]} ",
                         style=f"bold {BAR_ACCENT}")
         left.append(self.activity, style="bold")
-        if self.detail:
+        if self.queued:
+            # What you are typing beats what the agent is doing: you need to
+            # see your own keystrokes, and the detail is still one line up.
+            left.append("  ")
+            left.append(f"\u203a {self.queued}", style=f"bold {BAR_ACCENT}")
+        elif self.detail:
             left.append("  ")
             left.append(self.detail, style=BAR_DIM)
 
@@ -562,7 +569,12 @@ class ActivityBar:
         candidates = self._segments()
         if self.hint:
             candidates.append((self.hint, BAR_DIM))
-        stats_budget = max(0, width - MIN_ACTIVITY_WIDTH)
+        # While the user is typing, their own keystrokes are the most
+        # important thing on the line, so the left side claims more of it and
+        # the stats give way rather than the other way round.
+        floor = min(width - 20, MIN_ACTIVITY_WIDTH + len(self.queued) + 6) \
+            if self.queued else MIN_ACTIVITY_WIDTH
+        stats_budget = max(0, width - max(MIN_ACTIVITY_WIDTH, floor))
 
         stats = Text(style=BAR_STYLE)
         for text, style in candidates:

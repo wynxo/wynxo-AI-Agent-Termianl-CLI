@@ -27,6 +27,7 @@ from .doctor import run_doctor
 from .effort import ORDER, resolve
 from .permissions import Decision
 from .provider import OllamaClient, ProviderError, check_context
+from .queue import Pending
 from .session import Session
 from .keys import KeyWatcher, describe_bindings
 from .journal import Journal, recent as recent_logs
@@ -34,7 +35,7 @@ from .memory import Memory
 from .pet import Mood, Pet
 from .select import choose, supported as arrows_supported
 from .scope import Mode, Scope, resolve as resolve_scope
-from .status import Status
+from .status import Status, WARN
 from .tools import build_registry
 from rich.text import Text
 
@@ -53,6 +54,32 @@ _LANGUAGE = {"read_file": "python", "shell": "console"}
 LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail"}
 from .platforms import ollama_server_help as server_help, suspicious_workspace
 from .wizard import probe, run_wizard
+
+# Short forms for the prefixes that are genuinely ambiguous. An exact command
+# is matched before any of these, so /mode still means /mode.
+ALIASES = {
+    "/exit": "/quit", "/q": "/quit", "/?": "/help", "/h": "/help",
+    "/m": "/model", "/mo": "/model", "/mod": "/model",
+    "/e": "/effort", "/eff": "/effort",
+    "/t": "/theme", "/th": "/theme",
+    "/mem": "/memory", "/sc": "/scope", "/st": "/stats", "/se": "/sessions",
+    "/c": "/clear", "/co": "/compact",
+}
+
+
+def resolve_command(name: str) -> str | None:
+    """Expand an abbreviation to a command, when it is unambiguous.
+
+    Typing /mo for /model is the sort of thing people do without thinking, and
+    refusing it is friction for no safety benefit -- but /m matching both
+    /model and /memory must not silently pick one, so an ambiguous prefix is
+    resolved only by an explicit alias.
+    """
+    if name in ALIASES:
+        return ALIASES[name]
+    matches = [c for c in COMMANDS if c.startswith(name)]
+    return matches[0] if len(matches) == 1 else None
+
 
 def _theme_summary(name: str) -> str:
     return {
@@ -130,6 +157,10 @@ class TerminalCallbacks(Callbacks):
 
     def toggle_thinking(self) -> None:
         self.ui.show_thinking = not self.ui.show_thinking
+        if not self.ui.show_thinking:
+            # Collapse what is already on screen's worth of buffer, so hiding
+            # takes effect now rather than after the current block finishes.
+            self._end_thinking()
         self._note(f"thinking {'shown' if self.ui.show_thinking else 'hidden'}")
 
     def toggle_verbose(self) -> None:
@@ -287,6 +318,7 @@ class Repl:
         self.memory = Memory(workspace)
         self.journal = Journal.open(
             self.agent_session_id(), enabled=config.log)
+        self.pending = Pending()
         self.pet = Pet(
             name=config.pet_name,
             enabled=config.pet,
@@ -354,7 +386,12 @@ class Repl:
         if self.config.clear_on_start:
             self.ui.clear()
         status = Status()
-        print()
+        problems: list[tuple[str, str, str]] = []
+
+        def note(state: str, message: str, detail: str = "") -> None:
+            """Collect rather than print. A wall of green OK lines on every
+            start is noise; the things that are wrong are the news."""
+            problems.append((state, message, detail))
 
         try:
             version = await self.client.ping()
@@ -364,43 +401,29 @@ class Repl:
             self.ui.error(str(exc))
             self.ui.console.print(server_help())
             return False
-        status.ok(f"ollama {version}", self.client.base_url)
 
         info = None
         try:
             info = await self.client.show(self.config.model)
         except ProviderError:
             pass
-        if info is not None and info.capabilities:
-            status.ok(self.config.model, ", ".join(info.capabilities))
-        else:
-            status.ok(self.config.model)
+        if info is not None and info.capabilities_known and not info.supports_tools:
+            note(WARN, self.config.model, "no native tool calling")
 
-        warning = await check_context(self.client, self.config)
-        if warning:
-            status.warn(f"context {self.config.num_ctx}", warning.split(".")[0])
-        else:
-            status.ok(f"context {self.config.num_ctx}")
+        if warning := await check_context(self.client, self.config):
+            note(WARN, f"context {self.config.num_ctx}", warning.split(".")[0])
 
         await self.agent.detect_capabilities()
-        status.ok(
-            f"{len(self.agent.tools)} tools",
-            "native" if self.agent.native_tools else "hermes (prompted)")
+        if not self.agent.native_tools:
+            note(WARN, "tools", "hermes (prompted), not native")
 
         if reason := suspicious_workspace(self.workspace):
-            status.warn(f"scope {self.boundary.scope.value}", str(self.workspace))
-            status.note(f"{reason} -- the agent will read and write here")
-            status.note("cd into your project first, or start wynxo with -C <path>")
-        else:
-            status.ok(f"scope {self.boundary.scope.value}", self.boundary.describe())
-        status.ok(f"mode {self.mode.value}", self.mode.describe())
+            note(WARN, f"scope {self.boundary.scope.value}", reason)
 
-        project, user = self.memory.counts()
-        if project or user:
-            status.ok("memory", f"{project} project, {user} user")
-        else:
-            status.skip("memory", "nothing remembered yet")
-
+        if problems:
+            print()
+            for state, message, detail in problems:
+                status.line(state, message, detail)
         status.close()
 
         self.ui.wake(self.pet, self.pet.name)
@@ -444,6 +467,8 @@ class Repl:
                 continue
 
             await self.turn(text)
+            if await self._drain_queue() is False:
+                break
 
         await self.client.aclose()
         self.ui.console.print(f"  [{MUTED}]bye[/]")
@@ -464,15 +489,27 @@ class Repl:
 
         bar = ActivityBar(self.ui, self.policy.name, describe_bindings(LIVE_KEYS),
                           model=self.config.model, pet=self.pet)
+        bar.queued = self.pending.preview()
         used = self.agent.session.token_estimate()
         limit = self.policy.context_budget or self.config.num_ctx
         bar.context_pct = 100 * used / max(1, limit)
         self.callbacks.bar = bar
 
-        watcher = KeyWatcher({
-            "ctrl+o": self.callbacks.toggle_thinking,
-            "ctrl+t": self.callbacks.toggle_verbose,
-        })
+        def typed(char: str) -> None:
+            """A keystroke that no binding claimed, while a turn is running."""
+            self.pending.key(char)
+            bar.queued = self.pending.preview()
+            bar.refresh()
+
+        watcher = KeyWatcher(
+            {
+                "ctrl+o": self.callbacks.toggle_thinking,
+                "ctrl+t": self.callbacks.toggle_verbose,
+                "ctrl+u": lambda: (self.pending.clear(),
+                                   setattr(bar, "queued", ""), bar.refresh()),
+            },
+            on_key=typed,
+        )
 
         self.callbacks.watcher = watcher
         self._task = asyncio.ensure_future(self.agent.run(text))
@@ -596,6 +633,23 @@ class Repl:
 
         return "  ·  ".join(pieces)
 
+    async def _drain_queue(self) -> bool:
+        """Run whatever was typed during the turn, oldest first.
+
+        Shown before each one runs: a message typed a minute ago and then
+        silently executed is startling.
+        """
+        while (queued := self.pending.take()) is not None:
+            self.ui.console.print()
+            self.ui.console.print(
+                Text("  \u203a ", style=f"bold {ACCENT}") + Text(queued))
+            if queued.startswith("/"):
+                if await self.command(queued) is False:
+                    return False
+                continue
+            await self.turn(queued)
+        return True
+
     def _shift_effort(self, delta: int) -> None:
         """Step the effort level without typing a command."""
         policy = self.policy.bump(delta)
@@ -615,6 +669,17 @@ class Repl:
     async def command(self, text: str) -> bool:
         parts = text.split()
         name, args = parts[0].lower(), parts[1:]
+
+        if name not in COMMANDS and name not in ALIASES:
+            resolved = resolve_command(name)
+            if resolved is None:
+                near = [c for c in COMMANDS if c.startswith(name)]
+                self.ui.warn(
+                    f"unknown command {name}."
+                    + (f" Did you mean {' or '.join(near)}?" if near
+                       else " /help for the list."))
+                return True
+            name = resolved
 
         if name in ("/quit", "/exit", "/q"):
             return False

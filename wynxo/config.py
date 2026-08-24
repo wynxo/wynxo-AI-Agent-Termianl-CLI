@@ -80,7 +80,9 @@ class Config(Schema):
     pet = Field(bool, "Show the companion face in the status bar.", default=True)
     pet_name = Field(str, "What to call it.", default="wyn")
     animations = Field(bool, "Animate the face and the startup.", default=True)
-    show_thinking = Field(bool, "Display the model's reasoning.", default=True)
+    show_thinking = Field(bool, "Display the model's reasoning. It always "
+                                "thinks; this only controls whether you see it.",
+                          default=False)
     stream = Field(bool, "Stream responses as they are written.", default=True)
 
     def endpoint(self) -> Endpoint:
