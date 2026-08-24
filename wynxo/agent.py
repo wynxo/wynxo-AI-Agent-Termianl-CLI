@@ -21,7 +21,7 @@ from .checkpoints import Checkpoints
 from .config import Config
 from .effort import EffortPolicy, override
 from .memory import Memory
-from .parsing import ParsedTurn, parse_turn
+from .parsing import LiveContentFilter, ParsedTurn, parse_turn
 from .permissions import Decision, PermissionStore, summarise_call
 from .prompts import (
     CONSENSUS_PROMPT,
@@ -101,6 +101,13 @@ class Agent:
         """Set false when the model's template cannot do tool calls, in which
         case tools are described in the prompt in Hermes format instead."""
 
+        self._model_info = None
+        """Cached from the last detect_capabilities() call, so set_effort()
+        can re-apply the same thinking downgrade without a network round
+        trip -- otherwise /effort on a non-thinking model would silently
+        turn native `think` back on and undo what detect_capabilities()
+        already established."""
+
         self.session = Session(workspace=workspace)
         self.refresh_system_prompt()
 
@@ -119,24 +126,47 @@ class Agent:
         )
 
     def set_effort(self, policy: EffortPolicy) -> None:
-        self.policy = policy
+        self.policy = self._apply_capability_limits(policy)
         self.refresh_system_prompt()
 
+    def _apply_capability_limits(self, policy: EffortPolicy) -> EffortPolicy:
+        """Downgrade a freshly-resolved policy to what the current model can
+        actually do, using the capabilities detect_capabilities() cached.
+
+        Picking a named level (`/effort high`, `-e xhigh`) always starts from
+        the policy's own defaults, thinking included -- so without this, an
+        effort change after detect_capabilities() already turned thinking off
+        for a model that does not support it would silently turn it back on,
+        and the model would reject `think` the same way it did before the
+        first downgrade.
+        """
+        info = self._model_info
+        if policy.thinking and info is not None and info.capabilities_known \
+                and not info.supports_thinking:
+            return override(policy, thinking=False)
+        return policy
+
     async def detect_capabilities(self) -> None:
-        """Ask the server what the model can do, and adapt."""
+        """Ask the server what the model can do, and adapt.
+
+        Always sets native_tools rather than only ever clearing it, so
+        switching from a model with no native tool support to one that has
+        it turns Hermes-style prompted calls back off. Without the reset, a
+        model switch could only ever downgrade the tool-calling path, never
+        upgrade it, and the better path would stay silently unused.
+        """
         try:
             info = await self.client.show(self.config.model)
         except ProviderError:
             return
+        self._model_info = info
+        self.native_tools = not info.capabilities_known or info.supports_tools
         if info.capabilities_known and not info.supports_tools:
-            self.native_tools = False
             await self.cb.on_warning(
                 f"{self.config.model} has no native tool support; using Hermes-style "
                 "prompted tool calls. A tool-tuned model will work noticeably better."
             )
-        if self.policy.thinking and info.capabilities_known and not info.supports_thinking:
-            # Not an error: the prompt-level effort behaviour still applies.
-            self.policy = override(self.policy, thinking=False)
+        self.policy = self._apply_capability_limits(self.policy)
         self.refresh_system_prompt()
 
     # -- one model call ----------------------------------------------------
@@ -153,6 +183,11 @@ class Agent:
         content_parts: list[str] = []
         thinking_parts: list[str] = []
         native_calls: list[dict] = []
+        # A model with no native `thinking`/`tools` support writes
+        # <think>...</think> and <tool_call>...</tool_call> straight into
+        # plain content. The filter hides those from the live view; the raw
+        # chunks still go to content_parts below, for parse_turn() to act on.
+        live_filter = LiveContentFilter()
         stream = self.client.chat(
             messages if messages is not None else self.session.wire(),
             model=self.config.model,
@@ -170,13 +205,17 @@ class Agent:
             if chunk.content:
                 content_parts.append(chunk.content)
                 if stream_content:
-                    await self.cb.on_content(chunk.content)
+                    if visible := live_filter.feed(chunk.content):
+                        await self.cb.on_content(visible)
             if chunk.tool_calls:
                 native_calls.extend(chunk.tool_calls)
             if chunk.done:
                 self.session.usage.add_chunk(
                     chunk.prompt_tokens, chunk.completion_tokens, chunk.total_duration_ns
                 )
+
+        if stream_content and (trailing := live_filter.finish()):
+            await self.cb.on_content(trailing)
 
         return parse_turn("".join(content_parts), "".join(thinking_parts), native_calls)
 

@@ -55,6 +55,94 @@ class ParsedTurn:
         return bool(self.tool_calls)
 
 
+_HIDDEN_TAGS = ("think", "thinking", "reasoning", "tool_call")
+
+
+class LiveContentFilter:
+    """Strips <think>/<thinking>/<reasoning>/<tool_call> blocks out of a
+    live token stream, without ever showing a partial tag.
+
+    parse_turn() already strips these out of the *final* assembled text --
+    but a model with no native ``thinking`` or ``tools`` support writes them
+    straight into plain content instead, and streaming that unfiltered means
+    every tool call and every thought shows up as raw protocol markup in the
+    middle of the answer instead of prose. This applies the identical rule
+    live, one chunk at a time, so what the user watches stream and what
+    parse_turn() later extracts can never disagree.
+    """
+
+    def __init__(self) -> None:
+        self.buffer = ""
+        self.open_tag: str | None = None
+
+    def feed(self, text: str) -> str:
+        """Consume one chunk of raw content; return what is safe to show."""
+        self.buffer += text
+        out: list[str] = []
+        while True:
+            if self.open_tag is None:
+                found = self._find_open_tag()
+                if found is None:
+                    break
+                start, tag, marker_len = found
+                out.append(self.buffer[:start])
+                self.buffer = self.buffer[start + marker_len:]
+                self.open_tag = tag
+                continue
+            close = f"</{self.open_tag}>"
+            end = self.buffer.lower().find(close)
+            if end == -1:
+                break
+            self.buffer = self.buffer[end + len(close):]
+            self.open_tag = None
+        if self.open_tag is None:
+            safe = self._safe_emit_length()
+            out.append(self.buffer[:safe])
+            self.buffer = self.buffer[safe:]
+        return "".join(out)
+
+    def finish(self) -> str:
+        """Flush whatever is left once the stream ends.
+
+        Text still waiting inside an unterminated tag is a truncated thought
+        or tool call, not an answer -- discarded, the same way parse_turn()
+        drops an unclosed block rather than showing it.
+        """
+        if self.open_tag is not None:
+            self.buffer = ""
+            self.open_tag = None
+            return ""
+        remainder, self.buffer = self.buffer, ""
+        return remainder
+
+    def _find_open_tag(self) -> tuple[int, str, int] | None:
+        """The earliest complete opening tag in the buffer, if any."""
+        lowered = self.buffer.lower()
+        best: tuple[int, str, int] | None = None
+        for tag in _HIDDEN_TAGS:
+            marker = f"<{tag}>"
+            idx = lowered.find(marker)
+            if idx != -1 and (best is None or idx < best[0]):
+                best = (idx, tag, len(marker))
+        return best
+
+    def _safe_emit_length(self) -> int:
+        """How much of the buffer is safe to emit now.
+
+        A trailing ``<`` that could still grow into a recognised opening tag
+        is held back -- otherwise a tag split across two chunks (``<tool_c``
+        then ``all>``) would leak its first half before the second arrives.
+        """
+        idx = self.buffer.rfind("<")
+        if idx == -1:
+            return len(self.buffer)
+        tail = self.buffer[idx:].lower()
+        for tag in _HIDDEN_TAGS:
+            if f"<{tag}>".startswith(tail):
+                return idx
+        return len(self.buffer)
+
+
 def split_thinking(text: str) -> tuple[str, str]:
     """Return ``(visible_content, thinking)``."""
     thoughts: list[str] = []

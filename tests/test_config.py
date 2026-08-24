@@ -84,6 +84,27 @@ class TestPermissions:
         ("ls && rm -rf /", False),      # chained: the safe half proves nothing
         ("cat x | sh", False),
         ("echo x > /etc/passwd", False),
+        # sed/awk/find/sort/tree are in the "safe" list for their normal,
+        # observing-only use -- but each has a flag that turns it into a
+        # write, and none of those flags involve a shell metacharacter the
+        # chained-command check above would otherwise catch.
+        ("sed 's/foo/bar/' file.txt", True),          # prints to stdout only
+        ("sed -n '1,5p' file.txt", True),
+        ("sed -i 's/foo/bar/' file.txt", False),       # rewrites the file
+        ("sed -i.bak 's/foo/bar/' file.txt", False),
+        ("sed -ni 's/foo/bar/p' file.txt", False),     # -i bundled, not first
+        ("awk '{print $1}' file.txt", True),
+        ("awk -i inplace '{gsub(/x/,\"y\")}' file", False),
+        ("gawk -i inplace '{gsub(/x/,\"y\")}' file", False),
+        ("find . -name '*.py'", True),
+        ("find . -name '*.tmp' -delete", False),
+        ("find . -exec rm {} +", False),               # no ';' or shell char
+        ("find . -execdir rm {} +", False),
+        ("sort file.txt", True),
+        ("sort -o input.txt input.txt", False),        # "sort in place" trick
+        ("sort --output=input.txt input.txt", False),
+        ("tree", True),
+        ("tree -o out.txt", False),
     ])
     def test_classification(self, command, read_only):
         assert is_read_only_command(command) is read_only
@@ -123,6 +144,15 @@ class TestPermissions:
         assert store.blocked("write_file", True)
         assert store.blocked("shell", True)
         assert store.blocked("read_file", False) is None
+
+    def test_auto_mode_still_asks_before_an_in_place_sed(self):
+        """sed being in the "safe, never prompt" list for its normal,
+        read-only use must not extend to its in-place-write flag."""
+        store = PermissionStore(mode=Mode.AUTO)
+        assert not store.needs_prompt(
+            "shell", True, {"command": "sed 's/x/y/' file.txt"})
+        assert store.needs_prompt(
+            "shell", True, {"command": "sed -i 's/x/y/' file.txt"})
 
     def test_auto_mode_edits_freely_but_still_asks_to_run(self):
         store = PermissionStore(mode=Mode.AUTO)

@@ -423,6 +423,11 @@ class Repl:
             note(WARN, f"context {self.config.num_ctx}", warning.split(".")[0])
 
         await self.agent.detect_capabilities()
+        # EffortPolicy is immutable: a capability downgrade inside the agent
+        # produces a new object rather than mutating self.policy in place, so
+        # without this the status bar and /effort table would keep showing
+        # "thinking on" after the agent had silently turned it off.
+        self.policy = self.agent.policy
         if not self.agent.native_tools:
             note(WARN, "tools", "hermes (prompted), not native")
 
@@ -682,10 +687,10 @@ class Repl:
         policy = self.policy.bump(delta)
         if policy.name == self.policy.name:
             return
-        self.policy = policy
         self.config.effort = policy.name
         self.agent.set_effort(policy)
-        self.ui.info(f"effort: {policy.name} -- {policy.headline}")
+        self.policy = self.agent.policy
+        self.ui.info(f"effort: {self.policy.name} -- {self.policy.headline}")
 
     def interrupt(self) -> None:
         if self._task and not self._task.done():
@@ -852,10 +857,13 @@ class Repl:
         except KeyError as exc:
             self.ui.warn(str(exc))
             return True
-        self.policy = policy
         self.config.effort = policy.name
         self.agent.set_effort(policy)
-        self.ui.success(f"effort: {policy.name} -- {policy.describe()}")
+        # set_effort() may downgrade thinking for the current model; read the
+        # policy back rather than trusting the one just resolved, so the
+        # status bar reports what the agent will actually do.
+        self.policy = self.agent.policy
+        self.ui.success(f"effort: {self.policy.name} -- {self.policy.describe()}")
         return True
 
     async def cmd_model(self, args: list[str]) -> bool:
@@ -919,6 +927,7 @@ class Repl:
         self.config.model = target
         self.agent.config.model = target
         await self.agent.detect_capabilities()
+        self.policy = self.agent.policy
         self.ui.success(f"model: {target}")
         self.journal.note("model switched", model=target)
         if warning := await check_context(self.client, self.config):

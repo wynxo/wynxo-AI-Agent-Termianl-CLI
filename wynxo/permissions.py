@@ -130,6 +130,45 @@ class PermissionStore:
         self.denied_this_session.append(f"{tool_name}: {reason}")
 
 
+def _sed_writes_in_place(args: list[str]) -> bool:
+    # sed's -i is only ever a short flag, optionally bundled with others
+    # (-ni, -i.bak) or standing alone -- never a long --option, so any
+    # single-dash token with an 'i' among its letters means in-place.
+    return any(a.startswith("-") and not a.startswith("--") and "i" in a[1:]
+              for a in args)
+
+
+def _awk_writes_in_place(args: list[str]) -> bool:
+    # gawk's in-place extension is loaded as `-i inplace` (two tokens).
+    return "inplace" in args
+
+
+def _find_mutates(args: list[str]) -> bool:
+    # -delete and -exec/-execdir/-ok/-okdir run arbitrary actions per match
+    # with no shell metacharacter in sight; -fprint(f) writes a file too.
+    return bool({"-delete", "-exec", "-execdir", "-ok", "-okdir",
+                "-fprint", "-fprintf"} & set(args))
+
+
+def _writes_to_o_flag(args: list[str]) -> bool:
+    # `sort -o file file` and `tree -o file` write to an arbitrary path --
+    # including, for sort, back over one of the files it just read.
+    return any(a in ("-o", "--output") or a.startswith("--output=") for a in args)
+
+
+# Commands in SAFE_COMMANDS whose normal, read-only form has a flag that
+# turns it into a write instead -- checked before the SAFE_COMMANDS lookup
+# so that flag is never missed just because the bare command name is safe.
+_HIDDEN_WRITE_FLAGS = {
+    "sed": _sed_writes_in_place,
+    "awk": _awk_writes_in_place,
+    "gawk": _awk_writes_in_place,
+    "find": _find_mutates,
+    "sort": _writes_to_o_flag,
+    "tree": _writes_to_o_flag,
+}
+
+
 def is_read_only_command(command: str) -> bool:
     """Whether a command only observes. Conservative: unsure means no."""
     text = command.strip()
@@ -142,6 +181,8 @@ def is_read_only_command(command: str) -> bool:
 
     parts = text.split()
     head = parts[0].lower()
+    if head in _HIDDEN_WRITE_FLAGS and _HIDDEN_WRITE_FLAGS[head](parts[1:]):
+        return False
     if head in SAFE_COMMANDS:
         return True
     if head in SAFE_SUBCOMMANDS and len(parts) > 1:

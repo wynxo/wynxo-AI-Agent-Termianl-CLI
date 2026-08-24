@@ -152,6 +152,37 @@ class TestBasicLoop:
         assert cb.tools[0][0] == "read_file"
         await agent.client.aclose()
 
+    async def test_hermes_tool_call_markup_is_not_streamed_to_the_user(self, tmp_path):
+        """The raw <tool_call>{...}</tool_call> text used to be streamed
+        straight to the terminal before being parsed out, so every response
+        from a non-tool-tuned model showed broken-looking protocol markup."""
+        (tmp_path / "a.txt").write_text("content here\n")
+        agent, _, cb = make_agent(tmp_path, [
+            {"content": 'Let me check.\n<tool_call>{"name":"read_file",'
+                        '"arguments":{"path":"a.txt"}}</tool_call>'},
+            {"content": "It says content here."},
+        ], capabilities=())
+        await agent.detect_capabilities()
+        await agent.run("read a.txt")
+        streamed = "".join(cb.content)
+        assert "<tool_call>" not in streamed
+        assert "</tool_call>" not in streamed
+        assert "Let me check." in streamed
+        await agent.client.aclose()
+
+    async def test_inline_think_tags_are_not_streamed_to_the_user(self, tmp_path):
+        """A model with no native `thinking` field writes <think> straight
+        into content instead; that must not leak into the live view either."""
+        agent, _, cb = make_agent(tmp_path, [
+            {"content": "<think>I should just answer directly.</think>The answer is 42."},
+        ], capabilities=())
+        await agent.detect_capabilities()
+        await agent.run("what is the answer")
+        streamed = "".join(cb.content)
+        assert "<think>" not in streamed
+        assert "The answer is 42." in streamed
+        await agent.client.aclose()
+
     async def test_file_is_actually_written(self, tmp_path):
         agent, _, _ = make_agent(tmp_path, [
             {"tool_calls": [{"function": {"name": "write_file", "arguments": {
@@ -380,6 +411,61 @@ class TestWireFormat:
         tool_messages = [m for m in agent.session.messages if m.get("role") == "tool"]
         assert tool_messages[0]["tool_name"] == "read_file"
         assert "name" not in tool_messages[0]
+        await agent.client.aclose()
+
+
+class TestCapabilityStaysCurrent:
+    """detect_capabilities() must never only ratchet one direction: a
+    session that switches models has to pick up both a downgrade (a
+    tool-tuned model -> a plain one) and an upgrade (the reverse) as the
+    model actually in use changes."""
+
+    async def test_thinking_downgrade_survives_an_effort_change(self, tmp_path):
+        """Switching to a non-thinking model turns policy.thinking off; a
+        later /effort change used to silently turn it back on, because
+        set_effort() started from the freshly-resolved named policy instead
+        of accounting for what the current model can do."""
+        agent, fake, _ = make_agent(
+            tmp_path, [{"content": "hi"}], effort="medium", capabilities=())
+        await agent.detect_capabilities()
+        assert agent.policy.thinking is False
+
+        agent.set_effort(resolve("high"))
+        assert agent.policy.thinking is False, (
+            "an effort change on a non-thinking model must not re-enable "
+            "the native `think` request")
+
+        await agent.run("x")
+        assert "think" not in fake.requests[-1]
+        await agent.client.aclose()
+
+    async def test_thinking_still_applies_normally_on_a_capable_model(self, tmp_path):
+        """The downgrade guard must not suppress thinking for a model that
+        genuinely supports it."""
+        agent, fake, _ = make_agent(
+            tmp_path, [{"content": "hi"}], effort="medium",
+            capabilities=("tools", "thinking"))
+        await agent.detect_capabilities()
+        agent.set_effort(resolve("high"))
+        assert agent.policy.thinking is True
+
+        await agent.run("x")
+        assert fake.requests[-1]["think"] == "medium"
+        await agent.client.aclose()
+
+    async def test_native_tools_recovers_after_switching_to_a_tool_model(self, tmp_path):
+        """The reverse direction: a session that starts on a model with no
+        tool support (Hermes fallback) and then switches to one that has
+        native tools must stop using the prompted fallback. Without a reset,
+        detect_capabilities() could only ever turn native_tools off."""
+        agent, fake, _ = make_agent(tmp_path, [{"content": "hi"}], capabilities=())
+        await agent.detect_capabilities()
+        assert agent.native_tools is False
+
+        # Same server, but the newly-selected model advertises native tools.
+        fake.capabilities = ["tools"]
+        await agent.detect_capabilities()
+        assert agent.native_tools is True
         await agent.client.aclose()
 
 
