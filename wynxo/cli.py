@@ -72,6 +72,16 @@ ALIASES = {
 }
 
 
+class _NoPicker:
+    """Sentinel: this terminal cannot draw an arrow picker."""
+
+    def __repr__(self) -> str:
+        return "NO_PICKER"
+
+
+NO_PICKER = _NoPicker()
+
+
 def _first(text: str) -> str:
     return text.strip().splitlines()[0].strip() if text.strip() else ""
 
@@ -1025,13 +1035,13 @@ class Repl:
             return self.cmd_memory(args)
 
         if name == "/pet":
-            return self.cmd_pet(args)
+            return await self.cmd_pet(args)
 
         if name == "/theme":
             return await self.cmd_theme(args)
 
         if name == "/speak":
-            return self.cmd_speak(args)
+            return await self.cmd_speak(args)
 
         if name == "/talker":
             return self.cmd_talker(args)
@@ -1270,6 +1280,8 @@ class Repl:
             options = [(n, resolve(n).headline) for n in ORDER]
             chosen = await self._pick("effort", options, self.policy.name)
             if chosen is None:
+                return True
+            if chosen is NO_PICKER:
                 self.ui.table(
                     ["level", "behaviour"],
                     [(n + ("  <-" if n == self.policy.name else ""),
@@ -1364,6 +1376,21 @@ class Repl:
     async def cmd_endpoint(self, args: list[str]) -> bool:
         action = args[0].lower() if args else "list"
 
+        if action == "list" and not args:
+            # Bare /endpoint: pick which server to talk to. With more than
+            # one configured that is almost always what you meant.
+            options = [(e.name, e.url) for e in self.config.endpoints]
+            picked = (await self._pick("ollama server", options,
+                                       self.config.active_endpoint)
+                      if len(options) > 1 else NO_PICKER)
+            if picked is None:
+                return True
+            if picked is not NO_PICKER:
+                if picked == self.config.active_endpoint:
+                    self.ui.info(f"already using {picked}")
+                    return True
+                return await self.cmd_endpoint(["use", picked])
+
         if action == "list":
             self.ui.table(
                 ["name", "url"],
@@ -1423,13 +1450,23 @@ class Repl:
 
     async def cmd_mode(self, args: list[str]) -> bool:
         if not args:
-            self.ui.table(
-                ["mode", "behaviour"],
-                [(m.value + ("  <-" if m is self.agent.permissions.mode else ""),
-                  m.describe()) for m in Mode],
-                title="permission modes",
-            )
-            return True
+            options = [(m.value, m.describe()) for m in Mode]
+            chosen = await self._pick("permission mode", options,
+                                      self.agent.permissions.mode.value)
+            if chosen is None:
+                return True
+            if chosen is NO_PICKER:
+                self.ui.table(
+                    ["mode", "behaviour"],
+                    [(m.value + ("  <-" if m is self.agent.permissions.mode else ""),
+                      m.describe()) for m in Mode],
+                    title="permission modes",
+                )
+                return True
+            if chosen == self.agent.permissions.mode.value:
+                self.ui.info(f"already in {chosen} mode")
+                return True
+            args = [chosen]
         try:
             mode = Mode.parse(args[0])
         except KeyError as exc:
@@ -1457,18 +1494,29 @@ class Repl:
     async def cmd_scope(self, args: list[str]) -> bool:
         if not args:
             current = self.agent.boundary
-            self.ui.table(
-                ["scope", "means"],
-                [(s.value + ("  <-" if current and s is current.scope else ""),
-                  {"folder": "only the directory wynxo started in",
-                   "repo": "the whole git repository",
-                   "machine": "no path restriction at all"}[s.value]) for s in Scope],
-                title="scope",
-            )
-            if current:
-                self.ui.info(f"currently: {self._boundary_summary(current)}")
-            self.ui.info("/scope <path> or /cd <path> moves to another directory")
-            return True
+            means = {"folder": "only the directory wynxo started in",
+                     "repo": "the whole git repository",
+                     "machine": "no path restriction at all"}
+            options = [(s.value, means[s.value]) for s in Scope]
+            chosen = await self._pick(
+                "scope", options, current.scope.value if current else "")
+            if chosen is None:
+                return True
+            if chosen is NO_PICKER:
+                self.ui.table(
+                    ["scope", "means"],
+                    [(s.value + ("  <-" if current and s is current.scope else ""),
+                      means[s.value]) for s in Scope],
+                    title="scope",
+                )
+                if current:
+                    self.ui.info(f"currently: {self._boundary_summary(current)}")
+                self.ui.info("/scope <path> or /cd <path> moves to another directory")
+                return True
+            if current and chosen == current.scope.value:
+                self.ui.info(f"already scoped to {chosen}")
+                return True
+            args = [chosen]
         try:
             scope = Scope.parse(args[0])
         except KeyError:
@@ -1613,7 +1661,7 @@ class Repl:
             self.ui.success(message)
         return True
 
-    def cmd_speak(self, args: list[str]) -> bool:
+    async def cmd_speak(self, args: list[str]) -> bool:
         """Turn the voice on and off, and say which synthesiser is doing it."""
         from .speech import (Speaker, available, install_hint,
                              pick as pick_engine)
@@ -1658,6 +1706,22 @@ class Repl:
                 return True
             self.ui.success(f"spoke through {self.speaker.describe()}")
             return True
+
+        if action == "engine" and len(args) == 1:
+            options = [(e.name, e.quality) for e in available()]
+            if not options:
+                self.ui.warn("No speech synthesiser found on this machine.")
+                for line in install_hint().splitlines():
+                    self.ui.info(line)
+                return True
+            picked = await self._pick("speech engine", options,
+                                      self.config.speech_engine)
+            if picked is None:
+                return True
+            if picked is NO_PICKER:
+                self.ui.info("available: " + ", ".join(n for n, _ in options))
+                return True
+            args = [action, picked]
 
         if action in ("engine", "voice") and len(args) > 1:
             if action == "engine":
@@ -1712,6 +1776,8 @@ class Repl:
             options = [(n, _theme_summary(n)) for n in theme_module.names()]
             chosen = await self._pick("theme", options, self.config.theme)
             if chosen is None:
+                return True
+            if chosen is NO_PICKER:
                 self.ui.table(
                     ["theme", "look"],
                     [(n + ("  <-" if n == self.config.theme else ""), summary)
@@ -1746,9 +1812,15 @@ class Repl:
 
     async def _pick(self, title: str, options: list[tuple[str, str]],
                     current: str) -> str | None:
-        """Arrow-key chooser for a simple setting. None if not usable."""
+        """Arrow-key chooser for a simple setting.
+
+        Returns the chosen value, None if the user pressed escape, or
+        NO_PICKER when this terminal cannot draw one. Cancelling and being
+        unable to offer a choice are different things: escape means "never
+        mind", and printing the table anyway ignores that.
+        """
         if not arrows_supported():
-            return None
+            return NO_PICKER
         chosen = await choose(
             [Choice(value=name,
                     label=name,
@@ -1825,7 +1897,7 @@ class Repl:
                      f"/log list  {dot}  /log off")
         return True
 
-    def cmd_pet(self, args: list[str]) -> bool:
+    async def cmd_pet(self, args: list[str]) -> bool:
         from .prompts import VOICES
 
         if not args:
@@ -1870,13 +1942,22 @@ class Repl:
 
         if action == "voice":
             if len(args) < 2:
-                self.ui.table(
-                    ["voice", "sounds like"],
-                    [(v + ("  <-" if v == self.config.voice else ""),
-                      _voice_summary(v)) for v in VOICES],
-                    title="voice",
-                )
-                return True
+                options = [(v, _voice_summary(v)) for v in VOICES]
+                picked = await self._pick("voice", options, self.config.voice)
+                if picked is None:
+                    return True
+                if picked is NO_PICKER:
+                    self.ui.table(
+                        ["voice", "sounds like"],
+                        [(v + ("  <-" if v == self.config.voice else ""),
+                          _voice_summary(v)) for v in VOICES],
+                        title="voice",
+                    )
+                    return True
+                if picked == self.config.voice:
+                    self.ui.info(f"already using {picked}")
+                    return True
+                args = [action, picked]
             choice = args[1].lower()
             if choice not in VOICES:
                 self.ui.warn(f"unknown voice; choose one of {', '.join(VOICES)}")

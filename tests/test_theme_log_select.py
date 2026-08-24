@@ -516,3 +516,65 @@ class TestCommitCommand:
         assert "imperative" in lowered
         assert "72" in COMMIT_PROMPT
         assert "no preamble" in lowered
+
+
+class TestEverySettingIsPickable:
+    """Entering a settings command bare should offer the choice, not print
+    a table describing what you already have."""
+
+    PICKERS = ("cmd_theme", "cmd_effort", "cmd_mode", "cmd_scope",
+               "cmd_pet", "cmd_speak", "cmd_endpoint", "cmd_model")
+
+    def test_they_all_offer_the_arrow_picker(self):
+        import inspect
+
+        from wynxo import cli
+
+        missing = [name for name in self.PICKERS
+                   if "_pick" not in inspect.getsource(getattr(cli.Repl, name))
+                   and "choose(" not in inspect.getsource(getattr(cli.Repl, name))]
+        assert missing == [], f"still print-only: {missing}"
+
+    def test_they_are_all_async_so_they_can_await_a_choice(self):
+        import inspect
+
+        from wynxo import cli
+
+        for name in self.PICKERS:
+            assert inspect.iscoroutinefunction(getattr(cli.Repl, name)), name
+
+
+class TestCancelIsNotTheSameAsNoPicker:
+    """Escape means "never mind". Printing the table anyway ignores that,
+    and both used to come back as None."""
+
+    def test_the_sentinel_is_distinct_from_none(self):
+        from wynxo.cli import NO_PICKER
+
+        assert NO_PICKER is not None
+        assert bool(NO_PICKER) is True      # never falsy by accident
+
+    def test_no_picker_is_returned_when_arrows_are_unavailable(self, monkeypatch):
+        import asyncio
+
+        from wynxo import cli
+
+        monkeypatch.setattr(cli, "arrows_supported", lambda: False)
+        repl = object.__new__(cli.Repl)
+        got = asyncio.run(cli.Repl._pick(repl, "t", [("a", "x")], "a"))
+        assert got is cli.NO_PICKER
+
+    def test_every_caller_handles_both_outcomes(self):
+        """A caller that only checks one of them either prints a table on
+        escape or crashes on a terminal with no picker."""
+        import inspect
+
+        from wynxo import cli
+
+        for name in ("cmd_theme", "cmd_effort", "cmd_mode", "cmd_scope",
+                     "cmd_pet", "cmd_speak", "cmd_endpoint"):
+            source = inspect.getsource(getattr(cli.Repl, name))
+            if "_pick" not in source:
+                continue
+            assert "is None" in source, f"{name} ignores escape"
+            assert "NO_PICKER" in source, f"{name} ignores a missing picker"
