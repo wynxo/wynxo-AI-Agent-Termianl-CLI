@@ -605,6 +605,7 @@ How wynxo talks to you. Tone only.
 | `warm` | friendly, still honest about failures |
 | `mentor` | explains the reasoning behind decisions |
 | `blunt` | the fewest words that say what happened |
+| `kawaii` | cheerful and affectionate, same engineering underneath |
 
 Every voice except `plain` carries the same floor, which no personality can
 override: never soften a failure, never imply something worked when it did
@@ -617,6 +618,41 @@ much it does or how honest it is.
 
 Set `"voice"`, `"pet"`, `"pet_name"` and `"animations"` in your config to make
 any of it permanent.
+
+---
+
+## Working on a GitHub repo
+
+```bash
+wynxo --repo wynxo/my-project
+```
+
+or from inside a session:
+
+```
+/repo wynxo/my-project
+/repo https://github.com/wynxo/my-project
+/repo git@github.com:wynxo/my-project.git
+```
+
+It clones into a cache directory, moves the workspace there and widens the
+scope to the repository. Re-running updates it.
+
+wynxo edits files on disk, so working on a repository means having it on
+disk — there is no remote-execution mode, and pretending otherwise would
+misrepresent where your edits are happening. **It also does not push.** Ask it
+to run git and approve the command, which is where that decision belongs.
+
+Private repositories need credentials git can find on its own; wynxo runs git
+with prompting disabled so a clone cannot hang waiting for a username nobody
+is there to type. If it fails, the message says which case you hit.
+
+Already have it cloned? Just point at the folder:
+
+```
+/cd ~/code/my-project
+/scope ~/code/my-project
+```
 
 ---
 
@@ -816,6 +852,8 @@ effort-level setting.
 /doctor                  check the server and model for problems
 /mode [plan|manual|auto|yolo]   how much it asks first
 /scope [folder|repo|machine]    what it may touch
+/scope <path>  ·  /cd <path>    work in another directory
+/repo owner/name                clone a GitHub repo and work in it
 /undo [n|list]           revert the last file change
 /memory ...              show | add <note> | forget <text> | edit | reload
 /pet ...                 on | off | still | name <x> | voice <x>
@@ -856,6 +894,7 @@ wynxo [prompt]
   -C, --cwd DIR        project directory
       --mode MODE      plan | manual | auto | yolo
       --scope SCOPE    folder | repo | machine
+      --repo OWNER/NAME  clone a GitHub repository and work in it
       --doctor         run the checks and exit
       --setup          re-run first-time setup
       --no-stream      wait for the full response

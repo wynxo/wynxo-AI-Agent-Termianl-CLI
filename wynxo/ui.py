@@ -281,7 +281,8 @@ class UI:
     def code(self, text: str, language: str = "text") -> None:
         self.console.print(Syntax(text, language, theme=self.code_theme, word_wrap=True))
 
-    def code_line(self, line: str, language: str = "text") -> None:
+    def code_line(self, line: str, language: str = "text",
+                  indent: str = "  ") -> None:
         """One highlighted line, indented, with no block chrome.
 
         Syntax() would draw its own background band per line and stack into a
@@ -301,7 +302,7 @@ class UI:
                         rendered.append(value, style=self._token_style(token))
         except Exception:
             rendered = Text(line)
-        self.console.print(Text("  ") + rendered, highlight=False)
+        self.console.print(Text(indent) + rendered, highlight=False)
 
     def _token_style(self, token) -> str:
         from pygments.token import (Comment, Error, Keyword, Name, Number,
@@ -363,49 +364,107 @@ class UI:
 
 
 class CodeStreamer:
-    """Renders streamed assistant text, highlighting code as it arrives.
+    """Renders streamed assistant text as it arrives.
 
-    Each code line is syntax-highlighted and printed once, as soon as it is
-    complete. An earlier version printed a dim preview and then rewound the
-    cursor to replace it with a highlighted block, which crashed outright on
-    rich 15 (no ``Control.clear_lines``) and was fragile regardless: cursor
-    arithmetic goes wrong the moment a line wraps, the block scrolls, or the
-    pinned status bar redraws underneath it.
+    Prose is written out word by word as soon as each word is complete, with
+    wrapping done here rather than by the terminal -- so text flows the way it
+    is generated instead of appearing a whole line at a time when a newline
+    finally shows up. A model writing one long paragraph used to produce
+    nothing at all until it finished.
 
-    Printing each line once, already highlighted, has none of those failure
-    modes and looks the same -- code appearing a line at a time, in colour.
+    Fenced code is different: it is highlighted per line, once the line is
+    whole, because a half-written line cannot be lexed.
     """
 
-    def __init__(self, ui: "UI"):
+    def __init__(self, ui: "UI", indent: str = "", style: str = "",
+                 code: bool = True):
         self.ui = ui
+        self.indent = indent
+        self.style = style
+        self.code = code
+        """False for reasoning: a model's scratchpad is full of stray
+        backticks and half-fences that are not code blocks."""
         self.buffer = ""
+        self.column = 0
         self.in_code = False
         self.language = "text"
         self.started = False
+        self.width = max(30, ui.width - len(indent) - 1)
+
+    # -- entry point -------------------------------------------------------
 
     def feed(self, text: str) -> None:
-        self.buffer += text
-        while "\n" in self.buffer:
-            line, self.buffer = self.buffer.split("\n", 1)
-            self._line(line)
+        self.buffer += text.replace("\r", "")
+        while self.buffer:
+            newline = self.buffer.find("\n")
+            if newline != -1:
+                self._segment(self.buffer[:newline], end_of_line=True)
+                self.buffer = self.buffer[newline + 1:]
+                continue
+            # No newline yet. Emit whole words and hold the partial one, so a
+            # word never appears split across a flush.
+            space = self.buffer.rfind(" ")
+            if space == -1:
+                return
+            self._segment(self.buffer[: space + 1], end_of_line=False)
+            self.buffer = self.buffer[space + 1:]
+            return
 
-    def _line(self, line: str) -> None:
-        fence = line.lstrip().startswith("```")
+    # -- the two modes -----------------------------------------------------
 
-        if fence:
+    def _segment(self, text: str, end_of_line: bool) -> None:
+        if self.code and (self.in_code or text.lstrip().startswith("```")):
+            self._code_segment(text, end_of_line)
+            return
+        self._prose(text)
+        if end_of_line:
+            self._newline()
+
+    def _code_segment(self, text: str, end_of_line: bool) -> None:
+        # Fences only ever matter on a complete line.
+        if not end_of_line:
+            self.buffer = text + self.buffer
+            return
+        if text.lstrip().startswith("```"):
             if self.in_code:
                 self.in_code = False
             else:
                 self.in_code = True
-                self.language = _language(line.lstrip()[3:].strip())
+                self.language = _language(text.lstrip()[3:].strip())
                 self._ensure_started()
             return
-
         self._ensure_started()
-        if self.in_code:
-            self.ui.code_line(line, self.language)
+        self.ui.code_line(text, self.language, indent=self.indent + "  ")
+
+    def _prose(self, text: str) -> None:
+        for word in _words(text):
+            if word.isspace():
+                if self.column:
+                    self._write(word)
+                continue
+            if self.column and self.column + len(word) > self.width:
+                self._newline()
+            if not self.column:
+                self._write(self.indent)
+            self._write(word)
+
+    # -- output ------------------------------------------------------------
+
+    def _write(self, text: str) -> None:
+        self._ensure_started()
+        if self.style:
+            self.ui.console.print(text, style=self.style, end="",
+                                  markup=False, highlight=False)
         else:
-            self.ui.console.print(line, markup=False, highlight=False)
+            self.ui.console.file.write(text)
+            self.ui.console.file.flush()
+        self.column += len(text)
+
+    def _newline(self) -> None:
+        if self.started:
+            self.ui.console.file.write("\n")
+            self.ui.console.file.flush()
+        self.column = 0
 
     def _ensure_started(self) -> None:
         if not self.started:
@@ -413,14 +472,30 @@ class CodeStreamer:
             self.started = True
 
     def finish(self) -> str:
-        """Flush a trailing partial line. Output has already gone out."""
         if self.buffer:
-            self._line(self.buffer)
+            self._segment(self.buffer, end_of_line=True)
             self.buffer = ""
+        if self.column:
+            self._newline()
         self.in_code = False
         if self.started:
             self.ui.console.print()
         return ""
+
+
+def _words(text: str):
+    """Split into words and the whitespace between them, keeping both."""
+    current = ""
+    for char in text:
+        if char == " ":
+            if current:
+                yield current
+                current = ""
+            yield " "
+        else:
+            current += char
+    if current:
+        yield current
 
 
 def _language(tag: str) -> str:
@@ -431,61 +506,16 @@ def _language(tag: str) -> str:
             "": "text"}.get(tag, tag)
 
 
-class ThoughtStreamer:
-    """Streams the model's reasoning as dim, indented, wrapped prose.
+class ThoughtStreamer(CodeStreamer):
+    """The model's reasoning: same flow, indented and dimmed, no code blocks.
 
-    Reasoning arrives as a flood of tiny fragments with no line structure at
-    all, so it cannot be printed per-chunk like content: it has to be
-    accumulated and broken at word boundaries, or it turns into one
-    unreadable line the width of the transcript.
+    Reasoning is not code even when it contains backticks, so fence handling
+    is off -- a stray ``` in a scratchpad would otherwise swallow the rest of
+    the thought into a syntax highlighter.
     """
 
     def __init__(self, ui: "UI", indent: str = "    "):
-        self.ui = ui
-        self.indent = indent
-        self.line = ""
-        self.pending = ""
-        """A trailing partial word. Fragments split mid-word constantly --
-        "what auth" then ".py does" -- and treating each fragment's pieces as
-        whole words inserts a space into the middle of every one."""
-        self.width = max(28, ui.width - len(indent) - 2)
-
-    def feed(self, text: str) -> None:
-        self.pending += text.replace("\r", "")
-        while True:
-            newline = self.pending.find("\n")
-            space = self.pending.rfind(" ")
-            if newline == -1 and space == -1:
-                return
-            if newline != -1 and (space == -1 or newline < space):
-                self._words(self.pending[:newline])
-                self._flush()
-                self.pending = self.pending[newline + 1:]
-                continue
-            self._words(self.pending[: space + 1])
-            self.pending = self.pending[space + 1:]
-            return
-
-    def _words(self, text: str) -> None:
-        for word in text.split():
-            candidate = f"{self.line} {word}".strip()
-            if len(candidate) > self.width:
-                self._flush()
-                candidate = word
-            self.line = candidate
-
-    def _flush(self) -> None:
-        if self.line:
-            self.ui.console.print(Text(self.indent + self.line, style=MUTED),
-                                  highlight=False)
-            self.line = ""
-
-    def finish(self) -> None:
-        if self.pending:
-            self._words(self.pending)
-            self.pending = ""
-        self._flush()
-        self.ui.console.print()
+        super().__init__(ui, indent=indent, style=MUTED, code=False)
 
 
 class ActivityBar:

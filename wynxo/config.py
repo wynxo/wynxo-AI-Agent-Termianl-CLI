@@ -76,7 +76,7 @@ class Config(Schema):
     clear_on_start = Field(bool, "Clear the terminal when wynxo opens.", default=True)
     log = Field(bool, "Write a session transcript for debugging.", default=True)
     voice = Field(str, "How the agent talks: plain, warm, mentor or blunt.",
-                  default="plain", choices=("plain", "warm", "mentor", "blunt"))
+                  default="plain", choices=("plain", "warm", "mentor", "blunt", "kawaii"))
     pet = Field(bool, "Show the companion face in the status bar.", default=True)
     pet_name = Field(str, "What to call it.", default="wyn")
     animations = Field(bool, "Animate the face and the startup.", default=True)

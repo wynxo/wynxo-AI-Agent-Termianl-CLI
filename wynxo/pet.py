@@ -54,6 +54,18 @@ FACES_ASCII: dict[Mood, list[str]] = {
     Mood.SAD:      ["(x_x)", "(x_x)", "(@_@)"],
 }
 
+# An alternate face set for the kawaii voice. Same moods, same widths.
+FACES_KAWAII: dict[Mood, list[str]] = {
+    Mood.IDLE:     ["(｡•ᴗ•｡)", "(｡•ᴗ•｡)", "(｡•ᴗ•｡)", "(｡-ᴗ-｡)"],
+    Mood.THINKING: ["(｡◐ᴗ◐｡)", "(｡◓ᴗ◓｡)", "(｡◑ᴗ◑｡)", "(｡◒ᴗ◒｡)"],
+    Mood.READING:  ["(｡◉ᴗ◉｡)", "(｡◉ᴗ◉｡)", "(｡◉ᴗ◉｡)", "(｡-ᴗ-｡)"],
+    Mood.WORKING:  ["(｡•̀ᴗ•́｡)", "(｡•́ᴗ•̀｡)"],
+    Mood.RUNNING:  ["(｡•ᴗ•｡)ﾉ", "(｡•ᴗ•｡)/", "(｡•ᴗ•｡)ﾉ", "(｡•ᴗ•｡)/"],
+    Mood.ASKING:   ["(｡•ᴗ•｡)?", "(｡•ᴗ•｡) ", "(｡•ᴗ•｡)?", "(｡•ᴗ•｡) "],
+    Mood.HAPPY:    ["(｡≧ᴗ≦｡)", "(｡^ᴗ^｡)"],
+    Mood.SAD:      ["(｡×ᴗ×｡)", "(｡×ᴗ×｡)", "(｡╥ᴗ╥｡)"],
+}
+
 MOOD_STYLES: dict[Mood, str] = {
     Mood.IDLE: "grey62",
     Mood.THINKING: "bright_cyan",
@@ -99,6 +111,15 @@ REMARKS: dict[str, list[str]] = {
     "interrupted": ["stopped", "ok, dropping it"],
 }
 
+REMARKS_KAWAII: dict[str, list[str]] = {
+    "greet": ["ready when you are~", "what are we making today?", "listening~"],
+    "done": ["all done~", "there we go", "finished~"],
+    "denied": ["okay, leaving it", "no worries~"],
+    "error": ["ah, that didn't work", "hit a wall, sorry"],
+    "long": ["still going~", "this one's slow", "almost..."],
+    "interrupted": ["stopped~", "okay, dropping it"],
+}
+
 
 def face_width(text: str) -> int:
     """Display cells, not codepoints.
@@ -120,12 +141,16 @@ class Pet:
     animate: bool = True
     unicode: bool = True
     mood: Mood = Mood.IDLE
+    style_name: str = "default"
+    """``kawaii`` swaps in the rounder face set."""
     _frame: int = field(default=0, repr=False)
 
     # -- appearance --------------------------------------------------------
 
     def faces(self) -> dict[Mood, list[str]]:
-        return FACES if self.unicode else FACES_ASCII
+        if not self.unicode:
+            return FACES_ASCII
+        return FACES_KAWAII if self.style_name == "kawaii" else FACES
 
     def face(self, advance: bool = True) -> str:
         """The current frame. ``advance`` steps the animation."""
@@ -168,7 +193,8 @@ class Pet:
         """One short line for an event, or "" when the pet is off."""
         if not self.enabled:
             return ""
-        options = REMARKS.get(event)
+        table = REMARKS_KAWAII if self.style_name == "kawaii" else REMARKS
+        options = table.get(event)
         return random.choice(options) if options else ""
 
     def greeting(self) -> str:

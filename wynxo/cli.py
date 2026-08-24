@@ -96,6 +96,7 @@ def _voice_summary(voice: str) -> str:
         "warm": "friendly, still honest about failures",
         "mentor": "explains the reasoning behind decisions",
         "blunt": "the fewest words that say what happened",
+        "kawaii": "cheerful and affectionate, same engineering underneath",
     }.get(voice, "")
 
 
@@ -116,7 +117,9 @@ COMMANDS = {
     "/theme": "colour palette: purple | midnight | ember | plain",
     "/log": "where this session is being recorded",
     "/mode": "plan | manual | auto | yolo -- how much it asks first",
-    "/scope": "folder | repo | machine -- what it may touch",
+    "/scope": "folder | repo | machine, or a path to work in",
+    "/cd": "work in another directory",
+    "/repo": "clone a GitHub repo and work in it",
     "/undo": "revert the last file change",
     "/memory": "show, add to, or forget long-term memory",
     "/thinking": "show or hide the model's reasoning",
@@ -325,6 +328,7 @@ class Repl:
             animate=config.animations,
             unicode=ui.g.unicode,
         )
+        self.pet.style_name = "kawaii" if config.voice == "kawaii" else "default"
 
         history_file = data_dir() / "history"
         history_file.parent.mkdir(parents=True, exist_ok=True)
@@ -760,6 +764,10 @@ class Repl:
             return await self.cmd_mode(args)
         if name == "/scope":
             return await self.cmd_scope(args)
+        if name == "/cd":
+            return self.cmd_cd(args)
+        if name == "/repo":
+            return await self.cmd_repo(args)
         if name == "/undo":
             return self.cmd_undo(args)
         if name == "/memory":
@@ -987,12 +995,16 @@ class Repl:
             )
             if current:
                 self.ui.info(f"currently: {current.describe()}")
+            self.ui.info("/scope <path> or /cd <path> moves to another directory")
             return True
         try:
             scope = Scope.parse(args[0])
-        except KeyError as exc:
-            self.ui.warn(str(exc))
-            return True
+        except KeyError:
+            # Not one of the three words, so read it as a directory. Pointing
+            # wynxo at another project mid-session is the obvious thing to
+            # want from a command called /scope, and refusing it over a
+            # vocabulary mismatch helps nobody.
+            return self.cmd_cd(args)
 
         if scope is Scope.MACHINE:
             self.ui.warn(
@@ -1012,8 +1024,83 @@ class Repl:
         self.ui.success(f"scope: {self.agent.boundary.describe()}")
         return True
 
+    async def cmd_repo(self, args: list[str]) -> bool:
+        """Clone a GitHub repository and move the workspace into it."""
+        from . import repo as repo_module
+
+        if not args:
+            current = repo_module.status(self.workspace)
+            if current:
+                self.ui.info(f"{self.ui.shorten_path(str(self.workspace))}  "
+                             f"on {current}")
+            else:
+                self.ui.info("not a git checkout")
+            self.ui.info("/repo owner/name  ·  /repo <url>")
+            return True
+
+        if not repo_module.git_available():
+            self.ui.error("git is not installed, so wynxo cannot clone anything.")
+            return True
+
+        target = repo_module.parse(" ".join(args))
+        if target is None:
+            self.ui.warn("that does not look like a repository. Try owner/name "
+                         "or a GitHub URL.")
+            return True
+
+        with self.ui.status(f"fetching {target.slug}..."):
+            ok, path, message = repo_module.clone_or_update(target)
+        if not ok:
+            self.ui.error(message)
+            return True
+
+        self.ui.success(message)
+        self.cmd_cd([str(path)])
+        # A checkout is a repository, so widen to it rather than pinning the
+        # agent to whichever subdirectory happens to be the clone root.
+        self._apply_scope(Scope.REPO)
+        if branch := repo_module.status(path):
+            self.ui.info(f"on {branch}")
+        self.ui.info("wynxo does not push. Ask it to run git, and approve it.")
+        return True
+
+    def cmd_cd(self, args: list[str]) -> bool:
+        """Move the agent to another directory, keeping the conversation."""
+        if not args:
+            self.ui.info(f"{self.workspace}")
+            return True
+
+        raw = " ".join(args).strip().strip('"').strip("'")
+        target = Path(raw).expanduser()
+        if not target.is_absolute():
+            target = (self.workspace / target)
+        try:
+            target = target.resolve()
+        except OSError as exc:
+            self.ui.warn(f"cannot resolve {raw}: {exc}")
+            return True
+
+        if not target.exists():
+            self.ui.warn(f"{target} does not exist")
+            return True
+        if not target.is_dir():
+            self.ui.warn(f"{target} is a file, not a directory")
+            return True
+
+        self.workspace = target
+        self.memory = Memory(target)
+        self.agent.workspace = target
+        self.agent.memory = self.memory
+        self._apply_scope(self.boundary.scope)
+        self.ui.success(f"working in {self.ui.shorten_path(str(target))}")
+        if reason := suspicious_workspace(target):
+            self.ui.warn(reason)
+        self.journal.note("workspace changed", path=str(target))
+        return True
+
     def _apply_scope(self, scope: Scope) -> None:
         boundary = resolve_scope(self.workspace, scope)
+        self.boundary = boundary
         if boundary.scope is not scope and scope is Scope.REPO:
             self.ui.warn("Not inside a git repository; staying with folder scope.")
 
@@ -1182,6 +1269,7 @@ class Repl:
                 return True
             self.config.voice = choice
             self.config.save()
+            self.pet.style_name = "kawaii" if choice == "kawaii" else "default"
             self.agent.refresh_system_prompt()
             self.ui.success(f"voice: {choice} -- {_voice_summary(choice)}")
             return True
@@ -1380,6 +1468,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--endpoint", help="Ollama URL, e.g. http://homelab:11434")
     parser.add_argument("--ctx", type=int, help="context window size (num_ctx)")
     parser.add_argument("-C", "--cwd", help="project directory (default: here)")
+    parser.add_argument("--repo", metavar="OWNER/NAME",
+                        help="clone a GitHub repository and work in it")
     parser.add_argument("--setup", action="store_true", help="re-run first-time setup")
     parser.add_argument("--doctor", action="store_true",
                         help="check the server and model, and report what will not work")
@@ -1403,6 +1493,26 @@ async def amain(argv: list[str] | None = None) -> int:
         return 1
 
     ui = UI(show_thinking=not args.no_thinking)
+
+    if args.repo:
+        from . import repo as repo_module
+
+        if not repo_module.git_available():
+            print("git is not installed, so --repo cannot clone anything.",
+                  file=sys.stderr)
+            return 1
+        target = repo_module.parse(args.repo)
+        if target is None:
+            print(f"{args.repo!r} does not look like a repository. "
+                  "Try owner/name or a GitHub URL.", file=sys.stderr)
+            return 1
+        with ui.status(f"fetching {target.slug}..."):
+            ok, path, message = repo_module.clone_or_update(target)
+        if not ok:
+            ui.error(message)
+            return 1
+        ui.success(message)
+        workspace = path
 
     # An endpoint supplied on the command line or in the environment is enough
     # to run: do not drag the user through setup for something they answered.
