@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import os
 import select
 import signal
@@ -544,11 +545,18 @@ class Repl:
                 "ctrl+t": self.callbacks.toggle_verbose,
                 "ctrl+u": lambda: (self.pending.clear(),
                                    setattr(bar, "queued", ""), bar.refresh()),
+                # The watcher holds the terminal in cbreak mode for the whole
+                # turn, so it sees Ctrl-C as a keypress. Handling it here
+                # works even where the tty driver does not raise SIGINT --
+                # a pipe, a pty without a controlling terminal, or a
+                # platform that swallows it.
+                "ctrl+c": self.interrupt,
             },
             on_key=typed,
         )
 
         self.callbacks.watcher = watcher
+        self._arm_interrupt()
         # The talker answers first: a 1B model is quick enough that the
         # acknowledgement lands before the coder has produced a token.
         if self.talker is not None:
@@ -747,6 +755,29 @@ class Repl:
         self.policy = self.agent.policy
         self.pet.set_pace(self.policy.name)
         self.ui.info(f"effort: {self.policy.name} -- {self.policy.headline}")
+
+    def _arm_interrupt(self) -> None:
+        """Re-install the SIGINT handler. Must run before every turn.
+
+        prompt_toolkit's Application installs its own SIGINT handler while it
+        reads a line and calls loop.remove_signal_handler(SIGINT) in its
+        finally -- and there is only one handler per signal, so that removes
+        ours rather than restoring it. After the first prompt there is no
+        handler left at all, which is why Ctrl-C did nothing for the whole
+        rest of the session.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if sys.platform == "win32":
+            with contextlib.suppress(Exception):
+                signal.signal(
+                    signal.SIGINT,
+                    lambda *_: loop.call_soon_threadsafe(self.interrupt))
+            return
+        with contextlib.suppress(NotImplementedError, RuntimeError):
+            loop.add_signal_handler(signal.SIGINT, self.interrupt)
 
     def interrupt(self) -> None:
         # Silence her first: a voice still talking about the thing you just

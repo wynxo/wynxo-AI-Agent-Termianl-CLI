@@ -769,7 +769,7 @@ class ActivityBar:
     def start(self) -> None:
         if not self.ui.console.is_terminal:
             return
-        self._live = Live(self._renderable(), console=self.ui.console,
+        self._live = Live(self, console=self.ui.console,
                           refresh_per_second=12, transient=True)
         self._live.start()
 
@@ -800,7 +800,10 @@ class ActivityBar:
 
     def refresh(self) -> None:
         if self._live is not None:
-            self._live.update(self._renderable())
+            # Nudge Live to repaint now. The renderable is self, so the
+            # content is recomputed either way -- this only skips the wait
+            # for the next scheduled refresh.
+            self._live.refresh()
 
     def _renderable(self):
         """The bar, with the in-progress line of the answer above it."""
@@ -808,6 +811,19 @@ class ActivityBar:
         if self.lead is None or not self.lead.plain:
             return bar
         return Group(self.lead, bar)
+
+    def __rich_console__(self, console, options):
+        """Re-render on every refresh, not just when something calls update().
+
+        Live was being handed the *result* of _renderable() -- a finished
+        Text object. Auto-refresh then redrew that same frozen object twelve
+        times a second, so the elapsed clock only moved when a token happened
+        to arrive and call update(). A model that spends thirty seconds in
+        prompt evaluation before its first token showed a stopped clock for
+        all thirty of them. Handing Live the bar itself makes each refresh
+        recompute.
+        """
+        yield self._renderable()
 
     def stop(self) -> None:
         live, self._live = self._live, None
