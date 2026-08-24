@@ -395,37 +395,79 @@ def shell_rc_hint(directory: Path) -> str:
     return f"{line}    # add to {rc}"
 
 
+def entry_point_script(python: Path) -> Path | None:
+    """Where pip already put the real `wynxo` command for this interpreter.
+
+    This is what actually matters below: a script invoked by its own path
+    puts *its own directory* on sys.path[0], never the caller's current
+    directory. `python -m wynxo` does not have that property -- Python always
+    puts the working directory first for `-m` -- so a shell sitting inside
+    wynxo's own source tree (which has files named select.py, queue.py, ...,
+    the same names as standard-library modules) silently shadows the real
+    ones. The result is `import asyncio` failing with a baffling circular-
+    import error, because asyncio's own machinery ends up importing wynxo's
+    select.py instead of the real `select` module. Pointing the launcher at
+    pip's own entry-point script sidesteps the whole class of bug.
+    """
+    # A plain --user install (no venv) uses a different scheme than a venv's
+    # own interpreter does, so ask with the same one pip would have used.
+    into_user = python == Path(sys.executable) and not os.environ.get("VIRTUAL_ENV")
+    if into_user:
+        code = "import os, sysconfig; print(sysconfig.get_path('scripts', f'{os.name}_user'))"
+    else:
+        code = "import sysconfig; print(sysconfig.get_path('scripts'))"
+    try:
+        result = subprocess.run([str(python), "-c", code],
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    name = "wynxo.exe" if sys.platform == "win32" else "wynxo"
+    script = Path(result.stdout.strip()) / name
+    return script if script.exists() else None
+
+
 def link_command(python: Path, venv_dir: Path,
                  assume_yes: bool) -> tuple[Path | None, bool]:
     """Put a `wynxo` command somewhere on PATH, so `wynxo` just works.
 
-    A launcher script rather than a symlink: it pins the interpreter, so the
-    command keeps working regardless of which virtualenv is active when it
-    is run.
+    Delegates to pip's own entry-point script rather than reinventing one
+    with `python -m wynxo`, which pins the interpreter the same way but
+    without dragging the caller's working directory onto sys.path. See
+    entry_point_script() for why that distinction matters.
     """
     step("Making `wynxo` available everywhere")
 
     target = user_bin_dir()
     launcher = target / ("wynxo.cmd" if sys.platform == "win32" else "wynxo")
+    entry = entry_point_script(python)
 
     if not ask(f"Install a `wynxo` command into {target}?", True, assume_yes):
         info("Skipped.")
         return None, False
 
-    try:
-        target.mkdir(parents=True, exist_ok=True)
-        if sys.platform == "win32":
-            launcher.write_text(f'@echo off\r\n"{python}" -m wynxo %*\r\n',
-                                encoding="utf-8")
-        else:
-            launcher.write_text(
-                f'#!/bin/sh\nexec "{python}" -m wynxo "$@"\n', encoding="utf-8")
-            launcher.chmod(0o755)
-    except OSError as exc:
-        warn(f"Could not write {launcher}: {exc}")
-        return None, False
+    if entry is not None and entry.resolve() == launcher.resolve():
+        # A --user install already put the real entry point exactly where a
+        # wrapper would go; writing one on top of itself would exec itself.
+        ok(f"already installed at {launcher}")
+    else:
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                body = (f'@echo off\r\n"{entry}" %*\r\n' if entry is not None
+                        else f'@echo off\r\n"{python}" -m wynxo %*\r\n')
+                launcher.write_text(body, encoding="utf-8")
+            else:
+                body = (f'#!/bin/sh\nexec "{entry}" "$@"\n' if entry is not None
+                        else f'#!/bin/sh\nexec "{python}" -m wynxo "$@"\n')
+                launcher.write_text(body, encoding="utf-8")
+                launcher.chmod(0o755)
+        except OSError as exc:
+            warn(f"Could not write {launcher}: {exc}")
+            return None, False
 
-    ok(f"installed {launcher}")
+        ok(f"installed {launcher}")
 
     if on_path(target):
         info("it is already on your PATH -- just run `wynxo`")
