@@ -7,6 +7,7 @@ real files, with only the model replaced. If these pass, the agent works.
 import json
 
 import httpx
+import pytest
 
 from wynxo.agent import Agent, Callbacks
 from wynxo.config import Config, Endpoint
@@ -668,4 +669,99 @@ class TestMemoryInTheLoop:
         agent.memory = Memory(tmp_path, tmp_path / "u")
         agent.refresh_system_prompt()
         assert "## Memory" not in agent.session.system_prompt
+        await agent.client.aclose()
+
+
+class TestSmallTalkIsNotWork:
+    """At high effort a turn is plan -> execute -> verify, and the plan
+    prompt asks for "a plan for this task". Handed "hello" a model does as
+    it is told: it invents a task, and the next message tells it to carry
+    the plan out. That is how saying hello created hello_world.py."""
+
+    @pytest.mark.parametrize("text", [
+        "hello", "hi", "hi!", "hey", "yo", "hello!!", "heya",
+        "thanks", "thank you", "ty", "cheers",
+        "ok", "okay", "cool", "nice", "lol", "haha",
+        "bye", "gn", "good morning", "good night",
+        "who are you", "what are you", "how are you", "what's up",
+        "are you there", "hmm", "  hello  ", "hello~",
+    ])
+    def test_conversation_is_recognised(self, text):
+        from wynxo.agent import is_small_talk
+
+        assert is_small_talk(text) is True, text
+
+    @pytest.mark.parametrize("text", [
+        "add a retry to the upload path",
+        "fix the parser",
+        "read main.py",
+        "what does src/auth.py do?",
+        "hello, now fix the parser",     # a greeting stuck on a task
+        "hi can you add tests",
+        "make it faster",
+        "write hello world in python",
+        "explain this",
+        "run the tests",
+        "check /etc/hosts",
+        "```python\nx=1\n```",
+        "test",                          # 'test' is a verb here, not chatter
+    ])
+    def test_real_work_is_never_mistaken_for_chatter(self, text):
+        """The dangerous direction. A task read as chat merely loses the
+        planning scaffold; chat read as a task invents work."""
+        from wynxo.agent import is_small_talk
+
+        assert is_small_talk(text) is False, text
+
+    def test_a_long_message_is_never_chatter(self):
+        from wynxo.agent import is_small_talk
+
+        assert is_small_talk("hello " * 40) is False
+
+    def test_empty_input_is_not_chatter(self):
+        from wynxo.agent import is_small_talk
+
+        assert is_small_talk("") is False
+        assert is_small_talk("   ") is False
+
+    async def test_greeting_at_ultra_does_not_plan_or_use_tools(self, tmp_path):
+        """The actual bug, end to end: one model call, no planning stage,
+        no tools, and nothing written to disk."""
+        agent, fake, cb = make_agent(
+            tmp_path, [{"content": "Hey! How can I help?"}], effort="ultra")
+        result = await agent.run("hello")
+
+        assert result.content == "Hey! How can I help?"
+        assert result.tool_calls == 0
+        assert "planning" not in cb.stages
+        assert len(fake.requests) == 1, "a greeting is one call, not a pipeline"
+        assert list(tmp_path.iterdir()) == []
+        await agent.client.aclose()
+
+    async def test_a_real_task_at_ultra_still_plans(self, tmp_path):
+        """The guard must not disarm the effort levels for actual work."""
+        turns = [{"content": f"p{i}"} for i in range(3)] + [
+            {"content": "merged plan"}, {"content": "critique"},
+            {"content": "done"}, {"content": "VERIFIED"}]
+        agent, fake, cb = make_agent(tmp_path, turns, effort="ultra")
+        await agent.run("add a retry to the upload path")
+
+        assert "planning" in cb.stages
+        assert len(fake.requests) > 1
+        await agent.client.aclose()
+
+    async def test_a_plan_saying_no_plan_needed_is_not_executed(self, tmp_path):
+        """Belt and braces for phrasings the heuristic misses: the plan
+        prompt may answer NO PLAN NEEDED, and that must not become work."""
+        agent, fake, cb = make_agent(tmp_path, [
+            {"content": "NO PLAN NEEDED"},
+            {"content": "Nice to meet you."},
+        ], effort="high")
+        result = await agent.run("tell me about yourself please")
+
+        assert result.tool_calls == 0
+        carried = [r for r in fake.requests
+                   if any("carry out that plan" in str(m.get("content", ""))
+                          for m in r.get("messages", []))]
+        assert carried == [], "NO PLAN NEEDED must not be executed"
         await agent.client.aclose()

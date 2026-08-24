@@ -98,6 +98,10 @@ EFFORT_GUIDANCE = {
 
 PLAN_PROMPT = """Before touching anything, produce a short plan for this task.
 
+If the message is not a task at all -- a greeting, thanks, a question about \
+you rather than about the code -- reply "NO PLAN NEEDED" and nothing else. \
+Do not invent work that was not asked for.
+
 List the concrete steps in order. Name the specific files you expect to read or change. Note anything you are unsure about.
 
 Do not call any tools that modify files yet. Read-only investigation is encouraged -- a plan built without looking at the code is a guess.

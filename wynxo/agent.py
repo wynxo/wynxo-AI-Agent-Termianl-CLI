@@ -13,6 +13,7 @@ back clean. Same code path; the policy decides which parts execute.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,56 @@ from .session import Session
 from .tools import Registry, build_registry
 
 VERIFIED = "VERIFIED"
+
+# Things people say that are not work. Anchored and whole-string: "hi" is a
+# greeting, "hi, now fix the parser" is a task with a greeting stuck on it.
+_SMALL_TALK = re.compile(
+    r"^\s*(?:"
+    r"h[ei]y?|hey+|hi+|hello+|yo|sup|hiya|howdy|heya|"
+    r"good\s*(?:morning|afternoon|evening|night)|"
+    r"thanks?|thank\s*you|ty|thx|cheers|"
+    r"ok(?:ay)?|k|cool|nice|great|awesome|lol|lmao|haha+|hmm+|"
+    r"bye|goodbye|gn|cya|see\s*ya|"
+    r"who\s+are\s+you|what\s+are\s+you|what'?s?\s+your\s+name|"
+    r"how\s+are\s+you|how'?s\s+it\s+going|what'?s?\s+up|wyd|"
+    r"are\s+you\s+(?:there|awake|ready|alive)|test(?:ing)?"
+    r")"
+    r"[\s!.?~,:;)（）\-]*$",
+    re.IGNORECASE,
+)
+
+# Anything that means real work, regardless of how short the message is.
+_TASK_SIGNAL = re.compile(
+    r"(?:"
+    r"\.(?:py|js|ts|tsx|jsx|go|rs|rb|java|c|h|cpp|cs|sh|md|json|ya?ml|toml|txt|html|css)\b"
+    r"|[/\\][\w.-]"                 # a path
+    r"|```"                          # a code block
+    r"|\b(?:fix|add|write|create|make|build|run|test|refactor|implement|"
+    r"remove|delete|rename|update|change|edit|debug|explain|review|check|"
+    r"find|search|install|deploy|commit|push|merge|read|open|show\s+me)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_small_talk(request: str) -> bool:
+    """Whether this is conversation rather than work.
+
+    At high effort a turn is plan -> execute -> verify, and the plan prompt
+    asks for "a plan for this task". Handed "hello", a model does as it is
+    told: it invents a task, and the next message tells it to carry the plan
+    out. That is how saying hello ended up creating hello_world.py.
+
+    Conservative in the direction that matters. A task misread as chat still
+    runs -- just as a plain turn, without the planning scaffold. Chat misread
+    as a task is the bug, so any hint of real work wins.
+    """
+    text = request.strip()
+    if not text or len(text) > 60:
+        return False
+    if _TASK_SIGNAL.search(text):
+        return False
+    return bool(_SMALL_TALK.match(text))
 
 
 class Interrupted(Exception):
@@ -562,6 +613,23 @@ class Agent:
     async def run(self, request: str) -> TurnResult:
         started = time.monotonic()
 
+        # "hello" is not a task. Without this the planning scaffold at high
+        # effort turns a greeting into invented work -- see is_small_talk().
+        chatting = is_small_talk(request)
+        if chatting:
+            self.session.add_user(request)
+            try:
+                turn = await self._call_model()
+            except ProviderError as exc:
+                return TurnResult(content="", elapsed=time.monotonic() - started,
+                                  errors=[str(exc)])
+            except asyncio.CancelledError:
+                raise Interrupted from None
+            self.session.add_assistant(turn.content)
+            self.session.save()
+            return TurnResult(content=turn.content, iterations=1,
+                              elapsed=time.monotonic() - started)
+
         if self.policy.plan == "inline":
             request = (
                 f"{request}\n\n"
@@ -573,6 +641,11 @@ class Agent:
         if self.policy.plan in ("explicit", "critique"):
             self.session.add_user(request)
             plan = await self._plan(request)
+            # The plan prompt is allowed to say there is nothing to plan.
+            # Belt and braces with is_small_talk(): the heuristic catches the
+            # common phrasings, this catches the ones it does not.
+            if plan.strip().upper().startswith("NO PLAN NEEDED"):
+                plan = ""
             if plan:
                 self.session.add_assistant(plan)
                 self.session.add_user(
