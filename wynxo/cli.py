@@ -43,7 +43,7 @@ from .tools import build_registry
 from rich.text import Text
 
 from .ui import (ACCENT, MUTED, ActivityBar, CodeStreamer, ThoughtStreamer,
-                 UI)
+                 UI, effort_meter)
 
 # What the activity bar says while each tool runs.
 _ACTIVITY = {
@@ -338,6 +338,7 @@ class Repl:
         )
         self.pet.style_name = "kawaii" if config.voice == "kawaii" else "default"
         self.pet.set_pace(self.policy.name)
+        self._last_elapsed = 0.0
 
         # The talker speaks; the coder works. Constructed here so /talker can
         # turn it on and off mid-session without rebuilding the agent.
@@ -600,14 +601,11 @@ class Repl:
         elif result.content:
             self.ui.console.print()
 
-        used = self.agent.session.token_estimate()
-        limit = self.policy.context_budget or self.config.num_ctx
-        self.ui.stats(
-            self.agent.session.usage,
-            result.elapsed,
-            self.policy.name,
-            100 * used / max(1, limit),
-        )
+        # No stats line here: the pinned bar under the input already shows
+        # tokens, rate and context, and printing them again above the next
+        # prompt was the same numbers twice, scrolling away from where you
+        # are actually looking.
+        self._last_elapsed = result.elapsed
         if result.compacted:
             self.ui.info("context was compacted during this turn")
 
@@ -716,13 +714,17 @@ class Repl:
         limit = self.policy.context_budget or self.config.num_ctx
         pieces = []
         if self.pet.enabled:
-            pieces.append(f"{self.pet.face(advance=False)} {self.pet.name}")
-        pieces += [self.config.model, self.policy.name,
+            pieces.append(f"{self.pet.face()} {self.pet.name}")
+        pieces += [self.config.model,
+                   f"{effort_meter(self.policy.name, self.ui.g.unicode)} "
+                   f"{self.policy.name}",
                    f"ctx {100 * used / max(1, limit):.0f}%"]
         if usage.completion_tokens:
             pieces.append(f"{usage.completion_tokens} tok")
             if speed := usage.tokens_per_second():
                 pieces.append(f"{speed:.0f} tok/s")
+            if self._last_elapsed:
+                pieces.append(f"{self._last_elapsed:.1f}s")
         if self.agent.permissions.mode is not Mode.MANUAL:
             pieces.append(self.agent.permissions.mode.value)
 
