@@ -439,3 +439,80 @@ class TestResume:
 
         source = inspect.getsource(cli.Repl._load_session)
         assert "checkpoints.clear()" in source
+
+
+class TestCommitMessageCleaning:
+    """Small models fence things, label them, and add "Here is the commit
+    message:" however firmly the prompt says not to."""
+
+    def clean(self, text):
+        from wynxo.cli import _clean_commit_message
+
+        return _clean_commit_message(text)
+
+    def test_a_clean_message_is_untouched(self):
+        assert self.clean("Fix the token check") == "Fix the token check"
+
+    def test_a_code_fence_is_removed(self):
+        assert self.clean("```\nFix it\n```") == "Fix it"
+        assert self.clean("```text\nFix it\n```") == "Fix it"
+
+    def test_a_preamble_is_removed(self):
+        assert self.clean("Here is the commit message:\nFix it") == "Fix it"
+
+    def test_thinking_never_reaches_the_commit(self):
+        assert self.clean("<think>hmm</think>Fix it") == "Fix it"
+
+    def test_the_body_survives(self):
+        got = self.clean("```\nFix it\n\nBecause it was wrong.\n```")
+        assert got == "Fix it\n\nBecause it was wrong."
+
+    def test_nothing_usable_gives_an_empty_string(self):
+        """So the caller can refuse rather than commit an empty message."""
+        assert self.clean("") == ""
+        assert self.clean("<think>only thinking</think>") == ""
+
+
+class TestCommitCommand:
+    def test_it_is_a_command(self):
+        from wynxo.cli import COMMANDS, resolve_command
+
+        assert "/commit" in COMMANDS
+        assert resolve_command("/commit") == "/commit"
+
+    def test_it_never_stages_anything_for_you(self):
+        """What to include is a decision the message should describe, not
+        one this should make on your behalf."""
+        import inspect
+
+        from wynxo import cli
+
+        source = inspect.getsource(cli.Repl.cmd_commit)
+        assert '"add"' not in source
+        assert "'add'" not in source
+        assert "-A" not in source
+
+    def test_it_asks_before_committing(self):
+        import inspect
+
+        from wynxo import cli
+
+        source = inspect.getsource(cli.Repl.cmd_commit)
+        assert "prompt_async" in source
+        assert "not committed" in source
+
+    def test_the_diff_sent_to_the_model_is_capped(self):
+        """A large staged diff would otherwise blow the context window."""
+        import inspect
+
+        from wynxo import cli
+
+        assert "24_000" in inspect.getsource(cli.Repl.cmd_commit)
+
+    def test_the_prompt_asks_for_the_message_and_nothing_else(self):
+        from wynxo.prompts import COMMIT_PROMPT
+
+        lowered = COMMIT_PROMPT.lower()
+        assert "imperative" in lowered
+        assert "72" in COMMIT_PROMPT
+        assert "no preamble" in lowered

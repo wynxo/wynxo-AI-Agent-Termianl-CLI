@@ -72,6 +72,31 @@ ALIASES = {
 }
 
 
+def _first(text: str) -> str:
+    return text.strip().splitlines()[0].strip() if text.strip() else ""
+
+
+def _clean_commit_message(text: str) -> str:
+    """Take the message out of whatever the model wrapped it in.
+
+    Small models fence things, label them, and add "Here is the commit
+    message:" no matter how firmly the prompt says not to.
+    """
+    import re as _re
+
+    out = _re.sub(r"<(think|thinking|reasoning)>.*?</\1>", "", text,
+                  flags=_re.DOTALL | _re.IGNORECASE).strip()
+    fenced = _re.match(r"^```[a-zA-Z]*\s*\n(.*?)\n?```\s*$", out, _re.DOTALL)
+    if fenced:
+        out = fenced.group(1)
+    out = _re.sub(r"^\s*(here'?s?\s+(is\s+)?)?(the\s+)?commit\s+message\s*:?\s*\n+",
+                  "", out, flags=_re.IGNORECASE)
+    lines = [ln.rstrip() for ln in out.strip().splitlines()]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return "\n".join(lines).strip()
+
+
 def resolve_command(name: str) -> str | None:
     """Expand an abbreviation to a command, when it is unambiguous.
 
@@ -142,6 +167,7 @@ COMMANDS = {
     "/plan": "show the current plan",
     "/new": "start a new chat: fresh history, screen and log",
     "/resume": "pick up an earlier conversation where it stopped",
+    "/commit": "write a commit message from the staged diff, then commit",
     "/clear": "start a fresh conversation",
     "/compact": "summarise the conversation to reclaim context",
     "/stats": "tokens, speed, context use",
@@ -1024,6 +1050,9 @@ class Repl:
         if name == "/resume":
             return await self.cmd_resume(args)
 
+        if name == "/commit":
+            return await self.cmd_commit(args)
+
         if name == "/sessions":
             rows = Session.recent()
             if not rows:
@@ -1047,6 +1076,87 @@ class Repl:
             return True
 
         self.ui.warn(f"unknown command {name}. /help for the list.")
+        return True
+
+    async def cmd_commit(self, args: list[str]) -> bool:
+        """Write a commit message from what is actually staged, then commit.
+
+        Reads the staged diff, has the model describe it, shows the result,
+        and only commits once you say so. Nothing is staged for you: what to
+        include is a decision the message should describe, not one this
+        should make on your behalf.
+        """
+        from .prompts import COMMIT_PROMPT
+        from .repo import run_git
+
+        ok, _ = run_git(["rev-parse", "--git-dir"], cwd=self.workspace, timeout=10)
+        if not ok:
+            self.ui.warn("not a git repository")
+            return True
+
+        ok, staged = run_git(["diff", "--staged"], cwd=self.workspace, timeout=60)
+        if not ok:
+            self.ui.warn(f"could not read the staged diff: {staged}")
+            return True
+        if not staged.strip():
+            self.ui.info("nothing staged")
+            _, unstaged = run_git(["status", "--short"], cwd=self.workspace,
+                                  timeout=30)
+            if unstaged.strip():
+                self.ui.info("stage what you want first:  git add -p")
+            return True
+
+        _, stat = run_git(["diff", "--staged", "--stat"], cwd=self.workspace,
+                          timeout=30)
+        for line in stat.strip().splitlines()[-1:]:
+            self.ui.info(line.strip())
+
+        # Cap what is sent: a huge diff would blow the context window, and
+        # the top of it describes the change well enough to name it.
+        body = staged if len(staged) <= 24_000 else (
+            staged[:24_000] + "\n\n... [diff truncated]")
+
+        message = " ".join(args).strip()
+        if not message:
+            with self.ui.status("reading the diff..."):
+                turn = await self.agent._call_model(
+                    messages=[{"role": "user",
+                               "content": f"{COMMIT_PROMPT}\n\n```diff\n{body}\n```"}],
+                    use_tools=False, stream_content=False)
+            message = _clean_commit_message(turn.content)
+        if not message:
+            self.ui.warn("the model did not produce a message; write one yourself")
+            return True
+
+        self.ui.console.print()
+        self.ui.console.print(Text("  " + message.splitlines()[0], style=f"bold {ACCENT}"))
+        for line in message.splitlines()[1:]:
+            self.ui.console.print(Text("  " + line, style=MUTED))
+        self.ui.console.print()
+
+        answer = (await self.prompt_session.prompt_async(
+            HTML('<ansicyan>  [y] commit  [e] edit  [n] no: </ansicyan>')
+        )).strip().lower()
+
+        if answer in ("e", "edit"):
+            edited = (await self.prompt_session.prompt_async(
+                HTML('<ansicyan>  message: </ansicyan>'), default=message.splitlines()[0]
+            )).strip()
+            if not edited:
+                self.ui.info("cancelled")
+                return True
+            message = edited
+        elif answer not in ("", "y", "yes"):
+            self.ui.info("not committed")
+            return True
+
+        ok, output = run_git(["commit", "-m", message], cwd=self.workspace,
+                             timeout=60)
+        if not ok:
+            self.ui.warn(f"commit failed: {_first(output)}")
+            return True
+        self.ui.success(_first(output) or "committed")
+        self.journal.note("committed", subject=message.splitlines()[0])
         return True
 
     async def cmd_resume(self, args: list[str]) -> bool:

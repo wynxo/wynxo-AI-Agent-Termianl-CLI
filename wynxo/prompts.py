@@ -361,3 +361,21 @@ def build_system_prompt(
     parts.append(project_context(workspace))
 
     return "\n".join(p for p in parts if p.strip())
+
+
+COMMIT_PROMPT = """Below is the output of `git diff --staged` for a change \
+that is about to be committed.
+
+Write the commit message for it. Nothing else -- no preamble, no code fence, \
+no explanation of your reasoning. The whole reply is the message.
+
+Format:
+- First line: under 72 characters, imperative mood ("Fix the token check", \
+not "Fixed" or "Fixes"). No trailing full stop.
+- Then a blank line, then a short body explaining *why* the change was made \
+and anything a reviewer would otherwise have to work out for themselves. \
+Wrap at 72 columns.
+- Omit the body entirely if the first line genuinely says everything.
+
+Describe what the diff actually does. Do not invent motivation you cannot \
+see in it, and do not list every file -- the diff is already in the commit."""
