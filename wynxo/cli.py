@@ -42,7 +42,7 @@ from .status import Status, WARN
 from .tools import build_registry
 from rich.text import Text
 
-from .ui import (ACCENT, MUTED, ActivityBar, CodeStreamer,
+from .ui import (ACCENT, BAR_ACCENT, MUTED, ActivityBar, CodeStreamer,
                  ThoughtStreamer, UI, effort_meter)
 
 # What the activity bar says while each tool runs.
@@ -1295,6 +1295,7 @@ class Repl:
         except KeyError as exc:
             self.ui.warn(str(exc))
             return True
+        previous = self.policy.name
         self.config.effort = policy.name
         self.agent.set_effort(policy)
         # set_effort() may downgrade thinking for the current model; read the
@@ -1302,8 +1303,30 @@ class Repl:
         # status bar reports what the agent will actually do.
         self.policy = self.agent.policy
         self.pet.set_pace(self.policy.name)
+        await self._effort_surge(previous, self.policy.name)
         self.ui.success(f"effort: {self.policy.name} -- {self.policy.describe()}")
         return True
+
+    async def _effort_surge(self, previous: str, current: str) -> None:
+        """Make stepping up to the top two levels feel like it costs
+        something, because it does.
+
+        Only on the way up, and only into max or ultra: an animation that
+        played on every change would be noise, and one that played on the way
+        down would be celebrating the wrong direction.
+        """
+        from .ui import surge
+
+        heavy = {"max": (BAR_ACCENT, "MAX EFFORT"),
+                 "ultra": (ACCENT, "ULTRA")}
+        if current not in heavy or current == previous:
+            return
+        if ORDER.index(current) <= ORDER.index(previous):
+            return
+        if not self.config.animations:
+            return
+        style, label = heavy[current]
+        await surge(self.ui, label, style)
 
     async def cmd_model(self, args: list[str]) -> bool:
         """Switch model. With no argument this is the same capability-aware

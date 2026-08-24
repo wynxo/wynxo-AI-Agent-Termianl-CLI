@@ -37,10 +37,17 @@ class TestEffort:
         for name in ORDER:
             assert resolve(name).name == name
 
-    def test_aliases(self):
-        assert resolve("med").name == "medium"
+    def test_the_names_are_the_only_vocabulary(self):
+        """No aliases. Six short names, and /effort lists them; a second
+        vocabulary of "x", "u" and "insane" was more to remember, not less,
+        and made it easy to pick a level you did not mean."""
+        for shortcut in ("med", "xh", "u", "x", "insane", "maximum", "fast"):
+            with pytest.raises(KeyError):
+                resolve(shortcut)
+
+    def test_case_and_padding_are_still_forgiven(self):
         assert resolve("MAX").name == "max"
-        assert resolve("xh").name == "xhigh"
+        assert resolve("  Ultra ").name == "ultra"
 
     def test_unknown_level_lists_the_valid_ones(self):
         with pytest.raises(KeyError) as exc:

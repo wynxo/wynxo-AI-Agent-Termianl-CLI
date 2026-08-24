@@ -671,6 +671,38 @@ def effort_meter(effort: str, unicode_ok: bool = True) -> str:
     return "".join(out)
 
 
+SURGE_FRAMES = (
+    "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588",
+    "\u2588\u2587\u2586\u2585\u2584\u2583\u2582\u2581",
+)
+
+
+async def surge(ui: "UI", label: str, style: str, width: int = 34) -> None:
+    """A short wave across the line, for stepping up to max or ultra.
+
+    Drawn on one line and then rewritten, so it costs a line of scrollback
+    rather than a screenful. Skipped when there is no terminal to animate --
+    a pipe would otherwise collect every frame as separate output.
+    """
+    if not ui.console.is_terminal:
+        return
+    blocks = SURGE_FRAMES[0] if ui.g.unicode else "-=#"
+    span = min(width, max(10, ui.width - 20))
+    with Live("", console=ui.console, refresh_per_second=30,
+              transient=True) as live:
+        for step in range(span + 6):
+            bar = Text("  ")
+            for cell in range(span):
+                distance = abs(cell - step)
+                if distance < len(blocks):
+                    bar.append(blocks[len(blocks) - 1 - distance], style=style)
+                else:
+                    bar.append(" ")
+            bar.append(f"  {label}", style=f"bold {style}")
+            live.update(bar)
+            await asyncio.sleep(0.012)
+
+
 class ActivityBar:
     """The pinned bar: what is happening, and the tokens as they arrive.
 

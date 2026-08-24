@@ -308,3 +308,63 @@ class TestPinnedPlan:
         stream = capture(bar.ui)
         bar.ui.console.print(bar._plan_panel())
         assert stream.getvalue().isascii()
+
+
+class TestEffortSurge:
+    """Stepping up to the top two levels should feel like it costs
+    something, because it does."""
+
+    async def _fires(self, previous, current, animations=True):
+        import types
+
+        from wynxo import cli
+        from wynxo.ui import UI
+
+        ui = UI()
+        ui.width = 80
+        played = []
+
+        async def fake_surge(_ui, label, style, width=34):
+            played.append(label)
+
+        repl = types.SimpleNamespace(
+            ui=ui, config=types.SimpleNamespace(animations=animations))
+        import wynxo.ui as ui_module
+
+        real, ui_module.surge = ui_module.surge, fake_surge
+        try:
+            await cli.Repl._effort_surge(repl, previous, current)
+        finally:
+            ui_module.surge = real
+        return played
+
+    async def test_it_fires_stepping_up_into_ultra(self):
+        assert await self._fires("high", "ultra") == ["ULTRA"]
+
+    async def test_it_fires_stepping_up_into_max(self):
+        assert await self._fires("medium", "max") == ["MAX EFFORT"]
+
+    async def test_it_does_not_fire_for_the_ordinary_levels(self):
+        """An animation on every change would just be noise."""
+        for level in ("low", "medium", "high", "xhigh"):
+            assert await self._fires("low", level) == []
+
+    async def test_it_does_not_fire_on_the_way_down(self):
+        """Celebrating a step down is celebrating the wrong direction."""
+        assert await self._fires("ultra", "max") == []
+
+    async def test_it_does_not_fire_when_already_there(self):
+        assert await self._fires("ultra", "ultra") == []
+
+    async def test_animations_off_means_off(self):
+        assert await self._fires("low", "ultra", animations=False) == []
+
+    async def test_nothing_is_drawn_without_a_terminal(self):
+        """A pipe would otherwise collect every frame as separate output."""
+        from wynxo.ui import UI, surge
+
+        ui = UI()
+        assert ui.console.is_terminal is False   # pytest captures stdout
+        stream = capture(ui)
+        await surge(ui, "ULTRA", "bold")
+        assert stream.getvalue() == ""

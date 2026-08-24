@@ -237,17 +237,14 @@ POLICIES: dict[EffortName, EffortPolicy] = {
 
 
 def resolve(name: str) -> EffortPolicy:
-    """Look up a policy, accepting a few obvious aliases."""
+    """Look up a policy by its own name.
+
+    No aliases. There are six levels with short, plain names, and /effort
+    lists them -- a second vocabulary of "x", "u", "insane" and "maximum" on
+    top of that is more to remember rather than less, and made it easy to
+    pick a level you did not mean.
+    """
     key = name.strip().lower()
-    aliases = {
-        "l": "low", "min": "low", "fast": "low", "quick": "low",
-        "m": "medium", "med": "medium", "normal": "medium", "default": "medium",
-        "h": "high",
-        "xh": "xhigh", "x": "xhigh", "extra": "xhigh", "extreme": "xhigh",
-        "maximum": "max",
-        "u": "ultra", "insane": "ultra",
-    }
-    key = aliases.get(key, key)
     if key not in POLICIES:
         raise KeyError(
             f"unknown effort level {name!r}; choose one of {', '.join(ORDER)}"
