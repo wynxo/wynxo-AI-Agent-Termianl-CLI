@@ -153,15 +153,32 @@ COMMANDS = {
 
 
 class CommandCompleter(Completer):
-    """Suggests slash commands as you type, with what each one does.
+    """Suggests slash commands, and files after an "@".
 
-    Only the first word, and only when it starts with "/". Completing
-    anywhere else would put a menu over the top of ordinary prose, which is
-    what you are typing almost all of the time.
+    Nothing else is completed. A menu opening over ordinary prose -- which
+    is what you are typing almost all of the time -- would be in the way
+    rather than helpful.
     """
+
+    def __init__(self, workspace_getter=None):
+        self._workspace = workspace_getter
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
+
+        # @path, anywhere in the line: it is a reference inside a sentence.
+        word = text.rsplit(" ", 1)[-1]
+        if word.startswith("@") and self._workspace is not None:
+            from .mentions import candidates
+
+            prefix = word[1:]
+            for path in candidates(self._workspace(), prefix):
+                yield Completion(
+                    "@" + path, start_position=-len(word),
+                    display=path,
+                    display_meta="directory" if path.endswith("/") else "file")
+            return
+
         if not text.startswith("/") or " " in text:
             return
 
@@ -450,7 +467,7 @@ class Repl:
 
         self.prompt_session: PromptSession = PromptSession(
             history=FileHistory(str(history_file)),
-            completer=CommandCompleter(),
+            completer=CommandCompleter(lambda: self.workspace),
             complete_while_typing=True,
             key_bindings=bindings,
             multiline=False,
@@ -586,6 +603,7 @@ class Repl:
     async def turn(self, text: str) -> None:
         """Run one request, with a live status bar and mid-flight keybinds."""
         self.journal.user(text)
+        text = self._expand_mentions(text)
         self.callbacks.tokens = 0
         self.callbacks._thinking_chars = 0
 
@@ -674,6 +692,25 @@ class Repl:
             self.ui.info("context was compacted during this turn")
 
         await self._narrate(text, result)
+
+    def _expand_mentions(self, text: str) -> str:
+        """Inline any @path the user referenced, and say what could not be.
+
+        A mention that quietly did nothing is worse than one that reports
+        why, so problems are printed rather than swallowed.
+        """
+        from .mentions import expand, find
+
+        if not find(text):
+            return text
+        expanded, problems = expand(text, self.workspace, self.boundary)
+        for problem in problems:
+            self.ui.warn(problem)
+        if expanded != text:
+            count = expanded.count("### ")
+            self.ui.info(f"read {count} referenced "
+                         f"{'file' if count == 1 else 'files'}")
+        return expanded
 
     async def _narrate(self, request: str, result) -> None:
         """Have the talker say what the coder did, and speak it.
