@@ -131,6 +131,22 @@ def terminal_width(default: int = 80) -> int:
         return default
 
 
+def is_dumb_terminal() -> bool:
+    """TERM=dumb, or no terminal at all.
+
+    prompt_toolkit drops to a plain readline here: no bottom toolbar, no
+    redraw, no colours. Chrome that assumes a full-screen renderer has to be
+    skipped rather than half-drawn.
+    """
+    term = os.environ.get("TERM", "").lower()
+    if term in ("dumb", "unknown"):
+        return True
+    try:
+        return not sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return True
+
+
 def is_narrow() -> bool:
     """A phone in portrait is roughly 40-56 columns. Wide-terminal layout
     (side-by-side tables, boxed banners) becomes unreadable below that."""

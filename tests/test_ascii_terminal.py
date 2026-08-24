@@ -65,7 +65,8 @@ class TestInputBox:
         repl._border_plain = cli.Repl._border_plain.__get__(repl, type(repl))
         return repl
 
-    def test_top_edge_is_ascii(self):
+    def test_top_edge_is_ascii(self, monkeypatch):
+        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
         ui = ascii_ui()
         ui.width = 40
         stream = capture(ui)
@@ -73,6 +74,18 @@ class TestInputBox:
         line = stream.getvalue().strip()
         assert line.isascii()
         assert line == "+" + "-" * 38 + "+"
+
+    def test_dumb_terminals_get_no_frame_at_all(self, monkeypatch):
+        """prompt_toolkit draws no toolbar there, so an opening edge would
+        be left hanging with nothing to close it."""
+        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: True)
+        ui = ascii_ui()
+        ui.width = 40
+        stream = capture(ui)
+        repl = self._repl(ui)
+        repl._open_box()
+        assert stream.getvalue() == ""
+        assert repl._prompt_message().value == "<b>&gt;</b> "
 
     def test_bottom_edge_is_ascii_and_exactly_one_width(self):
         ui = ascii_ui()
@@ -91,7 +104,8 @@ class TestInputBox:
                 border = self._repl(ui)._border_plain()
                 assert cell_len(border) == width, (unicode_ok, width, border)
 
-    def test_prompt_edge_is_ascii(self):
+    def test_prompt_edge_is_ascii(self, monkeypatch):
+        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
         ui = ascii_ui()
         assert "|" in self._repl(ui)._prompt_message().value
 
@@ -186,3 +200,34 @@ class TestQueuePreview:
         pending = Pending()
         pending.draft = "x" * 100
         assert len(pending.preview(width=20, ellipsis="...")) == 20
+
+
+class TestCprWarning:
+    """Terminals that never answer a cursor position request get a
+    prompt_toolkit warning printed over the session. The bar is one line so
+    that CPR is never needed, so the warning is noise."""
+
+    def test_silencing_reaches_the_renderer(self):
+        from wynxo.select import silence_cpr_warning
+
+        class App:
+            class renderer:
+                cpr_not_supported_callback = object()
+
+        app = App()
+        silence_cpr_warning(app)
+        assert app.renderer.cpr_not_supported_callback is None
+
+    def test_a_prompt_toolkit_without_it_is_survivable(self):
+        from wynxo.select import silence_cpr_warning
+
+        class App:
+            __slots__ = ()
+
+        silence_cpr_warning(App())  # must not raise
+
+    def test_the_repl_silences_its_own_session(self):
+        import inspect
+
+        source = inspect.getsource(cli.Repl.__init__)
+        assert "silence_cpr_warning(self.prompt_session.app)" in source

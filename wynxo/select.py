@@ -55,6 +55,22 @@ class Choice:
     extra: dict = field(default_factory=dict)
 
 
+def silence_cpr_warning(application) -> None:
+    """Stop prompt_toolkit warning about cursor position requests.
+
+    A tty, a serial console and some Termux setups never answer one.
+    prompt_toolkit prints "your terminal doesn't support cursor position
+    requests" into the middle of the session when that happens -- but the
+    status bar is a single line precisely so that CPR is never needed, so
+    the warning is pure noise. The renderer captures the callback when it is
+    built, which is why this reaches past the application to set it.
+    """
+    try:
+        application.renderer.cpr_not_supported_callback = None
+    except AttributeError:  # a prompt_toolkit that moved it: leave it be
+        pass
+
+
 def supported() -> bool:
     """Whether a terminal is attached that can draw this."""
     import sys
@@ -177,5 +193,8 @@ async def choose(
         erase_when_done=True,
         mouse_support=False,
     )
+    # Terminals that never answer a cursor position request would otherwise
+    # get a prompt_toolkit warning printed over the list.
+    silence_cpr_warning(application)
     await application.run_async()
     return result["value"]

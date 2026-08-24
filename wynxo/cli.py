@@ -33,7 +33,9 @@ from .keys import KeyWatcher, describe_bindings
 from .journal import Journal, recent as recent_logs
 from .memory import Memory
 from .pet import Mood, Pet
-from .select import HINT, HINT_ASCII, choose, supported as arrows_supported
+from .select import (
+    HINT, HINT_ASCII, choose, silence_cpr_warning,
+    supported as arrows_supported)
 from .scope import Mode, Scope, resolve as resolve_scope
 from .status import Status, WARN
 from .tools import build_registry
@@ -52,7 +54,9 @@ _LANGUAGE = {"read_file": "python", "shell": "console"}
 
 # Keys that work *while the agent is running*, not just at the prompt.
 LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail"}
-from .platforms import ollama_server_help as server_help, suspicious_workspace
+from .platforms import (
+    is_dumb_terminal, ollama_server_help as server_help,
+    suspicious_workspace)
 from .wizard import probe, run_wizard
 
 # Short forms for the prefixes that are genuinely ambiguous. An exact command
@@ -372,6 +376,7 @@ class Repl:
             reserve_space_for_menu=0,
             complete_style=CompleteStyle.READLINE_LIKE,
         )
+        silence_cpr_warning(self.prompt_session.app)
         self.callbacks = TerminalCallbacks(ui, self.prompt_session)
         self.callbacks.journal = self.journal
         self.agent = Agent(self.client, config, self.policy, workspace, self.callbacks,
@@ -569,12 +574,21 @@ class Repl:
 
         Re-evaluated on every redraw, so a mid-prompt Ctrl-E shows up at once.
         """
+        if is_dumb_terminal():
+            return HTML('<b>&gt;</b> ')
         edge = self.ui.g.vbar
         return HTML(
             '<ansicyan>%s</ansicyan> <b><ansicyan>&gt;</ansicyan></b> ' % edge)
 
     def _open_box(self) -> None:
-        """Top edge of the input box, printed just before the prompt."""
+        """Top edge of the input box, printed just before the prompt.
+
+        Skipped on a dumb terminal: prompt_toolkit falls back to a plain
+        readline there and draws neither the prompt nor the toolbar inside
+        the frame, so an opening edge with no closing one is worse than none.
+        """
+        if is_dumb_terminal():
+            return
         g = self.ui.g
         width = max(24, self.ui.width)
         self.ui.console.print(
