@@ -35,15 +35,15 @@ from .journal import Journal, recent as recent_logs
 from .memory import Memory
 from .pet import Mood, Pet
 from .select import (
-    HINT, HINT_ASCII, choose, silence_cpr_warning,
+    HINT, HINT_ASCII, Choice, choose, silence_cpr_warning,
     supported as arrows_supported)
 from .scope import Mode, Scope, resolve as resolve_scope
 from .status import Status, WARN
 from .tools import build_registry
 from rich.text import Text
 
-from .ui import (ACCENT, MUTED, ActivityBar, CodeStreamer, ThoughtStreamer,
-                 UI, effort_meter)
+from .ui import (ACCENT, MUTED, ActivityBar, CodeStreamer,
+                 ThoughtStreamer, UI, effort_meter)
 
 # What the activity bar says while each tool runs.
 _ACTIVITY = {
@@ -82,6 +82,14 @@ def resolve_command(name: str) -> str | None:
     """
     if name in ALIASES:
         return ALIASES[name]
+    if name in COMMANDS:
+        return name
+    # A trailing "s" is the other thing people type without thinking: the
+    # command lists things, so /themes and /models are the natural plurals.
+    # Prefix matching alone cannot catch them -- "/theme" does not start with
+    # "/themes" -- so they used to come back as unknown commands.
+    if name.endswith("s") and name[:-1] in COMMANDS:
+        return name[:-1]
     matches = [c for c in COMMANDS if c.startswith(name)]
     return matches[0] if len(matches) == 1 else None
 
@@ -897,7 +905,7 @@ class Repl:
             return self.cmd_pet(args)
 
         if name == "/theme":
-            return self.cmd_theme(args)
+            return await self.cmd_theme(args)
 
         if name == "/speak":
             return self.cmd_speak(args)
@@ -943,13 +951,17 @@ class Repl:
 
     async def cmd_effort(self, args: list[str]) -> bool:
         if not args:
-            self.ui.table(
-                ["level", "behaviour"],
-                [(n + ("  <-" if n == self.policy.name else ""), resolve(n).describe())
-                 for n in ORDER],
-                title="effort levels",
-            )
-            return True
+            options = [(n, resolve(n).headline) for n in ORDER]
+            chosen = await self._pick("effort", options, self.policy.name)
+            if chosen is None:
+                self.ui.table(
+                    ["level", "behaviour"],
+                    [(n + ("  <-" if n == self.policy.name else ""),
+                      resolve(n).describe()) for n in ORDER],
+                    title="effort levels",
+                )
+                return True
+            args = [chosen]
         try:
             policy = resolve(args[0])
         except KeyError as exc:
@@ -1377,18 +1389,25 @@ class Repl:
         self.ui.success(f"talker: {args[0]}   coder: {self.config.model}")
         return True
 
-    def cmd_theme(self, args: list[str]) -> bool:
+    async def cmd_theme(self, args: list[str]) -> bool:
         from . import theme as theme_module
 
         if not args:
-            self.ui.table(
-                ["theme", "look"],
-                [(n + ("  <-" if n == self.config.theme else ""),
-                  _theme_summary(n)) for n in theme_module.names()],
-                title="themes",
-            )
-            self.ui.info("a new theme applies fully next time wynxo starts")
-            return True
+            options = [(n, _theme_summary(n)) for n in theme_module.names()]
+            chosen = await self._pick("theme", options, self.config.theme)
+            if chosen is None:
+                self.ui.table(
+                    ["theme", "look"],
+                    [(n + ("  <-" if n == self.config.theme else ""), summary)
+                     for n, summary in options],
+                    title="themes",
+                )
+                self.ui.info("/theme <name> to change it")
+                return True
+            if chosen == self.config.theme:
+                self.ui.info(f"already using {chosen}")
+                return True
+            args = [chosen]
 
         choice = args[0].lower()
         if choice not in theme_module.names():
@@ -1404,9 +1423,51 @@ class Repl:
         self.ui.palette = theme_module.resolve(choice)
         apply_palette(self.ui.palette)
         self.ui.code_theme = self.ui.palette.code_theme
+        self.pet.style_name = self.pet.style_name   # keep the face set
         self.ui.success(f"theme: {choice}")
-        self.ui.info("restart wynxo to recolour everything")
+        self._preview_theme()
         return True
+
+    async def _pick(self, title: str, options: list[tuple[str, str]],
+                    current: str) -> str | None:
+        """Arrow-key chooser for a simple setting. None if not usable."""
+        if not arrows_supported():
+            return None
+        chosen = await choose(
+            [Choice(value=name,
+                    label=name,
+                    badge="current" if name == current else "",
+                    badge_style="badge",
+                    hint=summary)
+             for name, summary in options],
+            title=title,
+            default=next((i for i, (n, _) in enumerate(options) if n == current), 0),
+            footer=HINT if self.ui.g.unicode else HINT_ASCII,
+            width=self.ui.width,
+            unicode=self.ui.g.unicode,
+        )
+        return chosen
+
+    def _preview_theme(self) -> None:
+        """Show the new colours immediately, on this line.
+
+        A theme change that only affects text drawn later looks like it did
+        nothing -- the whole screen above is still the old palette, so
+        without a sample there is nothing to see.
+        """
+        from rich.text import Text as _T
+
+        row = _T("  ")
+        # Straight off the palette, not the module-level names: cli.py
+        # already has a WARN, and it is the status tag, not a colour.
+        palette = self.ui.palette
+        for label, style in (("accent", palette.accent), ("text", palette.text),
+                             ("muted", palette.muted), ("ok", palette.good),
+                             ("warn", palette.warn), ("error", palette.bad)):
+            row.append(f" {label} ", style=f"bold {style}")
+            row.append(" ")
+        self.ui.console.print(row)
+        self.ui.console.print()
 
     def cmd_log(self, args: list[str]) -> bool:
         action = args[0].lower() if args else "show"

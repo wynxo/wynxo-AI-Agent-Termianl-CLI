@@ -45,8 +45,25 @@ MIN_ACTIVITY_WIDTH = 16
 """Cells kept for the activity text before the stats start claiming space."""
 
 
+# Modules that do `from .ui import ACCENT, MUTED, ...`. That kind of import
+# binds a *copy* of the name in the importing module, so rebinding ours here
+# never reached them -- which is why changing the theme used to require a
+# restart. Pushing the new values into them is blunt, but it is one place and
+# the alternative is threading a palette object through seventy call sites.
+# Per module, exactly the names it does `from .ui import ...` for. Listed
+# rather than discovered, because a name can mean something else elsewhere:
+# cli.py also imports WARN from .status, where it is a status tag and not a
+# colour, and blindly overwriting it printed a raw "[#f0c674]" on screen
+# instead of "[ WARN ]". Keep these in step with the imports.
+_COLOUR_CONSUMERS = {
+    "wynxo.cli": ("ACCENT", "MUTED"),
+    "wynxo.wizard": ("ACCENT", "MUTED"),
+    "wynxo.doctor": ("ACCENT", "BAD", "GOOD", "MUTED", "WARN"),
+}
+
+
 def apply_palette(palette: Palette) -> None:
-    """Rebind the module colours. Called once when the UI is built."""
+    """Rebind the module colours, everywhere they were imported to."""
     global PALETTE, ACCENT, MUTED, GOOD, WARN, BAD, BAR_STYLE, BAR_ACCENT, BAR_DIM
     PALETTE = palette
     ACCENT = palette.accent
@@ -57,6 +74,17 @@ def apply_palette(palette: Palette) -> None:
     BAR_STYLE = f"on {palette.bar_bg}"
     BAR_ACCENT = palette.bar_accent
     BAR_DIM = palette.bar_dim
+
+    import sys as _sys
+
+    here = globals()
+    for module_name, names in _COLOUR_CONSUMERS.items():
+        module = _sys.modules.get(module_name)
+        if module is None:
+            continue          # not imported in this run; nothing to update
+        for name in names:
+            if hasattr(module, name):
+                setattr(module, name, here[name])
 
 
 def _supports_unicode() -> bool:

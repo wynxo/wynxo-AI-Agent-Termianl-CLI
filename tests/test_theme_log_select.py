@@ -183,3 +183,79 @@ class TestSelect:
 
     def test_ascii_mode_avoids_the_unicode_cursor(self):
         assert asyncio.run(drive(CHOICES, "\r", unicode=False)) == "a"
+
+
+class TestPluralCommands:
+    """People type the plural without thinking, and the command lists
+    things, so /themes and /models are the natural words. Prefix matching
+    cannot catch them -- "/theme" does not start with "/themes"."""
+
+    def test_plurals_resolve(self):
+        from wynxo.cli import resolve_command
+
+        assert resolve_command("/themes") == "/theme"
+        assert resolve_command("/models") == "/model"
+        assert resolve_command("/efforts") == "/effort"
+
+    def test_commands_that_genuinely_end_in_s_still_win(self):
+        """/tools must not be stripped to /tool, which does not exist."""
+        from wynxo.cli import resolve_command
+
+        assert resolve_command("/tools") == "/tools"
+        assert resolve_command("/sessions") == "/sessions"
+
+    def test_abbreviations_still_work(self):
+        from wynxo.cli import resolve_command
+
+        assert resolve_command("/mo") == "/model"
+        assert resolve_command("/th") == "/theme"
+
+    def test_nonsense_is_still_unknown(self):
+        from wynxo.cli import resolve_command
+
+        assert resolve_command("/nonsense") is None
+        assert resolve_command("/s") is None      # ambiguous, must not guess
+
+
+class TestThemeAppliesLive:
+    """A theme change used to need a restart: the consumers had done
+    `from .ui import ACCENT`, which binds their own copy of the name."""
+
+    def test_the_accent_reaches_the_importing_modules(self):
+        from wynxo import cli, ui
+        from wynxo.theme import resolve
+
+        before = cli.ACCENT
+        try:
+            ui.apply_palette(resolve("sakura"))
+            assert cli.ACCENT == resolve("sakura").accent
+            assert cli.ACCENT != before
+        finally:
+            ui.apply_palette(resolve("purple"))
+
+    def test_a_name_that_means_something_else_is_not_clobbered(self):
+        """cli.py imports WARN from .status, where it is a status tag and
+        not a colour. Overwriting it printed a raw '[#f0c674]' on screen
+        where '[ WARN ]' belonged."""
+        from wynxo import cli, ui
+        from wynxo.theme import resolve
+
+        before = cli.WARN
+        try:
+            ui.apply_palette(resolve("ember"))
+            assert cli.WARN == before, "the status tag must survive a theme change"
+            assert not str(cli.WARN).startswith("#")
+        finally:
+            ui.apply_palette(resolve("purple"))
+
+    def test_every_listed_consumer_really_imports_those_names(self):
+        """The map is hand-maintained, so it has to be checked against the
+        imports it claims to mirror."""
+        import importlib
+
+        from wynxo.ui import _COLOUR_CONSUMERS
+
+        for module_name, names in _COLOUR_CONSUMERS.items():
+            module = importlib.import_module(module_name)
+            for name in names:
+                assert hasattr(module, name), f"{module_name} has no {name}"
