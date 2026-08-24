@@ -138,7 +138,10 @@ class Tool(ABC):
         The workspace itself comes back as its own directory name rather than
         ".", because "." is a directory' reads as a bug report about nothing.
         """
-        resolved = path.resolve()
+        try:
+            resolved = path.resolve()
+        except (OSError, RuntimeError, ValueError):
+            return str(path)      # unresolvable: show what was asked for
         for base in (self.workspace, self.boundary.root):
             try:
                 relative = resolved.relative_to(base)

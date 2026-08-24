@@ -135,6 +135,12 @@ class Boundary:
             return True
         except ValueError:
             return False
+        except (OSError, RuntimeError):
+            # resolve() gives up on a symlink loop (RuntimeError), a path the
+            # OS will not look at, or a name Windows rejects outright. A path
+            # this boundary cannot place is a path it cannot vouch for, so it
+            # is refused: the wall fails closed.
+            return False
 
     def reject(self, raw: str) -> str:
         """The message a tool shows when a path falls outside."""

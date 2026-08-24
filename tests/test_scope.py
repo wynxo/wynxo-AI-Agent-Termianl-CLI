@@ -253,3 +253,76 @@ class TestReviewMode:
 
     def test_it_describes_itself(self):
         assert "end" in Mode.REVIEW.describe()
+
+
+class TestAPathTheOSWillNotResolve:
+    """resolve() has more failure modes than ValueError.
+
+    A symlink loop raises RuntimeError, an unreadable mount raises OSError,
+    and Windows raises on names it refuses outright. The boundary used to
+    catch only ValueError, so a repo containing a symlink loop crashed the
+    turn the moment any tool touched it.
+    """
+
+    def _boundary(self, root):
+        from wynxo.scope import Boundary, Scope
+        return Boundary(scope=Scope.FOLDER, root=root.resolve())
+
+    def test_a_symlink_loop_is_refused_rather_than_raising(self, tmp_path):
+        import os
+        import pytest
+
+        loop = tmp_path / "loop"
+        try:
+            os.symlink("loop", loop)
+        except (OSError, NotImplementedError):
+            pytest.skip("this platform will not make the symlink")
+
+        assert self._boundary(tmp_path).contains(loop) is False
+
+    def test_it_fails_closed_when_resolution_gives_up(self, tmp_path,
+                                                     monkeypatch):
+        """Unplaceable must mean 'outside'. A boundary that answered True
+        when it could not tell would be worse than no boundary."""
+        from pathlib import Path
+
+        boundary = self._boundary(tmp_path)
+        inside = tmp_path / "a.py"
+        assert boundary.contains(inside) is True
+
+        def refuse(self, *args, **kwargs):
+            raise OSError("no")
+
+        monkeypatch.setattr(Path, "resolve", refuse)
+        assert boundary.contains(inside) is False
+
+    def test_an_unrestricted_boundary_never_needs_to_resolve(self, tmp_path,
+                                                             monkeypatch):
+        from pathlib import Path
+        from wynxo.scope import Boundary, Scope
+
+        def refuse(self, *args, **kwargs):
+            raise OSError("no")
+
+        monkeypatch.setattr(Path, "resolve", refuse)
+        wide = Boundary(scope=Scope.MACHINE, root=tmp_path, unrestricted=True)
+        assert wide.contains(Path("/anything/at/all")) is True
+
+    def test_a_looping_path_displays_instead_of_crashing(self, tmp_path):
+        import os
+        import pytest
+        from wynxo.tools.base import Tool
+
+        loop = tmp_path / "loop"
+        try:
+            os.symlink("loop", loop)
+        except (OSError, NotImplementedError):
+            pytest.skip("this platform will not make the symlink")
+
+        class Probe(Tool):
+            name = "probe"
+            async def run(self, **kwargs):
+                return ""
+
+        shown = Probe(workspace=tmp_path).relative(loop)
+        assert "loop" in shown
