@@ -52,7 +52,31 @@ ollama serve                      # if it is not already running
 ollama pull qwen3-coder:30b       # any tool-capable model
 ```
 
-**2. Install the agent.**
+**2. Install the agent.** One line, then `wynxo`.
+
+Windows — PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/wynxo/wynxo-AI-Agent-Termianl-CLI/main/get.ps1 | iex
+```
+
+Linux, macOS, Termux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wynxo/wynxo-AI-Agent-Termianl-CLI/main/get.sh | sh
+```
+
+Either one clones into `~/.wynxo-src`, sets up a virtualenv, and puts a
+`wynxo` command on your `PATH`. Re-running it updates in place. Then:
+
+```
+wynxo
+```
+
+To remove it again, all of it: [Uninstall](#uninstall).
+
+<details>
+<summary>Prefer to clone it yourself first?</summary>
 
 Windows — Command Prompt or PowerShell:
 
@@ -72,6 +96,10 @@ cd wynxo-AI-Agent-Termianl-CLI
 
 Copy the block for your system. `./install.sh` is not a command Windows
 understands, and `install.bat` is not one Linux understands.
+
+</details>
+
+Either way the installer prints what it is doing:
 
 ```
   wynxo
@@ -124,6 +152,8 @@ has, and you pick one.
 12. [Configuration](#12-configuration)
 13. [Troubleshooting](#13-troubleshooting)
 14. [How it works](#14-how-it-works)
+
+[Uninstall](#uninstall) · [Working on a GitHub repo](#working-on-a-github-repo)
 
 ## 1. Install
 
@@ -195,8 +225,65 @@ confetti.
 wynxo --version
 ```
 
-If `wynxo` is not found, your Python scripts directory is not on `PATH`. Use
-`python -m wynxo` instead, which always works.
+If `wynxo` is not found, your Python scripts directory is not on `PATH`. The
+installer offers to fix that for you; re-run it and say yes.
+
+As a fallback you can run `python -m wynxo`, but **not from inside wynxo's own
+source directory.** `-m` puts the current directory first on `sys.path`, and
+this package contains files named `select.py`, `queue.py` and others that
+shadow standard-library modules of the same name. From the wrong directory
+that breaks `import asyncio` with a confusing circular-import error. The
+installed `wynxo` command has no such problem — it runs from a path, not a
+module name — which is why it is the one to use.
+
+## Uninstall
+
+One line, same as the install. Removes everything and leaves nothing behind.
+
+Windows — PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/wynxo/wynxo-AI-Agent-Termianl-CLI/main/rm.ps1 | iex
+```
+
+Linux, macOS, Termux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wynxo/wynxo-AI-Agent-Termianl-CLI/main/rm.sh | sh
+```
+
+These use the uninstaller already in your checkout, and download it if there
+isn't one — so they still work for an install made before the uninstaller
+existed, or one whose checkout is already damaged.
+
+If you cloned the repo yourself, run `./uninstall.sh` from inside it (or
+`powershell -ExecutionPolicy Bypass -File .\uninstall.ps1`), or call
+`python3 uninstall.py` directly.
+
+It finds and removes the launcher, the source checkout and its virtualenv,
+your config and session data, and the `PATH` line the installer added to your
+shell profile — taking out only its own two lines and leaving the rest of that
+file exactly as it was.
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` | List what would go. Changes nothing. |
+| `--yes` | Skip the confirmation prompt. |
+| `--keep-data` | Leave config and sessions, for a reinstall. |
+| `--force` | Delete cloned repos even with unsaved work in them. |
+
+Start with `--dry-run` if you want to see the list first.
+
+**It will stop rather than delete your work.** `/repo` clones live inside
+wynxo's data directory, so removing that directory would take them with it.
+Before doing so the uninstaller checks each one for uncommitted changes *and
+for commits that were never pushed anywhere* — a clean working tree is not a
+safe one — and refuses, naming them, unless you pass `--force`.
+
+One thing it deliberately does not touch: pip's own cache
+(`~/.cache/pip`) records the venv path, so a stale entry there may still
+mention wynxo. That file belongs to pip, not to wynxo, and clearing it would
+mean wiping your entire pip cache.
 
 ---
 
