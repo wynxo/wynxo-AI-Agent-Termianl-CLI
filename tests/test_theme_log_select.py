@@ -311,3 +311,69 @@ class TestCommandCompleter:
         """/m is an alias for /model and also a prefix of it."""
         texts = [c.text for c in self.complete("/m")]
         assert len(texts) == len(set(texts))
+
+
+class TestNewChat:
+    def test_new_is_a_command_and_abbreviates(self):
+        from wynxo.cli import COMMANDS, resolve_command
+
+        assert "/new" in COMMANDS
+        assert resolve_command("/new") == "/new"
+        assert resolve_command("/n") == "/new"
+
+    def test_it_resets_more_than_clear_does(self):
+        """/clear empties the message list in place; /new is a new chat --
+        new session id, new log, undo history dropped."""
+        import inspect
+
+        from wynxo import cli
+
+        source = inspect.getsource(cli.Repl.cmd_new)
+        assert "Session(" in source
+        assert "checkpoints.clear()" in source
+        assert "Journal.open" in source
+        assert "self.ui.clear()" in source
+
+    def test_memory_is_not_reset(self):
+        """Memory is the thing that is supposed to outlive a conversation."""
+        import inspect
+
+        from wynxo import cli
+
+        source = inspect.getsource(cli.Repl.cmd_new)
+        assert "Memory(" not in source
+        assert "memory" not in source.replace("memory kept", "")
+
+
+class TestPersonalFactsAreRemembered:
+    """Being told your name and forgetting it is the difference between an
+    assistant and a search box."""
+
+    def test_the_prompt_tells_the_model_to_save_what_it_is_told(self):
+        from wynxo.prompts import MEMORY_TOOL_NOTE
+
+        lowered = MEMORY_TOOL_NOTE.lower()
+        assert 'scope="user"' in MEMORY_TOOL_NOTE
+        assert "name" in lowered
+        for word in ("tells you something about themselves", "same turn"):
+            assert word in lowered
+
+    def test_it_says_saying_so_is_not_the_same_as_doing_it(self):
+        """Models like to answer "I'll remember that" and save nothing."""
+        from wynxo.prompts import MEMORY_TOOL_NOTE
+
+        assert "lie" in MEMORY_TOOL_NOTE.lower()
+
+    def test_small_talk_does_not_exempt_it(self):
+        """"my name is heio" is small talk *and* a fact worth keeping, and
+        the small-talk path skips the whole planning pipeline."""
+        from wynxo.prompts import MEMORY_TOOL_NOTE
+
+        assert "small talk" in MEMORY_TOOL_NOTE.lower()
+
+    def test_the_note_reaches_the_system_prompt(self, tmp_path):
+        from wynxo.effort import resolve
+        from wynxo.prompts import build_system_prompt
+
+        prompt = build_system_prompt(tmp_path, resolve("medium"))
+        assert 'scope="user"' in prompt

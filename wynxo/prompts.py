@@ -301,6 +301,19 @@ MEMORY_TOOL_NOTE = """
 When you learn something durable -- a build command, a convention, a decision
 and its reason, a trap you hit -- write it down with `remember` so the next
 session starts knowing it. Keep it to things that will still be true later.
+
+When the user tells you something about themselves, call `remember` with
+scope="user" in that same turn, before you reply. Their name, what to call
+them, their age, what they are working on, how they like things done, tools
+and languages they prefer. Saying "I'll remember that" without calling the
+tool is a lie -- nothing is saved, and next session you will not know it.
+
+    "my name is heio"  ->  remember(note="The user's name is heio",
+                                    scope="user")
+    "I'm 29"           ->  remember(note="The user is 29", scope="user")
+
+Do this even when the message is only small talk and there is no work to do.
+A greeting that carries a fact is still a fact.
 """
 
 

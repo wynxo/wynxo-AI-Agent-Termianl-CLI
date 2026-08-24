@@ -140,6 +140,7 @@ COMMANDS = {
     "/memory": "show, add to, or forget long-term memory",
     "/thinking": "show or hide the model's reasoning",
     "/plan": "show the current plan",
+    "/new": "start a new chat: fresh history, screen and log",
     "/clear": "start a fresh conversation",
     "/compact": "summarise the conversation to reclaim context",
     "/stats": "tokens, speed, context use",
@@ -927,6 +928,9 @@ class Repl:
             self.ui.info("conversation cleared")
             return True
 
+        if name == "/new":
+            return self.cmd_new()
+
         if name == "/compact":
             before = self.agent.session.token_estimate()
             with self.ui.status("compacting..."):
@@ -1002,6 +1006,36 @@ class Repl:
             return True
 
         self.ui.warn(f"unknown command {name}. /help for the list.")
+        return True
+
+    def cmd_new(self) -> bool:
+        """A new chat, the way opening a new tab is new.
+
+        /clear empties the message list in place. This goes further: a new
+        session id and a new log file, so the old conversation stays intact
+        and reviewable rather than being half-overwritten, undo history reset
+        because those snapshots belong to the chat that is over, and a clean
+        screen so what is in front of you matches what the model can see.
+
+        Memory survives on purpose -- it is the thing that is supposed to
+        outlive a conversation.
+        """
+        self.agent.session = Session(workspace=self.workspace)
+        self.agent.checkpoints.clear()
+        self.agent.refresh_system_prompt()
+        self.callbacks.tokens = 0
+        self._last_elapsed = 0.0
+        self.pending.clear()
+
+        self.journal = Journal.open(self.agent_session_id(),
+                                    enabled=self.config.log)
+        self.callbacks.journal = self.journal
+
+        self.ui.clear()
+        self.ui.banner(self.config.model, self.client.base_url,
+                       self.policy.name, str(self.workspace))
+        self.ui.console.print()
+        self.ui.info("new chat -- memory kept, history and undo reset")
         return True
 
     async def cmd_effort(self, args: list[str]) -> bool:
