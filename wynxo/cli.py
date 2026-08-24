@@ -2336,7 +2336,12 @@ async def run_once(config: Config, workspace: Path, ui: UI, prompt: str,
     agent.refresh_system_prompt()
     await agent.detect_capabilities()
 
-    result = await agent.run(prompt)
+    try:
+        result = await agent.run(prompt)
+    except ProviderError as exc:
+        ui.error(str(exc))
+        await client.aclose()
+        return 1
     callbacks._end_stream()
     await client.aclose()
 
@@ -2523,11 +2528,51 @@ async def amain(argv: list[str] | None = None) -> int:
         return await repl.start()
 
 
+def _write_crash_report(exc: BaseException) -> "Path | None":
+    """Put the traceback somewhere it can be read later."""
+    import traceback
+
+    try:
+        directory = data_dir() / "crashes"
+        directory.mkdir(parents=True, exist_ok=True)
+        import time as _time
+
+        path = directory / f"{_time.strftime('%Y%m%d-%H%M%S')}.txt"
+        path.write_text(
+            f"wynxo {__version__}\n"
+            f"python {sys.version}\n"
+            f"platform {sys.platform}\n\n"
+            + "".join(traceback.format_exception(exc)),
+            encoding="utf-8")
+        return path
+    except Exception:
+        return None
+
+
 def main() -> None:
     try:
         sys.exit(asyncio.run(amain()))
     except KeyboardInterrupt:
         sys.exit(130)
+    except SystemExit:
+        raise
+    except BaseException as exc:                       # noqa: BLE001
+        # Last resort. Everything inside a session is already guarded, so
+        # reaching here means start-up broke or something got past all of
+        # it -- and a raw Python traceback is a bug report the person
+        # reading it cannot act on. Say what happened in one line, keep the
+        # traceback on disk for when it is actually wanted.
+        report = _write_crash_report(exc)
+        print(f"\nwynxo hit an unexpected error and had to stop.",
+              file=sys.stderr)
+        print(f"  {type(exc).__name__}: {exc}", file=sys.stderr)
+        if report is not None:
+            print(f"\n  The full details are in {report}", file=sys.stderr)
+            print("  That file is worth attaching to a bug report.",
+                  file=sys.stderr)
+        print("  Nothing you had open was written to; run wynxo again to "
+              "carry on.\n", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

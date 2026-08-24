@@ -578,3 +578,102 @@ class TestCancelIsNotTheSameAsNoPicker:
                 continue
             assert "is None" in source, f"{name} ignores escape"
             assert "NO_PICKER" in source, f"{name} ignores a missing picker"
+
+
+class TestNothingReachesTheUserAsATraceback:
+    """A raw Python traceback is a bug report the person reading it cannot
+    act on. Everything inside a session is guarded; this is what catches
+    start-up, and anything that gets past all of it."""
+
+    def test_the_repl_guard_survives_an_arbitrary_exception(self):
+        import asyncio
+        import types
+
+        from wynxo import cli
+        from wynxo.journal import Journal
+        from wynxo.ui import UI
+
+        async def explode():
+            raise RuntimeError("a tool did something unforeseen")
+
+        repl = types.SimpleNamespace(
+            ui=UI(), journal=Journal(session_id="test", path=None, enabled=False),
+            callbacks=types.SimpleNamespace(_end_stream=lambda: None))
+        got = asyncio.run(cli.Repl._guarded(repl, explode()))
+        assert got is None, "the exception escaped the guard"
+
+    def test_a_provider_error_is_shown_without_a_traceback(self):
+        import asyncio
+        import types
+
+        from wynxo import cli
+        from wynxo.journal import Journal
+        from wynxo.provider import ProviderError
+        from wynxo.ui import UI
+
+        async def explode():
+            raise ProviderError("the server said no")
+
+        shown = []
+        ui = UI()
+        ui.error = lambda msg: shown.append(msg)
+        repl = types.SimpleNamespace(
+            ui=ui, journal=Journal(session_id="test", path=None, enabled=False),
+            callbacks=types.SimpleNamespace(_end_stream=lambda: None))
+        asyncio.run(cli.Repl._guarded(repl, explode()))
+        assert shown == ["the server said no"]
+
+    def test_ctrl_c_still_gets_through(self):
+        """Swallowing these would make Ctrl-C look broken all over again."""
+        import asyncio
+        import types
+
+        import pytest as _pytest
+
+        from wynxo import cli
+        from wynxo.agent import Interrupted
+        from wynxo.journal import Journal
+        from wynxo.ui import UI
+
+        for boom in (Interrupted, asyncio.CancelledError):
+            async def explode(exc=boom):
+                raise exc()
+
+            repl = types.SimpleNamespace(
+                ui=UI(), journal=Journal(session_id="test", path=None, enabled=False),
+                callbacks=types.SimpleNamespace(_end_stream=lambda: None))
+            with _pytest.raises(boom):
+                asyncio.run(cli.Repl._guarded(repl, explode()))
+
+    def test_a_crash_report_is_written_and_names_the_version(self, tmp_path,
+                                                             monkeypatch):
+        from wynxo import cli
+
+        monkeypatch.setattr(cli, "data_dir", lambda: tmp_path)
+        path = cli._write_crash_report(RuntimeError("boom"))
+        assert path is not None and path.exists()
+        body = path.read_text()
+        assert "RuntimeError: boom" in body
+        assert "wynxo " in body and "python " in body
+
+    def test_an_unwritable_directory_does_not_crash_the_crash_handler(
+            self, tmp_path, monkeypatch):
+        """Failing while reporting a failure would be the worst version."""
+        from wynxo import cli
+
+        def refuse():
+            raise OSError("read-only")
+
+        monkeypatch.setattr(cli, "data_dir", refuse)
+        assert cli._write_crash_report(RuntimeError("boom")) is None
+
+    def test_system_exit_is_not_swallowed(self):
+        """--version and --help exit through SystemExit; catching it would
+        turn a clean exit into a reported crash."""
+        import inspect
+
+        from wynxo import cli
+
+        source = inspect.getsource(cli.main)
+        assert "except SystemExit" in source
+        assert source.index("except SystemExit") < source.index("BaseException")
