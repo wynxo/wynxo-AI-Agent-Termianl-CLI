@@ -74,6 +74,10 @@ class Config(Schema):
     theme = Field(str, "Colour palette: purple, sakura, midnight, ember or plain.",
                   default="purple")
     clear_on_start = Field(bool, "Clear the terminal when wynxo opens.", default=True)
+    fullscreen = Field(bool, "Draw on the terminal's alternate screen, the way "
+                             "vim and less do. Your shell is restored exactly on "
+                             "exit, at the cost of no scrollback during the "
+                             "session.", default=False)
     log = Field(bool, "Write a session transcript for debugging.", default=True)
     voice = Field(str, "How the agent talks: plain, warm, mentor or blunt.",
                   default="plain", choices=("plain", "warm", "mentor", "blunt", "kawaii"))

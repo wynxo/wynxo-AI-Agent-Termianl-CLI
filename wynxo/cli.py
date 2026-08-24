@@ -22,6 +22,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from . import __version__
+from . import fullscreen
 from .agent import Agent, Callbacks, Interrupted
 from .config import Config, Endpoint, data_dir, is_configured, load, normalise_url
 from .doctor import run_doctor
@@ -164,6 +165,7 @@ COMMANDS = {
     "/tools": "list the tools the agent can call",
     "/pet": "the companion: on | off | name <x> | voice <x>",
     "/theme": "colour palette: purple | sakura | midnight | ember | plain",
+    "/fullscreen": "draw on the alternate screen, like vim: on | off",
     "/speak": "read answers out loud: on | off | test | engine <name>",
     "/talker": "small model that does the talking: <model> | off",
     "/log": "where this session is being recorded",
@@ -526,6 +528,10 @@ class Repl:
         self.agent.permissions.mode = mode
         self.agent.refresh_system_prompt()
         self._task: asyncio.Task | None = None
+        # Set by amain() once the alternate screen is bracketed around the
+        # session. Left as an inert Screen so /fullscreen works the same in
+        # tests and in an embedded Repl that nobody wrapped.
+        self.screen = fullscreen.Screen(enabled=False)
 
     def agent_session_id(self) -> str:
         import uuid
@@ -1165,6 +1171,9 @@ class Repl:
 
         if name == "/theme":
             return await self.cmd_theme(args)
+
+        if name == "/fullscreen":
+            return await self.cmd_fullscreen(args)
 
         if name == "/speak":
             return await self.cmd_speak(args)
@@ -2034,6 +2043,59 @@ class Repl:
         )
         return chosen
 
+    async def cmd_fullscreen(self, args: list[str]) -> bool:
+        """Switch screens now, and remember the choice.
+
+        Takes effect immediately rather than at next start: a setting that
+        says it changed while the screen plainly did not is the kind of
+        thing that makes people stop trusting the whole settings menu.
+        """
+        want = args[0].lower() if args else ""
+        if want not in ("on", "off"):
+            chosen = await self._pick(
+                "fullscreen",
+                [("on", "take over the terminal; your shell comes back "
+                        "untouched on exit, but this screen has no scrollback"),
+                 ("off", "stay in the normal scrolling terminal")],
+                "on" if self.config.fullscreen else "off",
+            )
+            if chosen is NO_PICKER:
+                state = "on" if self.config.fullscreen else "off"
+                self.ui.info(f"fullscreen is {state}  {self.ui.g.dot}  "
+                             "/fullscreen on | off")
+                return True
+            if chosen is None:
+                return True
+            want = chosen
+
+        enable = want == "on"
+        if enable and not fullscreen.supported():
+            self.ui.warn("this terminal cannot switch screens, so fullscreen "
+                         "would do nothing here")
+            return True
+
+        self.config.fullscreen = enable
+        self.config.save()
+
+        screen = getattr(self, "screen", None)
+        if screen is not None:
+            screen.enabled = enable or screen.active
+            if enable:
+                screen.enter()
+            else:
+                screen.leave()
+                screen.enabled = False
+
+        if enable:
+            # The new screen is blank, so the conversation so far is not on
+            # it. Say where it went rather than letting it look lost.
+            self.ui.info(fullscreen.note(True, self.ui.g.unicode))
+            self.ui.info("the scrollback from before is waiting on the other "
+                         "screen, and comes back when wynxo exits")
+        else:
+            self.ui.success("back to the scrolling terminal")
+        return True
+
     def _preview_theme(self) -> None:
         """Show the new colours immediately, on this line.
 
@@ -2379,6 +2441,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--setup", action="store_true", help="re-run first-time setup")
     parser.add_argument("--doctor", action="store_true",
                         help="check the server and model, and report what will not work")
+    parser.add_argument("--fullscreen", action="store_true",
+                        help="draw on the alternate screen, like vim; your "
+                             "terminal is restored exactly on exit")
+    parser.add_argument("--no-fullscreen", action="store_true",
+                        help="stay in the normal scrolling terminal")
     parser.add_argument("--no-stream", action="store_true", help="wait for the full response")
     parser.add_argument("--no-thinking", action="store_true", help="hide model reasoning")
     parser.add_argument("--yolo", action="store_true",
@@ -2458,6 +2525,10 @@ async def amain(argv: list[str] | None = None) -> int:
         config.num_ctx = args.ctx
     if args.no_stream:
         config.stream = False
+    if args.fullscreen:
+        config.fullscreen = True
+    if args.no_fullscreen:
+        config.fullscreen = False
     if args.no_thinking:
         config.show_thinking = False
     if args.talker:
@@ -2522,10 +2593,16 @@ async def amain(argv: list[str] | None = None) -> int:
     # "?" as an escape-injection guard -- turning every colour code from rich
     # and from the status lines into literal "?[1;32m" garbage on screen.
     # write_raw passes them through, which is what a terminal UI needs.
-    with patch_stdout(raw=True):
-        if prompt:
-            return await repl.start_with(prompt)
-        return await repl.start()
+    # The alternate screen is entered before anything draws and left after
+    # everything, so the session is bracketed exactly. Screen() is a no-op
+    # when fullscreen is off or the terminal cannot do it, so there is no
+    # branch here.
+    with fullscreen.Screen(config.fullscreen) as screen:
+        repl.screen = screen
+        with patch_stdout(raw=True):
+            if prompt:
+                return await repl.start_with(prompt)
+            return await repl.start()
 
 
 def _write_crash_report(exc: BaseException) -> "Path | None":
