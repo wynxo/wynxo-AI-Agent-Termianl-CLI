@@ -377,3 +377,65 @@ class TestPersonalFactsAreRemembered:
 
         prompt = build_system_prompt(tmp_path, resolve("medium"))
         assert 'scope="user"' in prompt
+
+
+class TestResume:
+    """Sessions were already written to disk after every turn, but there was
+    no way back into one -- which made them a debugging artefact rather than
+    something you could use."""
+
+    def test_resume_is_a_command_and_abbreviates(self):
+        from wynxo.cli import COMMANDS, resolve_command
+
+        assert "/resume" in COMMANDS
+        assert resolve_command("/res") == "/resume"
+
+    def test_a_saved_session_round_trips(self, tmp_path, monkeypatch):
+        from wynxo import session as session_module
+        from wynxo.session import Session
+
+        monkeypatch.setattr(session_module, "data_dir", lambda: tmp_path)
+        original = Session(workspace=tmp_path)
+        original.add_user("remember the number 4242")
+        original.add_assistant("Noted.")
+        assert original.save() is not None
+
+        restored = Session.load(original.session_id, tmp_path)
+        assert restored is not None
+        assert len(restored.messages) == 2
+        assert "4242" in restored.messages[0]["content"]
+
+    def test_recent_lists_what_the_picker_needs(self, tmp_path, monkeypatch):
+        from wynxo import session as session_module
+        from wynxo.session import Session
+
+        monkeypatch.setattr(session_module, "data_dir", lambda: tmp_path)
+        saved = Session(workspace=tmp_path)
+        saved.add_user("fix the parser")
+        saved.save()
+
+        rows = session_module.Session.recent()
+        assert rows and rows[0]["messages"] == 1
+        assert "fix the parser" in rows[0]["preview"]
+        assert rows[0]["updated_at"] > 0      # the picker shows an age
+
+    def test_the_system_prompt_is_rebuilt_not_restored(self):
+        """Effort, scope, mode and memory may all have moved on since the
+        conversation was saved; reinstating the old prompt would quietly
+        bring the old ones back with it."""
+        import inspect
+
+        from wynxo import cli
+
+        source = inspect.getsource(cli.Repl._load_session)
+        assert "refresh_system_prompt()" in source
+
+    def test_undo_history_is_dropped_on_resume(self):
+        """Those snapshots describe files as they were during a different
+        run; offering to revert to them would be a trap."""
+        import inspect
+
+        from wynxo import cli
+
+        source = inspect.getsource(cli.Repl._load_session)
+        assert "checkpoints.clear()" in source

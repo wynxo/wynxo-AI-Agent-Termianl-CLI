@@ -141,6 +141,7 @@ COMMANDS = {
     "/thinking": "show or hide the model's reasoning",
     "/plan": "show the current plan",
     "/new": "start a new chat: fresh history, screen and log",
+    "/resume": "pick up an earlier conversation where it stopped",
     "/clear": "start a fresh conversation",
     "/compact": "summarise the conversation to reclaim context",
     "/stats": "tokens, speed, context use",
@@ -1020,6 +1021,9 @@ class Repl:
                 self.ui.info("Permission prompts back on.")
             return True
 
+        if name == "/resume":
+            return await self.cmd_resume(args)
+
         if name == "/sessions":
             rows = Session.recent()
             if not rows:
@@ -1043,6 +1047,82 @@ class Repl:
             return True
 
         self.ui.warn(f"unknown command {name}. /help for the list.")
+        return True
+
+    async def cmd_resume(self, args: list[str]) -> bool:
+        """Carry on an earlier conversation, with its history.
+
+        Sessions were already being written to disk after every turn; there
+        was simply no way back into one, which made them a debugging
+        artefact rather than something you could use.
+        """
+        import time as _time
+
+        rows = Session.recent()
+        if not rows:
+            self.ui.info("no saved conversations yet")
+            return True
+
+        if args:
+            wanted = args[0]
+            match = next((r for r in rows if r["session_id"].startswith(wanted)), None)
+            if match is None:
+                self.ui.warn(f"no saved conversation starting {wanted!r}")
+                return True
+            return self._load_session(match["session_id"])
+
+        def age(stamp: float) -> str:
+            if not stamp:
+                return "?"
+            seconds = max(0, _time.time() - stamp)
+            for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+                if seconds >= size:
+                    return f"{int(seconds // size)}{unit} ago"
+            return "just now"
+
+        options = [
+            Choice(value=r["session_id"],
+                   label=age(r.get("updated_at", 0)),
+                   badge=f"{r['messages']} msgs",
+                   badge_style="badge.muted",
+                   hint=(r["preview"] or "(no messages)"))
+            for r in rows
+        ]
+        if arrows_supported():
+            chosen = await choose(
+                options, title="resume which conversation?", default=0,
+                footer=HINT if self.ui.g.unicode else HINT_ASCII,
+                width=self.ui.width, unicode=self.ui.g.unicode)
+            if not chosen:
+                return True
+            return self._load_session(chosen)
+
+        self.ui.table(
+            ["id", "when", "messages", "started with"],
+            [(r["session_id"][:8], age(r.get("updated_at", 0)),
+              str(r["messages"]), r["preview"]) for r in rows],
+            title="recent conversations",
+        )
+        self.ui.info("/resume <id> to pick one up")
+        return True
+
+    def _load_session(self, session_id: str) -> bool:
+        restored = Session.load(session_id, self.workspace)
+        if restored is None:
+            self.ui.warn(f"could not read conversation {session_id[:8]}")
+            return True
+
+        # The system prompt is rebuilt rather than restored: effort, scope,
+        # mode and memory may all have moved on since, and the saved one
+        # would quietly reinstate the old ones.
+        self.agent.session = restored
+        self.agent.checkpoints.clear()
+        self.agent.refresh_system_prompt()
+        self._last_elapsed = 0.0
+
+        self.ui.success(f"resumed {session_id[:8]} -- "
+                        f"{len(restored.messages)} messages")
+        self.ui.info("undo history is not restored; it belonged to that run")
         return True
 
     def cmd_new(self) -> bool:
