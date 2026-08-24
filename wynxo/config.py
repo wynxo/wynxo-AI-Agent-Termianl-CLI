@@ -71,7 +71,7 @@ class Config(Schema):
     auto_approve = Field(list, "Tool names that never prompt for permission.",
                          item_type=str, default_factory=list)
     allow_shell = Field(bool, "Whether the shell tool is available.", default=True)
-    theme = Field(str, "Colour palette: purple, midnight, ember or plain.",
+    theme = Field(str, "Colour palette: purple, sakura, midnight, ember or plain.",
                   default="purple")
     clear_on_start = Field(bool, "Clear the terminal when wynxo opens.", default=True)
     log = Field(bool, "Write a session transcript for debugging.", default=True)

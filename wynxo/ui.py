@@ -602,6 +602,46 @@ class ThoughtStreamer(CodeStreamer):
         super().__init__(ui, indent=indent, style=MUTED, code=False)
 
 
+METER_BLOCKS = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
+"""Lower-eighth block through full block."""
+
+METER_WIDTH = 3
+
+
+def effort_meter(effort: str, unicode_ok: bool = True) -> str:
+    """A fixed-width gauge for an effort level.
+
+    Fixed width on purpose: a meter that grew with the level would shift
+    everything after it in the bar every time you pressed Ctrl-E.
+    """
+    from .effort import ORDER
+
+    try:
+        rank = ORDER.index(effort)
+    except ValueError:
+        return " " * METER_WIDTH
+    # rank+1 of len(ORDER), so the lowest level still shows something: a
+    # meter that is blank at `low` reads as broken rather than as low.
+    fraction = (rank + 1) / len(ORDER)
+
+    if not unicode_ok:
+        # Three characters that read as increasing intensity, all one cell.
+        step = min(METER_WIDTH, max(1, round(fraction * METER_WIDTH)))
+        return (".:!"[step - 1] * step).ljust(METER_WIDTH)
+
+    filled = fraction * METER_WIDTH
+    out = []
+    for slot in range(METER_WIDTH):
+        share = min(1.0, max(0.0, filled - slot))
+        if share <= 0:
+            out.append(" ")
+        else:
+            index = min(len(METER_BLOCKS) - 1,
+                        max(0, round(share * (len(METER_BLOCKS) - 1))))
+            out.append(METER_BLOCKS[index])
+    return "".join(out)
+
+
 class ActivityBar:
     """The pinned bar: what is happening, and the tokens as they arrive.
 
@@ -648,6 +688,15 @@ class ActivityBar:
         seconds = self.elapsed()
         return self.tokens / seconds if seconds > 0.4 and self.tokens else 0.0
 
+    def effort_meter(self) -> str:
+        """A little gauge that fills up as the effort level rises.
+
+        The level already has a name in the bar; this is there so the change
+        is visible at a glance without reading a word -- pick ultra and the
+        strip visibly leans on it.
+        """
+        return effort_meter(self.effort, self.ui.g.unicode)
+
     def _segments(self) -> list[tuple[str, str]]:
         """(text, style) pairs, most important first, for a fit-aware build."""
         out: list[tuple[str, str]] = []
@@ -656,7 +705,7 @@ class ActivityBar:
         if rate := self.rate():
             out.append((f"{rate:.0f} tok/s", ""))
         out.append((f"{self.elapsed():.0f}s", ""))
-        out.append((self.effort, ""))
+        out.append((f"{self.effort_meter()} {self.effort}", ""))
         if self.context_pct:
             out.append((f"ctx {self.context_pct:.0f}%", ""))
         return out

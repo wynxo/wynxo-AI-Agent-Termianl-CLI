@@ -73,6 +73,26 @@ MIDNIGHT = Palette(
     code_theme="monokai",
 )
 
+# Pink and violet, turned up. Same legibility rules as PURPLE -- the accent
+# still has to survive on a black background and must not drift into the
+# red the `bad` status uses, which is why the pinks stay on the magenta side.
+SAKURA = Palette(
+    name="sakura",
+    accent="#ff8ad8",
+    accent_dim="#c264a8",
+    text="#fbe9f6",
+    muted="#c9a2c8",
+    faint="#8f6f92",
+    good="#8ef0a6",
+    warn="#ffd479",
+    bad="#ff5d7a",
+    bar_bg="#3b1d3d",
+    bar_text="#fbe9f6",
+    bar_dim="#d0a8d4",
+    bar_accent="#ffb3e6",
+    code_theme="material",
+)
+
 EMBER = Palette(
     name="ember",
     accent="#ff9d5c",
@@ -110,7 +130,7 @@ PLAIN = Palette(
 )
 
 PALETTES: dict[str, Palette] = {
-    p.name: p for p in (PURPLE, MIDNIGHT, EMBER, PLAIN)
+    p.name: p for p in (PURPLE, SAKURA, MIDNIGHT, EMBER, PLAIN)
 }
 DEFAULT = "purple"
 

@@ -88,6 +88,7 @@ def resolve_command(name: str) -> str | None:
 def _theme_summary(name: str) -> str:
     return {
         "purple": "deep violet (default)",
+        "sakura": "pink and violet, turned up",
         "midnight": "cool blue",
         "ember": "warm orange",
         "plain": "your terminal's own 16 colours",
@@ -118,7 +119,7 @@ COMMANDS = {
     "/ctx": "show or set the context window (num_ctx)",
     "/tools": "list the tools the agent can call",
     "/pet": "the companion: on | off | name <x> | voice <x>",
-    "/theme": "colour palette: purple | midnight | ember | plain",
+    "/theme": "colour palette: purple | sakura | midnight | ember | plain",
     "/speak": "read answers out loud: on | off | test | engine <name>",
     "/talker": "small model that does the talking: <model> | off",
     "/log": "where this session is being recorded",
@@ -335,6 +336,7 @@ class Repl:
             unicode=ui.g.unicode,
         )
         self.pet.style_name = "kawaii" if config.voice == "kawaii" else "default"
+        self.pet.set_pace(self.policy.name)
 
         # The talker speaks; the coder works. Constructed here so /talker can
         # turn it on and off mid-session without rebuilding the agent.
@@ -743,6 +745,7 @@ class Repl:
         self.config.effort = policy.name
         self.agent.set_effort(policy)
         self.policy = self.agent.policy
+        self.pet.set_pace(self.policy.name)
         self.ui.info(f"effort: {self.policy.name} -- {self.policy.headline}")
 
     def interrupt(self) -> None:
@@ -925,6 +928,7 @@ class Repl:
         # policy back rather than trusting the one just resolved, so the
         # status bar reports what the agent will actually do.
         self.policy = self.agent.policy
+        self.pet.set_pace(self.policy.name)
         self.ui.success(f"effort: {self.policy.name} -- {self.policy.describe()}")
         return True
 

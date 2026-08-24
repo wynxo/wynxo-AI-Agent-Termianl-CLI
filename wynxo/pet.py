@@ -143,6 +143,9 @@ class Pet:
     mood: Mood = Mood.IDLE
     style_name: str = "default"
     """``kawaii`` swaps in the rounder face set."""
+    pace: int = 3
+    """Frames the counter must advance before the face changes. Lower is
+    faster; set_pace() drives it from the effort level."""
     _frame: int = field(default=0, repr=False)
 
     # -- appearance --------------------------------------------------------
@@ -153,12 +156,29 @@ class Pet:
         return FACES_KAWAII if self.style_name == "kawaii" else FACES
 
     def face(self, advance: bool = True) -> str:
-        """The current frame. ``advance`` steps the animation."""
+        """The current frame. ``advance`` steps the animation.
+
+        ``pace`` divides the frame counter, so a lower value animates faster.
+        It is driven by the effort level: choosing ultra should visibly cost
+        something, and a companion working visibly harder is a cheaper way to
+        show that than a number nobody reads.
+        """
         frames = self.faces()[self.mood]
         if advance and self.animate:
             self._frame += 1
-        index = (self._frame // 3) % len(frames) if self.animate else 0
+        index = (self._frame // max(1, self.pace)) % len(frames) if self.animate else 0
         return frames[index]
+
+    def set_pace(self, effort: str) -> None:
+        """Faster animation the harder it is working."""
+        from .effort import ORDER
+
+        try:
+            rank = ORDER.index(effort)
+        except ValueError:
+            return
+        # 4 frames per step at low, down to 1 at ultra.
+        self.pace = max(1, 4 - (rank * 3) // max(1, len(ORDER) - 1))
 
     def style(self) -> str:
         return MOOD_STYLES[self.mood]
