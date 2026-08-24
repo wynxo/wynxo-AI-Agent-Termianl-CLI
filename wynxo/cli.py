@@ -620,12 +620,12 @@ class Repl:
                 continue
 
             if text.startswith("/"):
-                if await self.command(text) is False:
+                if await self._guarded(self.command(text)) is False:
                     break
                 continue
 
-            await self.turn(text)
-            if await self._drain_queue() is False:
+            await self._guarded(self.turn(text))
+            if await self._guarded(self._drain_queue()) is False:
                 break
 
         await self.client.aclose()
@@ -638,6 +638,40 @@ class Repl:
             return 1
         await self.turn(prompt)
         return await self._loop()
+
+    async def _guarded(self, coro):
+        """Run one turn or command; survive anything it raises.
+
+        A crash here used to end the process and take the conversation with
+        it -- and the causes are all things a local model does on a bad day:
+        a template that cannot parse its own tool-call output, a tool that
+        raises something unforeseen, a bug of mine. None of that is worth
+        losing the session over, and the traceback is written to the log
+        where it can be read afterwards.
+
+        Interrupted and CancelledError pass through: those are Ctrl-C, which
+        the caller already handles, and swallowing them would make Ctrl-C
+        look broken again.
+        """
+        import traceback
+
+        try:
+            return await coro
+        except (Interrupted, asyncio.CancelledError):
+            raise
+        except ProviderError as exc:
+            self.callbacks._end_stream()
+            self.ui.error(str(exc))
+            self.journal.error(str(exc))
+            return None
+        except Exception as exc:                      # noqa: BLE001
+            self.callbacks._end_stream()
+            self.ui.error(f"{type(exc).__name__}: {exc}")
+            self.ui.info("the conversation is intact -- this was not fatal")
+            self.journal.error("".join(traceback.format_exception(exc)))
+            if self.journal.path is not None:
+                self.ui.info(f"details in {self.journal.path}")
+            return None
 
     async def turn(self, text: str) -> None:
         """Run one request, with a live status bar and mid-flight keybinds."""

@@ -70,6 +70,19 @@ class Chunk:
     load_duration_ns: int = 0
 
 
+def _is_template_parse_error(low: str) -> bool:
+    """Whether the server failed parsing what the model wrote, not the request.
+
+    Ollama renders tool calls through the model's own chat template. Several
+    tool-tuned models emit XML-ish calls, and when the model closes a tag
+    wrongly the template's parser is what complains -- so the error names XML
+    or a template rather than anything the user did.
+    """
+    if "syntax error" in low and ("xml" in low or "element" in low):
+        return True
+    return ("template" in low and "error" in low) or "closed by" in low
+
+
 class OllamaClient:
     def __init__(self, config: Config):
         self.config = config
@@ -276,7 +289,12 @@ class OllamaClient:
                     except json.JSONDecodeError:
                         continue
                     if err := data.get("error"):
-                        raise ProviderError(str(err))
+                        # Mid-stream errors used to be re-raised verbatim,
+                        # so a template parse failure reached the user as
+                        # "XML syntax error on line 6" with no hint that it
+                        # was the model's output and not their machine.
+                        raise ProviderError(
+                            self._explain_error(200, str(err), payload))
                     yield self._to_chunk(data)
                 return
 
@@ -295,7 +313,8 @@ class OllamaClient:
                 except json.JSONDecodeError:
                     continue
                 if err := data.get("error"):
-                    raise ProviderError(str(err))
+                    raise ProviderError(
+                        self._explain_error(200, str(err), payload))
                 yield self._to_chunk(data)
 
     @staticmethod
@@ -333,6 +352,18 @@ class OllamaClient:
                 f"The server does not have {model!r}.\n"
                 f"  Pull it first:  ollama pull {model}\n"
                 f"  Or run /model inside wynxo to pick one it does have."
+            )
+        if _is_template_parse_error(low):
+            return (
+                f"{model!r} produced a tool call its own Ollama template "
+                "could not parse.\n"
+                f"  ({text})\n"
+                "  This is the model writing malformed output, not a problem "
+                "with your setup.\n"
+                "  It usually clears on a retry. If it keeps happening:\n"
+                "    - lower the effort level, which shortens each reply\n"
+                "    - update the model:  ollama pull " + str(model) + "\n"
+                "    - or try a different tool-tuned model"
             )
         if "does not support tools" in low:
             return (

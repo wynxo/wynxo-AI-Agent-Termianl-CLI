@@ -728,7 +728,16 @@ class Agent:
         plan = ""
         if self.policy.plan in ("explicit", "critique"):
             self.session.add_user(request)
-            plan = await self._plan(request)
+            try:
+                plan = await self._plan(request)
+            except ProviderError as exc:
+                # Planning is a convenience; failing it should not lose the
+                # turn. Carry on without one and let _act() report if the
+                # same problem is still there.
+                await self.cb.on_warning(f"planning failed: {exc}")
+                plan = ""
+            except asyncio.CancelledError:
+                raise Interrupted from None
             # The plan prompt is allowed to say there is nothing to plan.
             # Belt and braces with is_small_talk(): the heuristic catches the
             # common phrasings, this catches the ones it does not.
@@ -746,21 +755,28 @@ class Agent:
 
         try:
             result = await self._act()
+
+            if not result.interrupted and result.content:
+                # Inside the same guard as _act(). A provider error during
+                # verification used to escape run() entirely and take the
+                # whole REPL down with it -- the work was already done, and
+                # the session was lost anyway.
+                result.verify_rounds = await self._verify(request)
+                if result.verify_rounds:
+                    # The last substantive assistant message is the real
+                    # answer; a verification turn saying "VERIFIED" is not.
+                    final = self._last_substantive()
+                    if final:
+                        result.content = final
         except ProviderError as exc:
+            partial = self._last_substantive()
             return TurnResult(
-                content="", elapsed=time.monotonic() - started, errors=[str(exc)]
+                content=partial,
+                elapsed=time.monotonic() - started,
+                errors=[str(exc)],
             )
         except asyncio.CancelledError:
             raise Interrupted from None
-
-        if not result.interrupted and result.content:
-            result.verify_rounds = await self._verify(request)
-            if result.verify_rounds:
-                # The last substantive assistant message is the real answer;
-                # a verification turn saying "VERIFIED" is not.
-                final = self._last_substantive()
-                if final:
-                    result.content = final
 
         result.elapsed = time.monotonic() - started
         self.session.save()

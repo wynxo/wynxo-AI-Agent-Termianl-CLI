@@ -820,3 +820,96 @@ class TestAnswerNeverGoesMissing:
         assert result.content == "Plain answer."
         assert "".join(cb.content) == "Plain answer."
         await agent.client.aclose()
+
+
+class TestProviderErrorsNeverEscape:
+    """A crash here ended the process and took the conversation with it.
+    Every cause is something a local model does on a bad day."""
+
+    def failing(self, tmp_path, fail_after: int, message="boom"):
+        """A server that streams normally, then errors mid-stream."""
+        import httpx
+
+        from wynxo.agent import Agent
+        from wynxo.config import Config, Endpoint
+        from wynxo.effort import resolve
+        from wynxo.provider import OllamaClient
+        from wynxo.tools import build_registry
+
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path == "/api/version":
+                return httpx.Response(200, json={"version": "0.5.0-fake"})
+            if path == "/api/show":
+                return httpx.Response(200, json={
+                    "capabilities": ["tools"], "details": {},
+                    "model_info": {"q.context_length": 40960}})
+            if path != "/api/chat":
+                return httpx.Response(404, json={"error": "no"})
+
+            index = calls["n"]
+            calls["n"] += 1
+            if index == fail_after:
+                return httpx.Response(200, text=json.dumps({"error": message}))
+            return httpx.Response(200, text="\n".join([
+                json.dumps({"message": {"role": "assistant",
+                                        "content": "An answer."}, "done": False}),
+                json.dumps({"message": {"role": "assistant", "content": ""},
+                            "done": True, "prompt_eval_count": 10,
+                            "eval_count": 5, "total_duration": 10 ** 9}),
+            ]))
+
+        config = Config(endpoints=[Endpoint(name="t", url="http://fake:11434")],
+                        active_endpoint="t", model="m", num_ctx=32768)
+        client = OllamaClient(config)
+        client._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://fake:11434")
+        agent = Agent(client, config, resolve("high"), tmp_path,
+                      registry=build_registry(tmp_path, allow_shell=True))
+        agent.permissions.yolo = True
+        return agent
+
+    async def test_a_failure_during_verification_is_caught(self, tmp_path):
+        """The reported crash: run() guarded _act() but not _verify(), so a
+        provider error there escaped and killed the REPL."""
+        agent = self.failing(tmp_path, fail_after=2)
+        result = await agent.run("check the retry path")
+        assert result.errors, "the error was not reported"
+        await agent.client.aclose()
+
+    async def test_the_answer_survives_a_failed_verification(self, tmp_path):
+        """The work was already done; losing it as well would be worse."""
+        agent = self.failing(tmp_path, fail_after=2)
+        result = await agent.run("check the retry path")
+        assert "An answer." in result.content
+        await agent.client.aclose()
+
+    async def test_a_failure_during_planning_does_not_lose_the_turn(self, tmp_path):
+        """Planning is a convenience. Failing it should carry on without one."""
+        agent = self.failing(tmp_path, fail_after=0)
+        result = await agent.run("do the thing")
+        assert result.content or result.errors
+        await agent.client.aclose()
+
+    async def test_the_session_is_usable_afterwards(self, tmp_path):
+        agent = self.failing(tmp_path, fail_after=2)
+        await agent.run("first")
+        second = await agent.run("second")
+        assert second.errors == []
+        assert "An answer." in second.content
+        await agent.client.aclose()
+
+    async def test_a_template_parse_error_is_explained(self, tmp_path):
+        """"XML syntax error on line 6" tells you nothing about what to do,
+        and reads like your machine is broken rather than the model."""
+        agent = self.failing(
+            tmp_path, fail_after=1,
+            message="XML syntax error on line 6: element <function> "
+                    "closed by </parameter>")
+        result = await agent.run("check it")
+        blob = " ".join(result.errors).lower()
+        assert "malformed output" in blob
+        assert "not a problem with your setup" in blob
+        await agent.client.aclose()
