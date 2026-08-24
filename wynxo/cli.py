@@ -185,6 +185,7 @@ COMMANDS = {
     "/yolo": "stop asking permission for this session",
     "/sessions": "list recent sessions",
     "/init": "write a WYNXO.md describing this project",
+    "/map": "the project layout the model is given, or rebuild it",
     "/quit": "exit",
 }
 
@@ -563,6 +564,7 @@ class Repl:
         if warning := await check_context(self.client, self.config):
             note(WARN, f"context {self.config.num_ctx}", warning.split(".")[0])
 
+        self._refresh_map(note)
         await self.agent.detect_capabilities()
         # EffortPolicy is immutable: a capability downgrade inside the agent
         # produces a new object rather than mutating self.policy in place, so
@@ -1153,6 +1155,9 @@ class Repl:
         if name == "/commit":
             return await self.cmd_commit(args)
 
+        if name == "/map":
+            return self.cmd_map(args)
+
         if name == "/sessions":
             rows = Session.recent()
             if not rows:
@@ -1592,6 +1597,51 @@ class Repl:
             self.ui.warn("Nothing will ask for approval from here on.")
         return True
 
+    def _refresh_map(self, note=None) -> None:
+        """Rebuild the project map if the files have moved on.
+
+        Never fatal: a project that cannot be walked, or a read-only one that
+        cannot cache the result, still gets a session -- just without the
+        head start.
+        """
+        from . import projectmap
+
+        try:
+            self.agent.project_map = projectmap.load(self.workspace)
+        except Exception as exc:
+            self.agent.project_map = ""
+            if note is not None:
+                note(WARN, "project map", str(exc))
+            return
+        self.agent.refresh_system_prompt()
+
+    def cmd_map(self, args: list[str]) -> bool:
+        """Show the map, or force a rebuild."""
+        from . import projectmap
+
+        if args and args[0].lower() in ("rebuild", "refresh", "again"):
+            path = projectmap.cache_path(self.workspace)
+            with contextlib.suppress(OSError):
+                path.unlink()
+            with self.ui.status("mapping the project..."):
+                self._refresh_map()
+            self.ui.success(projectmap.summarise(self.agent.project_map)
+                            or "nothing to map here")
+            return True
+
+        if not self.agent.project_map:
+            self.ui.info("no map for this project")
+            self.ui.info("/map rebuild to try again")
+            return True
+        self.ui.console.print()
+        for line in self.agent.project_map.splitlines():
+            style = f"bold {ACCENT}" if line.startswith("#") else MUTED
+            self.ui.console.print(Text("  " + line, style=style))
+        self.ui.console.print()
+        self.ui.info(f"{projectmap.cache_path(self.workspace)}  "
+                     f"{self.ui.g.dot}  /map rebuild")
+        return True
+
     def _boundary_summary(self, boundary) -> str:
         """describe(), but with the path shortened for the terminal.
 
@@ -1725,6 +1775,7 @@ class Repl:
         self.agent.workspace = target
         self.agent.memory = self.memory
         self._apply_scope(self.boundary.scope)
+        self._refresh_map()
         self.ui.success(f"working in {self.ui.shorten_path(str(target))}")
         if reason := suspicious_workspace(target):
             self.ui.warn(reason)

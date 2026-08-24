@@ -326,6 +326,7 @@ def build_system_prompt(
     boundary=None,
     mode=None,
     voice: str = "plain",
+    project_map: str = "",
 ) -> str:
     from .platforms import default_shell, describe
 
@@ -356,6 +357,14 @@ def build_system_prompt(
     if block := VOICES.get(voice, ""):
         parts.append(block)
         parts.append(VOICE_FLOOR)
+    if project_map.strip():
+        parts.append(
+            "\n" + project_map.strip() + "\n\n"
+            "That map is generated from the files, not from memory. Use it to "
+            "open the right file directly instead of searching for it. It "
+            "lists what each file defines, not everything in it, so read a "
+            "file before changing it.\n"
+        )
     parts.append(MEMORY_TOOL_NOTE)
     parts.append(memory)
     parts.append(project_context(workspace))

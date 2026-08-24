@@ -205,6 +205,11 @@ class Agent:
         """Set false when the model's template cannot do tool calls, in which
         case tools are described in the prompt in Hermes format instead."""
 
+        self.project_map = ""
+        """A one-page layout of the codebase, refreshed by the CLI. Local
+        models explore badly, and this is what stops them starting every
+        session blind."""
+
         self._template_prefills_think = False
         """Set once a closing </think> arrives with nothing having opened it.
 
@@ -234,6 +239,7 @@ class Agent:
             boundary=self.boundary,
             mode=self.permissions.mode,
             voice=self.config.voice,
+            project_map=self.project_map,
         )
 
     def set_effort(self, policy: EffortPolicy) -> None:
