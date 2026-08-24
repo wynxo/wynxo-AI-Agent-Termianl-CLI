@@ -259,3 +259,55 @@ class TestThemeAppliesLive:
             module = importlib.import_module(module_name)
             for name in names:
                 assert hasattr(module, name), f"{module_name} has no {name}"
+
+
+class TestCommandCompleter:
+    """Suggestions as you type, so the command list is not something you
+    have to have memorised."""
+
+    def complete(self, text):
+        from prompt_toolkit.document import Document
+
+        from wynxo.cli import CommandCompleter
+
+        return list(CommandCompleter().get_completions(Document(text), None))
+
+    def test_a_prefix_offers_every_command_that_matches(self):
+        got = {c.text for c in self.complete("/mo")}
+        assert got == {"/model", "/mode"}
+
+    def test_each_suggestion_carries_what_it_does(self):
+        """A bare list of names is not much help if you cannot remember
+        which is which."""
+        first = self.complete("/mo")[0]
+        assert first.display_meta_text.strip()
+
+    def test_it_replaces_what_was_typed(self):
+        completion = self.complete("/mo")[0]
+        assert completion.start_position == -len("/mo")
+
+    def test_an_alias_that_is_not_a_prefix_is_still_found(self):
+        """/q expands to /quit, which it is not a prefix of -- prefix
+        matching alone would never suggest it."""
+        assert "/quit" in {c.text for c in self.complete("/q")}
+
+    def test_ordinary_prose_is_never_completed(self):
+        """The menu must not open over the top of what you are actually
+        typing most of the time."""
+        assert self.complete("fix the parser") == []
+        assert self.complete("") == []
+
+    def test_completion_stops_after_the_command_word(self):
+        """`/model qwen3` is an argument, not another command."""
+        assert self.complete("/model qwen") == []
+
+    def test_a_full_command_still_offers_itself(self):
+        assert "/theme" in {c.text for c in self.complete("/theme")}
+
+    def test_nothing_matches_nonsense(self):
+        assert self.complete("/zzzz") == []
+
+    def test_no_duplicates_when_an_alias_points_at_a_matching_command(self):
+        """/m is an alias for /model and also a prefix of it."""
+        texts = [c.text for c in self.complete("/m")]
+        assert len(texts) == len(set(texts))

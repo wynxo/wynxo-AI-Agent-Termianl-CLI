@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.formatted_text import ANSI, HTML
 from prompt_toolkit.history import FileHistory
@@ -149,6 +149,38 @@ COMMANDS = {
     "/init": "write a WYNXO.md describing this project",
     "/quit": "exit",
 }
+
+
+class CommandCompleter(Completer):
+    """Suggests slash commands as you type, with what each one does.
+
+    Only the first word, and only when it starts with "/". Completing
+    anywhere else would put a menu over the top of ordinary prose, which is
+    what you are typing almost all of the time.
+    """
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        if not text.startswith("/") or " " in text:
+            return
+
+        seen: set[str] = set()
+        for name, description in COMMANDS.items():
+            if name.startswith(text):
+                seen.add(name)
+                yield Completion(
+                    name, start_position=-len(text),
+                    display=name, display_meta=description)
+
+        # Aliases that are not prefixes of what they expand to -- /q for
+        # /quit, /? for /help. Prefix matching alone would never find them.
+        for alias, target in sorted(ALIASES.items()):
+            if alias.startswith(text) and target not in seen:
+                seen.add(target)
+                yield Completion(
+                    target, start_position=-len(text),
+                    display=f"{target}  ({alias})",
+                    display_meta=COMMANDS.get(target, ""))
 
 
 class TerminalCallbacks(Callbacks):
@@ -417,14 +449,18 @@ class Repl:
 
         self.prompt_session: PromptSession = PromptSession(
             history=FileHistory(str(history_file)),
-            completer=WordCompleter(list(COMMANDS), sentence=True),
+            completer=CommandCompleter(),
+            complete_while_typing=True,
             key_bindings=bindings,
             multiline=False,
             # The default reserves eight rows for a completion dropdown,
             # which shows up as a slab of empty screen under every prompt.
             # Readline-style completion prints inline and needs none.
-            reserve_space_for_menu=0,
-            complete_style=CompleteStyle.READLINE_LIKE,
+            # Enough rows for the menu to open downward without the prompt
+            # jumping, but not so many that an empty slab sits under the
+            # input the rest of the time.
+            reserve_space_for_menu=6,
+            complete_style=CompleteStyle.COLUMN,
         )
         silence_cpr_warning(self.prompt_session.app)
         self.callbacks = TerminalCallbacks(ui, self.prompt_session)
