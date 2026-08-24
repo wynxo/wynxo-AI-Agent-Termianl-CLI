@@ -180,3 +180,42 @@ class TestInternalTools:
         result = await tool.invoke({"note": "Learned during a plan-mode session"})
         assert result.ok
         assert memory.counts()[0] == 1
+
+
+class TestBoundarySummary:
+    """The terminal shows a shortened path; the system prompt gets the real
+    one. /scope and /cd used to print the raw absolute path and wrap across
+    lines on anything but a short workspace path."""
+
+    def _summary(self, boundary):
+        import types
+
+        from wynxo import cli
+        from wynxo.ui import UI
+
+        repl = types.SimpleNamespace(ui=UI())
+        return cli.Repl._boundary_summary(repl, boundary)
+
+    def test_folder_scope_is_shortened(self, tmp_path):
+        long_home = tmp_path / "a" / "b" / "c" / "d" / "e" / "project"
+        long_home.mkdir(parents=True)
+        boundary = resolve(long_home, Scope.FOLDER)
+        summary = self._summary(boundary)
+        assert summary != str(boundary.root)
+        assert summary.startswith(".../")
+
+    def test_repo_scope_keeps_the_sentence_and_shortens_the_path(self, repo):
+        boundary = resolve(repo, Scope.REPO)
+        summary = self._summary(boundary)
+        assert summary.startswith("the repository at ")
+        assert str(boundary.root) not in summary or len(str(boundary.root)) < 18
+
+    def test_machine_scope_has_no_path_to_shorten(self, tmp_path):
+        boundary = resolve(tmp_path, Scope.MACHINE)
+        assert self._summary(boundary) == "the whole machine"
+
+    def test_describe_itself_stays_the_full_path_for_the_system_prompt(self, tmp_path):
+        long_home = tmp_path / "a" / "b" / "c" / "d" / "e" / "project"
+        long_home.mkdir(parents=True)
+        boundary = resolve(long_home, Scope.FOLDER)
+        assert boundary.describe() == str(boundary.root)

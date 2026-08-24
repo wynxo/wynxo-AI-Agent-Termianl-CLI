@@ -1006,6 +1006,18 @@ class Repl:
             self.ui.warn("Nothing will ask for approval from here on.")
         return True
 
+    def _boundary_summary(self, boundary) -> str:
+        """describe(), but with the path shortened for the terminal.
+
+        Boundary.describe() is also what goes into the system prompt, where
+        the model needs the real, full path -- so the shortening happens
+        here instead, only for what the user reads.
+        """
+        if boundary.unrestricted:
+            return "the whole machine"
+        root = self.ui.shorten_path(str(boundary.root))
+        return f"the repository at {root}" if boundary.scope is Scope.REPO else root
+
     async def cmd_scope(self, args: list[str]) -> bool:
         if not args:
             current = self.agent.boundary
@@ -1018,7 +1030,7 @@ class Repl:
                 title="scope",
             )
             if current:
-                self.ui.info(f"currently: {current.describe()}")
+                self.ui.info(f"currently: {self._boundary_summary(current)}")
             self.ui.info("/scope <path> or /cd <path> moves to another directory")
             return True
         try:
@@ -1045,7 +1057,7 @@ class Repl:
                 return True
 
         self._apply_scope(scope)
-        self.ui.success(f"scope: {self.agent.boundary.describe()}")
+        self.ui.success(f"scope: {self._boundary_summary(self.agent.boundary)}")
         return True
 
     async def cmd_repo(self, args: list[str]) -> bool:
