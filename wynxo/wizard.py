@@ -25,7 +25,8 @@ from .effort import ORDER, resolve
 from .discovery import Found, private_subnets, scan_loopback, scan_subnets, verify
 from .platforms import ollama_server_help as server_help  # re-exported
 from .provider import OllamaClient, ProviderError, inspect_all
-from .select import Choice, choose, supported as arrows_supported
+from .select import (
+    HINT, HINT_ASCII, Choice, choose, supported as arrows_supported)
 from rich.text import Text
 
 from .ui import ACCENT, MUTED, UI
@@ -85,7 +86,8 @@ async def ask_endpoint(ui: UI, prompt_session: PromptSession) -> Endpoint:
         ui.console.print(f"  [{ACCENT}]Found:[/]")
         for i, hit in enumerate(found, 1):
             ui.console.print(
-                f"    [bold]{i}[/]  {hit.url}  [{MUTED}]v{hit.version} · {hit.where}[/]")
+                f"    [bold]{i}[/]  {hit.url}  "
+                f"[{MUTED}]v{hit.version} {ui.g.dot} {hit.where}[/]")
         ui.console.print(f"    [bold]m[/]  [{MUTED}]enter a different address[/]")
         ui.console.print()
 
@@ -319,7 +321,7 @@ async def ask_model(ui: UI, prompt_session: PromptSession, config: Config,
             [_model_choice(m) for m in installed],
             title="",
             default=0,
-            footer="↑↓ move   enter select   1-9 jump   esc cancel",
+            footer=HINT if ui.g.unicode else HINT_ASCII,
             width=ui.width,
             unicode=ui.g.unicode,
         )

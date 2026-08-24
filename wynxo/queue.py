@@ -67,12 +67,12 @@ class Pending:
         self.draft = ""
         return f"{count} queued message(s) dropped" if count else ""
 
-    def preview(self, width: int = 40) -> str:
+    def preview(self, width: int = 40, ellipsis: str = "\u2026") -> str:
         """What to show in the status bar while a turn runs."""
         if self.draft:
             text = self.draft
             if len(text) > width:
-                text = "…" + text[-(width - 1):]
+                text = ellipsis + text[-(width - len(ellipsis)):]
             return text
         if self.items:
             return f"{len(self.items)} queued"

@@ -13,7 +13,7 @@ with arrow keys is one that cannot be scripted.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from prompt_toolkit.application import Application
@@ -26,6 +26,9 @@ from prompt_toolkit.styles import Style
 
 CURSOR = "❯"
 CURSOR_ASCII = ">"
+
+HINT = "\u2191\u2193 move   enter select   1-9 jump   esc cancel"
+HINT_ASCII = "up/down move   enter select   1-9 jump   esc cancel"
 
 STYLE = Style.from_dict({
     "row": "",
@@ -74,6 +77,16 @@ async def choose(
     """Show the list and return the chosen value, or None if cancelled."""
     if not choices:
         return None
+
+    if not unicode:
+        from .ui import to_ascii
+
+        title, footer = to_ascii(title), to_ascii(footer)
+        choices = [
+            replace(c, label=to_ascii(c.label), badge=to_ascii(c.badge),
+                    hint=to_ascii(c.hint))
+            for c in choices
+        ]
 
     index = max(0, min(default, len(choices) - 1))
     label_width = min(max(len(c.label) for c in choices), max(12, width - 34))

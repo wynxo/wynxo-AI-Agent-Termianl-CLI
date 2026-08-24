@@ -13,6 +13,8 @@ import sys
 import time
 from typing import Iterable
 
+from rich.box import ASCII as ASCII_BOX, ROUNDED
+from rich.cells import cell_len
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
@@ -68,15 +70,46 @@ def _supports_unicode() -> bool:
         return False
 
 
+ASCII_FALLBACK = {
+    "\u2022": "*", "\u2192": "->", "\u2190": "<-", "\u2191": "up",
+    "\u2193": "down", "\u2713": "+", "\u2717": "x", "\u25cf": "o",
+    "\u00b7": ".", "\u2026": "...", "\u2014": "-", "\u2013": "-",
+    "\u276f": ">", "\u2502": "|", "\u2500": "-", "\u256d": "+",
+    "\u256e": "+", "\u2570": "+", "\u256f": "+", "\u201c": '"',
+    "\u201d": '"', "\u2018": "'", "\u2019": "'",
+}
+"""Replacements for the glyphs used in labels the caller cannot re-word."""
+
+
+def to_ascii(text: str) -> str:
+    """Down-convert a display string for a terminal that cannot draw it.
+
+    Anything outside the table is dropped rather than shown as a question
+    mark, which is what an ASCII locale would otherwise print.
+    """
+    out = []
+    for char in text:
+        if char in ASCII_FALLBACK:
+            out.append(ASCII_FALLBACK[char])
+        elif ord(char) < 128:
+            out.append(char)
+    return "".join(out)
+
+
 class Glyphs:
     def __init__(self, unicode_ok: bool):
         self.unicode = unicode_ok
         if unicode_ok:
             self.bullet, self.arrow, self.tick = "•", "→", "✓"
             self.cross, self.gear, self.dot = "✗", "●", "·"
+            # Rounded box corners, for the input field the prompt sits in.
+            self.tl, self.tr, self.bl, self.br = "╭", "╮", "╰", "╯"
+            self.hbar, self.vbar, self.ellipsis = "─", "│", "…"
         else:
             self.bullet, self.arrow, self.tick = "*", "->", "+"
             self.cross, self.gear, self.dot = "x", "o", "."
+            self.tl, self.tr, self.bl, self.br = "+", "+", "+", "+"
+            self.hbar, self.vbar, self.ellipsis = "-", "|", "..."
 
 
 class UI:
@@ -88,6 +121,9 @@ class UI:
             legacy_windows=False if sys.platform == "win32" else None,
         )
         self.g = Glyphs(_supports_unicode())
+        # rich's default panel box is Unicode; ASCII terminals need the
+        # plain one or every border renders as question marks.
+        self.box = ROUNDED if self.g.unicode else ASCII_BOX
         self.palette = resolve_theme(theme)
         apply_palette(self.palette)
         self.show_thinking = show_thinking
@@ -109,23 +145,26 @@ class UI:
         parts = [model, effort, self.shorten_path(workspace), server]
 
         separator = f"  {self.g.dot}  "
-        budget = self.width - 10
+        prefix = "  wynxo"
+        budget = self.width - 1
         shown: list[str] = []
         for part in parts:
             candidate = shown + [part]
-            if len(separator.join(candidate)) > budget:
+            room = cell_len(prefix) + sum(
+                cell_len(separator) + cell_len(p) for p in candidate)
+            if room > budget:
                 continue
             shown = candidate
 
         head = Text()
-        head.append("  wynxo", style=f"bold {ACCENT}")
+        head.append(prefix, style=f"bold {ACCENT}")
         for i, part in enumerate(shown):
             head.append(separator, style=MUTED)
             head.append(part, style="bold" if i == 0 else "")
 
         self.console.print()
         self.console.print(head, overflow="ellipsis", no_wrap=True)
-        self.console.print(Rule(style=MUTED, characters="\u2500"))
+        self.console.print(Rule(style=MUTED, characters=self.g.hbar))
 
     def clear(self) -> None:
         """Clear the screen and scrollback, so a session starts on a clean page.
@@ -180,7 +219,7 @@ class UI:
         return ".../" + "/".join(parts[-2:]) if len(parts) > 2 else path[-budget:]
 
     def rule(self, label: str = "") -> None:
-        self.console.print(Rule(label, style=MUTED))
+        self.console.print(Rule(label, style=MUTED, characters=self.g.hbar))
 
     # -- messages ----------------------------------------------------------
 
@@ -192,7 +231,8 @@ class UI:
 
     def error(self, message: str) -> None:
         self.console.print()
-        self.console.print(Panel(Text(message), title="error", border_style=BAD, padding=(0, 1)))
+        self.console.print(Panel(Text(message), title="error", border_style=BAD, box=self.box,
+                  padding=(0, 1)))
 
     def success(self, message: str) -> None:
         self.console.print(Text(f"  {self.g.tick} {message}", style=GOOD))
@@ -216,6 +256,7 @@ class UI:
                 title="thinking",
                 title_align="left",
                 border_style=MUTED,
+                box=self.box,
                 padding=(0, 1),
             )
         )
@@ -263,7 +304,7 @@ class UI:
                 body.append(line + "\n", style=ACCENT)
             else:
                 body.append(line + "\n", style=MUTED)
-        self.console.print(Panel(body, border_style=MUTED, padding=(0, 1)))
+        self.console.print(Panel(body, border_style=MUTED, box=self.box, padding=(0, 1)))
 
     def todos(self, rendered: str) -> None:
         if not rendered.strip():
@@ -276,7 +317,8 @@ class UI:
                 body.append(line + "\n", style=f"bold {ACCENT}")
             else:
                 body.append(line + "\n")
-        self.console.print(Panel(body, title="plan", title_align="left", border_style=MUTED, padding=(0, 1)))
+        self.console.print(Panel(body, title="plan", title_align="left", border_style=MUTED,
+                  box=self.box, padding=(0, 1)))
 
     def code(self, text: str, language: str = "text") -> None:
         self.console.print(Syntax(text, language, theme=self.code_theme, word_wrap=True))
@@ -343,7 +385,8 @@ class UI:
             self.console.print()
             return
 
-        table = Table(title=title or None, border_style=MUTED, title_style=f"bold {ACCENT}")
+        table = Table(title=title or None, border_style=MUTED, box=self.box,
+                      title_style=f"bold {ACCENT}")
         for column in columns:
             table.add_column(column)
         for row in rows:
@@ -351,16 +394,29 @@ class UI:
         self.console.print(table)
 
     def stats(self, usage, elapsed: float, effort: str, context_pct: float) -> None:
+        speed = usage.tokens_per_second()
         bits = [
             f"{effort}",
             f"{usage.completion_tokens} tok",
-            f"{usage.tokens_per_second():.0f} tok/s" if usage.tokens_per_second() else "",
+            f"{speed:.0f} tok/s" if speed else "",
             f"{elapsed:.1f}s",
             f"ctx {context_pct:.0f}%",
         ]
-        self.console.print(
-            Text("  " + f" {self.g.dot} ".join(b for b in bits if b), style=MUTED)
-        )
+        bits = [b for b in bits if b]
+
+        # Narrow terminals get the short version rather than a wrapped line.
+        # Effort and context also sit in the pinned bar, so they go first.
+        sep = f" {self.g.dot} "
+
+        def line(parts):
+            return "  " + sep.join(parts)
+
+        for drop in (f"{effort}", f"ctx {context_pct:.0f}%", f"{speed:.0f} tok/s"):
+            if len(line(bits)) <= self.width:
+                break
+            if drop in bits:
+                bits.remove(drop)
+        self.console.print(Text(line(bits), style=MUTED))
 
 
 class CodeStreamer:

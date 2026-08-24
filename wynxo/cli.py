@@ -33,7 +33,7 @@ from .keys import KeyWatcher, describe_bindings
 from .journal import Journal, recent as recent_logs
 from .memory import Memory
 from .pet import Mood, Pet
-from .select import choose, supported as arrows_supported
+from .select import HINT, HINT_ASCII, choose, supported as arrows_supported
 from .scope import Mode, Scope, resolve as resolve_scope
 from .status import Status, WARN
 from .tools import build_registry
@@ -441,7 +441,8 @@ class Repl:
             self.ui.console.print(
                 Text("  ") + Text(self.pet.face(advance=False),
                                   style=f"bold {self.pet.style()}")
-                + Text(f"  {self.pet.name} — {self.pet.remark('greet')}", style=MUTED))
+                + Text(f"  {self.pet.name} {self.ui.g.dot} "
+                       f"{self.pet.remark('greet')}", style=MUTED))
             self.ui.console.print()
         return True
 
@@ -493,7 +494,7 @@ class Repl:
 
         bar = ActivityBar(self.ui, self.policy.name, describe_bindings(LIVE_KEYS),
                           model=self.config.model, pet=self.pet)
-        bar.queued = self.pending.preview()
+        bar.queued = self.pending.preview(ellipsis=self.ui.g.ellipsis)
         used = self.agent.session.token_estimate()
         limit = self.policy.context_budget or self.config.num_ctx
         bar.context_pct = 100 * used / max(1, limit)
@@ -502,7 +503,7 @@ class Repl:
         def typed(char: str) -> None:
             """A keystroke that no binding claimed, while a turn is running."""
             self.pending.key(char)
-            bar.queued = self.pending.preview()
+            bar.queued = self.pending.preview(ellipsis=self.ui.g.ellipsis)
             bar.refresh()
 
         watcher = KeyWatcher(
@@ -568,13 +569,16 @@ class Repl:
 
         Re-evaluated on every redraw, so a mid-prompt Ctrl-E shows up at once.
         """
-        return HTML('<ansicyan>\u2502</ansicyan> <b><ansicyan>&gt;</ansicyan></b> ')
+        edge = self.ui.g.vbar
+        return HTML(
+            '<ansicyan>%s</ansicyan> <b><ansicyan>&gt;</ansicyan></b> ' % edge)
 
     def _open_box(self) -> None:
         """Top edge of the input box, printed just before the prompt."""
+        g = self.ui.g
         width = max(24, self.ui.width)
         self.ui.console.print(
-            Text("\u256d" + "\u2500" * (width - 2) + "\u256e", style=ACCENT))
+            Text(g.tl + g.hbar * (width - 2) + g.tr, style=ACCENT))
 
     def _bottom_toolbar(self):
         """The closing edge of the input box, with the status set into it.
@@ -585,14 +589,15 @@ class Repl:
         """
         from rich.cells import cell_len
 
+        g = self.ui.g
         width = max(30, self.ui.width)
         left = self._status_line()
         hint = "^O thinking   ^C stop"
 
-        # "╰─ " + status + " " + fill + " " + hint + " ─╯"
+        # "<bl><hbar> " + status + " " + fill + " " + hint + " <hbar><br>"
         def total(status: str, tail: str, fill: int) -> int:
             head = 3 + cell_len(status) + 1 + fill
-            return head + (1 + len(tail) + 2 if tail else 1)
+            return head + (1 + cell_len(tail) + 3 if tail else 1)
 
         if total(left, hint, 1) > width:
             hint = ""
@@ -601,10 +606,10 @@ class Repl:
         fill = max(1, width - total(left, hint, 0))
 
         cyan, dim, reset = "\x1b[36m", "\x1b[38;5;247m", "\x1b[0m"
-        line = f"{cyan}\u2570\u2500{reset} {dim}{left}{reset} {cyan}" + "\u2500" * fill
+        line = f"{cyan}{g.bl}{g.hbar}{reset} {dim}{left}{reset} {cyan}" + g.hbar * fill
         if hint:
-            line += f"{reset} {dim}{hint}{reset} {cyan}\u2500"
-        line += f"\u256f{reset}"
+            line += f"{reset} {dim}{hint}{reset} {cyan}{g.hbar}"
+        line += f"{g.br}{reset}"
         return ANSI(line)
 
     def _border_plain(self) -> str:
@@ -635,7 +640,7 @@ class Repl:
         if self.agent.permissions.mode is not Mode.MANUAL:
             pieces.append(self.agent.permissions.mode.value)
 
-        return "  ·  ".join(pieces)
+        return f"  {self.ui.g.dot}  ".join(pieces)
 
     async def _drain_queue(self) -> bool:
         """Run whatever was typed during the turn, oldest first.
@@ -864,7 +869,7 @@ class Repl:
             chosen = await choose(
                 [_model_choice(m) for m in models],
                 default=current,
-                footer="↑↓ move   enter select   1-9 jump   esc cancel",
+                footer=HINT if self.ui.g.unicode else HINT_ASCII,
                 width=self.ui.width,
                 unicode=self.ui.g.unicode,
             )
@@ -912,7 +917,8 @@ class Repl:
                  for e in self.config.endpoints],
                 title="ollama servers",
             )
-            self.ui.info("/endpoint add <url> · /endpoint use <name> · /endpoint test")
+            dot = self.ui.g.dot
+            self.ui.info(f"/endpoint add <url> {dot} /endpoint use <name> {dot} /endpoint test")
             return True
 
         if action == "test":
@@ -1035,7 +1041,7 @@ class Repl:
                              f"on {current}")
             else:
                 self.ui.info("not a git checkout")
-            self.ui.info("/repo owner/name  ·  /repo <url>")
+            self.ui.info(f"/repo owner/name  {self.ui.g.dot}  /repo <url>")
             return True
 
         if not repo_module.git_available():
@@ -1204,11 +1210,12 @@ class Repl:
             return True
 
         if not self.journal.enabled or self.journal.path is None:
-            self.ui.info("logging is off  ·  /log on to enable it")
+            self.ui.info(f"logging is off  {self.ui.g.dot}  /log on to enable it")
             return True
         self.ui.info(f"{self.journal.path}")
-        self.ui.info(f"{self.journal.size() // 1024}KB  ·  /log tail  ·  "
-                     f"/log list  ·  /log off")
+        dot = self.ui.g.dot
+        self.ui.info(f"{self.journal.size() // 1024}KB  {dot}  /log tail  {dot}  "
+                     f"/log list  {dot}  /log off")
         return True
 
     def cmd_pet(self, args: list[str]) -> bool:
@@ -1227,7 +1234,7 @@ class Repl:
             self.ui.info(f"name: {self.pet.name}   voice: {self.config.voice}   "
                          f"{'on' if self.pet.enabled else 'off'}"
                          f"{'' if self.pet.animate else ', still'}")
-            self.ui.info("/pet off · /pet name <x> · /pet voice "
+            self.ui.info(f"/pet off {self.ui.g.dot} /pet name <x> {self.ui.g.dot} /pet voice "
                          + " | ".join(VOICES))
             return True
 
