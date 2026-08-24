@@ -330,6 +330,8 @@ def _close_unbalanced(text: str) -> str | None:
 
 def _normalise_call(payload: dict, raw: str, index: int) -> ToolCall | None:
     """Accept the several shapes models use to name a tool and its args."""
+    if not isinstance(payload, dict):
+        return None       # not a call at all; the caller records it as malformed
     # OpenAI-ish nesting: {"function": {"name": ..., "arguments": ...}}
     if "function" in payload and isinstance(payload["function"], dict):
         inner = payload["function"]

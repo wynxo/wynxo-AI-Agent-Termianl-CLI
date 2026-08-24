@@ -314,3 +314,68 @@ class TestLiveFilterPrefill:
         filt = LiveContentFilter()
         assert self.feed_all(filt, "a plain answer")
         assert filt.emitted_any is True
+
+
+class TestAServerThatSendsTheWrongShapes:
+    """wynxo does not only talk to Ollama.
+
+    llama.cpp's server, LM Studio and various OpenAI-compat shims all answer
+    /api/chat, and they disagree about what goes in each field. A mistyped
+    one used to travel inland and die as an AttributeError partway through a
+    turn -- which reads as wynxo crashing, not as a peculiar server.
+    """
+
+    def test_reasoning_sent_as_an_object_still_reaches_the_user(self):
+        from wynxo.provider import OllamaClient
+
+        chunk = OllamaClient._to_chunk(
+            {"message": {"reasoning": {"text": "let me think"}}})
+        assert chunk.thinking == "let me think"
+
+    def test_reasoning_sent_as_a_list_is_joined(self):
+        from wynxo.provider import OllamaClient
+
+        chunk = OllamaClient._to_chunk(
+            {"message": {"thinking": ["one ", "two"]}})
+        assert chunk.thinking == "one two"
+
+    def test_a_missing_message_is_an_empty_chunk_not_a_crash(self):
+        from wynxo.provider import OllamaClient
+
+        for message in (None, [], "nonsense", 0):
+            chunk = OllamaClient._to_chunk({"message": message})
+            assert chunk.content == "" and chunk.thinking == ""
+
+    def test_counts_sent_as_strings_still_count(self):
+        from wynxo.provider import OllamaClient
+
+        chunk = OllamaClient._to_chunk(
+            {"eval_count": "128", "prompt_eval_count": 64.0})
+        assert chunk.completion_tokens == 128
+        assert chunk.prompt_tokens == 64
+
+    def test_an_unparseable_count_is_zero_rather_than_fatal(self):
+        from wynxo.provider import OllamaClient
+
+        chunk = OllamaClient._to_chunk({"eval_count": "lots"})
+        assert chunk.completion_tokens == 0
+
+    def test_a_single_tool_call_sent_unwrapped_is_still_a_call(self):
+        from wynxo.provider import OllamaClient
+
+        chunk = OllamaClient._to_chunk({"message": {"tool_calls": {
+            "function": {"name": "read_file", "arguments": {"path": "a.py"}}}}})
+        assert len(chunk.tool_calls) == 1
+
+    def test_junk_among_the_tool_calls_is_dropped_not_carried(self):
+        from wynxo.provider import OllamaClient
+
+        chunk = OllamaClient._to_chunk({"message": {"tool_calls": [
+            "oops", None, {"function": {"name": "shell", "arguments": {}}}]}})
+        assert len(chunk.tool_calls) == 1
+
+    def test_a_non_dict_tool_call_is_refused_rather_than_raising(self):
+        from wynxo.parsing import _normalise_call
+
+        for junk in ("a string", None, [], 7):
+            assert _normalise_call(junk, "raw", 0) is None
