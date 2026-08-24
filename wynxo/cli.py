@@ -119,6 +119,8 @@ COMMANDS = {
     "/tools": "list the tools the agent can call",
     "/pet": "the companion: on | off | name <x> | voice <x>",
     "/theme": "colour palette: purple | midnight | ember | plain",
+    "/speak": "read answers out loud: on | off | test | engine <name>",
+    "/talker": "small model that does the talking: <model> | off",
     "/log": "where this session is being recorded",
     "/mode": "plan | manual | auto | yolo -- how much it asks first",
     "/scope": "folder | repo | machine, or a path to work in",
@@ -334,6 +336,23 @@ class Repl:
         )
         self.pet.style_name = "kawaii" if config.voice == "kawaii" else "default"
 
+        # The talker speaks; the coder works. Constructed here so /talker can
+        # turn it on and off mid-session without rebuilding the agent.
+        from .duo import Talker
+        from .prompts import VOICES
+        from .speech import Speaker, pick as pick_engine
+
+        self.talker: Talker | None = None
+        if config.talker:
+            self.talker = Talker(self.client, config.talker,
+                                 voice_block=VOICES.get(config.voice, ""))
+
+        # Speech is opt-in and degrades to silence: a missing synthesiser is
+        # not a reason to refuse to start.
+        engine = pick_engine(config.speech_engine) if config.speak else None
+        self.speaker = Speaker(engine, voice=config.speech_voice,
+                               rate=config.speech_rate, model=config.speech_model)
+
         history_file = data_dir() / "history"
         history_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -528,6 +547,10 @@ class Repl:
         )
 
         self.callbacks.watcher = watcher
+        # The talker answers first: a 1B model is quick enough that the
+        # acknowledgement lands before the coder has produced a token.
+        if self.talker is not None:
+            await self._talk(await self.talker.opening(text))
         self._task = asyncio.ensure_future(self.agent.run(text))
         bar.start()
         watcher.start()
@@ -577,6 +600,36 @@ class Repl:
         )
         if result.compacted:
             self.ui.info("context was compacted during this turn")
+
+        await self._narrate(text, result)
+
+    async def _narrate(self, request: str, result) -> None:
+        """Have the talker say what the coder did, and speak it.
+
+        With no talker configured the coder's own answer is what gets read
+        out, so speech works on its own -- the two features are independent.
+        """
+        if self.talker is not None:
+            line = await self.talker.report(
+                request, "\n".join(result.errors) if result.errors else result.content,
+                failed=bool(result.errors))
+            if line:
+                await self._talk(line)
+                return
+            if self.talker.last_error:
+                self.ui.warn(f"talker: {self.talker.last_error}")
+        if result.content and not result.errors:
+            self.speaker.say(result.content)
+
+    async def _talk(self, line: str) -> None:
+        """Show one line from the talker, and say it out loud."""
+        if not line:
+            return
+        self.ui.console.print()
+        self.ui.console.print(
+            Text("  " + self.pet.face(advance=False) + "  ",
+                 style=f"bold {self.pet.style()}") + Text(line, style=ACCENT))
+        self.speaker.say(line)
 
     def _prompt_message(self) -> HTML:
         """The left edge of the input box.
@@ -693,6 +746,9 @@ class Repl:
         self.ui.info(f"effort: {self.policy.name} -- {self.policy.headline}")
 
     def interrupt(self) -> None:
+        # Silence her first: a voice still talking about the thing you just
+        # cancelled is the most annoying possible response to Ctrl-C.
+        self.speaker.stop()
         if self._task and not self._task.done():
             self._task.cancel()
 
@@ -806,6 +862,12 @@ class Repl:
 
         if name == "/theme":
             return self.cmd_theme(args)
+
+        if name == "/speak":
+            return self.cmd_speak(args)
+
+        if name == "/talker":
+            return self.cmd_talker(args)
 
         if name == "/log":
             return self.cmd_log(args)
@@ -1186,6 +1248,98 @@ class Repl:
             self.ui.success(message)
         return True
 
+    def cmd_speak(self, args: list[str]) -> bool:
+        """Turn the voice on and off, and say which synthesiser is doing it."""
+        from .speech import (Speaker, available, install_hint,
+                             pick as pick_engine)
+
+        action = args[0].lower() if args else "show"
+
+        if action in ("show", "status"):
+            self.ui.info(f"speech: {self.speaker.describe()}")
+            options = available()
+            if options:
+                self.ui.info("available: " + ", ".join(
+                    f"{e.name} ({e.quality})" for e in options))
+            else:
+                self.ui.warn("No speech synthesiser found on this machine.")
+                for line in install_hint().splitlines():
+                    self.ui.info(line)
+            return True
+
+        if action in ("on", "off"):
+            want = action == "on"
+            if want and self.speaker.engine is None:
+                engine = pick_engine(self.config.speech_engine)
+                if engine is None:
+                    self.ui.warn("No speech synthesiser found on this machine.")
+                    for line in install_hint().splitlines():
+                        self.ui.info(line)
+                    return True
+                self.speaker = Speaker(engine, voice=self.config.speech_voice,
+                                       rate=self.config.speech_rate,
+                                       model=self.config.speech_model)
+            self.speaker.enabled = want
+            if not want:
+                self.speaker.stop()
+            self.config.speak = want
+            self.ui.success(f"speech: {self.speaker.describe()}")
+            return True
+
+        if action == "test":
+            if not self.speaker.say("Hello. If you can hear this, the voice works."):
+                self.ui.warn("Nothing was said. " +
+                             (self.speaker.last_error or "Speech is off."))
+                return True
+            self.ui.success(f"spoke through {self.speaker.describe()}")
+            return True
+
+        if action in ("engine", "voice") and len(args) > 1:
+            if action == "engine":
+                engine = pick_engine(args[1])
+                if engine is None:
+                    self.ui.warn(f"{args[1]} is not available here.")
+                    return True
+                self.config.speech_engine = args[1]
+                self.speaker = Speaker(engine, voice=self.config.speech_voice,
+                                       rate=self.config.speech_rate,
+                                       model=self.config.speech_model)
+            else:
+                self.config.speech_voice = args[1]
+                self.speaker.voice = args[1]
+            self.speaker.enabled = self.config.speak
+            self.ui.success(f"speech: {self.speaker.describe()}")
+            return True
+
+        self.ui.info("/speak on | off | test | engine <name> | voice <name>")
+        return True
+
+    def cmd_talker(self, args: list[str]) -> bool:
+        """Set the small model that does the talking, or turn it off."""
+        from .duo import Talker
+        from .prompts import VOICES
+
+        if not args:
+            if self.talker is None:
+                self.ui.info("no talker -- one model does both jobs")
+                self.ui.info("/talker <model> to have a small one do the talking")
+            else:
+                self.ui.info(f"talker: {self.talker.model}   "
+                             f"coder: {self.config.model}")
+            return True
+
+        if args[0].lower() in ("off", "none"):
+            self.talker = None
+            self.config.talker = ""
+            self.ui.success("talker off -- one model does both jobs")
+            return True
+
+        self.config.talker = args[0]
+        self.talker = Talker(self.client, args[0],
+                             voice_block=VOICES.get(self.config.voice, ""))
+        self.ui.success(f"talker: {args[0]}   coder: {self.config.model}")
+        return True
+
     def cmd_theme(self, args: list[str]) -> bool:
         from . import theme as theme_module
 
@@ -1516,6 +1670,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-C", "--cwd", help="project directory (default: here)")
     parser.add_argument("--repo", metavar="OWNER/NAME",
                         help="clone a GitHub repository and work in it")
+    parser.add_argument("--talker", metavar="MODEL",
+                        help="small model that talks while the coder works")
+    parser.add_argument("--coder", metavar="MODEL",
+                        help="model that does the work when --talker is set")
+    parser.add_argument("--speak", action="store_true",
+                        help="read answers out loud")
+    parser.add_argument("--no-speak", action="store_true",
+                        help="stay quiet even if speech is on in the config")
     parser.add_argument("--setup", action="store_true", help="re-run first-time setup")
     parser.add_argument("--doctor", action="store_true",
                         help="check the server and model, and report what will not work")
@@ -1600,6 +1762,14 @@ async def amain(argv: list[str] | None = None) -> int:
         config.stream = False
     if args.no_thinking:
         config.show_thinking = False
+    if args.talker:
+        config.talker = args.talker
+    if args.coder:
+        config.coder = args.coder
+    if args.speak:
+        config.speak = True
+    if args.no_speak:
+        config.speak = False
     ui.show_thinking = config.show_thinking
 
     if args.doctor:

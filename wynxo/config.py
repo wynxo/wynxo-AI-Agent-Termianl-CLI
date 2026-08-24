@@ -85,6 +85,26 @@ class Config(Schema):
                           default=False)
     stream = Field(bool, "Stream responses as they are written.", default=True)
 
+    # -- talker / coder ----------------------------------------------------
+    talker = Field(str, "A small, fast model that does the talking while the "
+                        "main model codes. Empty means one model does both.",
+                   default="")
+    coder = Field(str, "Model that does the actual work when a talker is set. "
+                       "Empty means whatever `model` is.", default="")
+
+    # -- speech ------------------------------------------------------------
+    speak = Field(bool, "Read answers out loud. You type; she talks.",
+                  default=False)
+    speech_engine = Field(str, "Which synthesiser: auto, say, powershell, "
+                               "espeak-ng, termux, piper, flite, spd-say.",
+                          default="auto")
+    speech_voice = Field(str, "Engine-specific voice name. Empty picks a "
+                              "female default where the engine has one.",
+                         default="")
+    speech_rate = Field(int, "Speaking rate. 0 leaves the engine's default; "
+                             "the scale differs per engine.", default=0)
+    speech_model = Field(str, "Path to a piper .onnx voice model.", default="")
+
     def endpoint(self) -> Endpoint:
         for ep in self.endpoints:
             if ep.name == self.active_endpoint:
