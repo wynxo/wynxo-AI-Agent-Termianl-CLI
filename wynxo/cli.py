@@ -504,6 +504,7 @@ class Repl:
         limit = self.policy.context_budget or self.config.num_ctx
         bar.context_pct = 100 * used / max(1, limit)
         self.callbacks.bar = bar
+        self.ui.bar = bar
 
         def typed(char: str) -> None:
             """A keystroke that no binding claimed, while a turn is running."""
@@ -534,14 +535,17 @@ class Repl:
             return
         finally:
             # Order matters: the terminal must be restored before anything
-            # tries to read from it again.
+            # tries to read from it again, and any in-progress line has to be
+            # flushed to the real scrollback before the bar stops -- it is a
+            # transient Live, which erases its render area on stop, taking an
+            # unflushed line with it.
             watcher.stop()
+            self.callbacks._end_stream()
             bar.stop()
             self.callbacks.bar = None
+            self.ui.bar = None
             self.callbacks.watcher = None
             self._task = None
-
-        self.callbacks._end_stream()
 
         if result.errors:
             self.pet.react(Mood.SAD)

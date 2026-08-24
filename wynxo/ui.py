@@ -15,7 +15,7 @@ from typing import Iterable
 
 from rich.box import ASCII as ASCII_BOX, ROUNDED
 from rich.cells import cell_len
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -121,6 +121,10 @@ class UI:
             legacy_windows=False if sys.platform == "win32" else None,
         )
         self.g = Glyphs(_supports_unicode())
+        self.bar: "ActivityBar | None" = None
+        """The pinned bar, while a turn is running. Streamed text has
+        to be handed to it rather than written straight out, or its
+        repaint erases whatever landed on its row."""
         # rich's default panel box is Unicode; ASCII terminals need the
         # plain one or every border renders as question marks.
         self.box = ROUNDED if self.g.unicode else ASCII_BOX
@@ -446,6 +450,10 @@ class CodeStreamer:
         self.language = "text"
         self.started = False
         self.width = max(30, ui.width - len(indent) - 1)
+        self.line = Text()
+        """The line being written. While the activity bar is up this is the
+        bar's lead line rather than terminal output, so a partial line and a
+        repainting bar can share the screen."""
 
     # -- entry point -------------------------------------------------------
 
@@ -507,19 +515,39 @@ class CodeStreamer:
     # -- output ------------------------------------------------------------
 
     def _write(self, text: str) -> None:
+        """Add to the line in progress.
+
+        The activity bar is a rich Live: it repaints by erasing the rows it
+        owns, so anything written straight to the terminal on its row is gone
+        at the next repaint. That is how "Done, wrote out.txt." came out as
+        "out.txt." after a tool call, and why the two-space indent kept
+        vanishing from the first line of an answer.
+
+        So while the bar is up, a half-finished line lives *inside* it, as a
+        lead line drawn above the status strip. It still grows a word at a
+        time; it just grows somewhere the repaint can see. The moment the
+        line is complete it is printed normally and scrolls up out of the
+        live region like any other output.
+        """
         self._ensure_started()
-        if self.style:
-            self.ui.console.print(text, style=self.style, end="",
-                                  markup=False, highlight=False)
+        self.line.append(text, style=self.style or None)
+        self.column += cell_len(text)
+        if self.ui.bar is not None:
+            self.ui.bar.set_lead(self.line)
         else:
             self.ui.console.file.write(text)
             self.ui.console.file.flush()
-        self.column += len(text)
 
     def _newline(self) -> None:
         if self.started:
-            self.ui.console.file.write("\n")
-            self.ui.console.file.flush()
+            if self.ui.bar is not None:
+                self.ui.bar.set_lead(None)
+                self.ui.console.print(self.line, markup=False, highlight=False,
+                                      soft_wrap=True)
+            else:
+                self.ui.console.file.write("\n")
+                self.ui.console.file.flush()
+        self.line = Text()
         self.column = 0
 
     def _ensure_started(self) -> None:
@@ -600,6 +628,13 @@ class ActivityBar:
         self.context_pct = 0.0
         self.queued = ""
         """What the user is typing, or how many messages are waiting."""
+        self.lead: Text | None = None
+        """A half-written line of the answer, drawn just above the strip.
+
+        Streamed prose cannot be written to the terminal while the bar owns
+        that row -- the next repaint erases it. Carrying the partial line
+        inside the live region instead lets the answer arrive a word at a
+        time without fighting the bar for the same cells."""
         self.started = time.monotonic()
         self._live: Live | None = None
         self._frame = 0
@@ -685,7 +720,7 @@ class ActivityBar:
     def start(self) -> None:
         if not self.ui.console.is_terminal:
             return
-        self._live = Live(self._render(), console=self.ui.console,
+        self._live = Live(self._renderable(), console=self.ui.console,
                           refresh_per_second=12, transient=True)
         self._live.start()
 
@@ -709,9 +744,21 @@ class ActivityBar:
         self.tokens += count
         self.refresh()
 
+    def set_lead(self, line: Text | None) -> None:
+        """Show (or clear) the line of the answer currently being written."""
+        self.lead = line
+        self.refresh()
+
     def refresh(self) -> None:
         if self._live is not None:
-            self._live.update(self._render())
+            self._live.update(self._renderable())
+
+    def _renderable(self):
+        """The bar, with the in-progress line of the answer above it."""
+        bar = self._render()
+        if self.lead is None or not self.lead.plain:
+            return bar
+        return Group(self.lead, bar)
 
     def stop(self) -> None:
         live, self._live = self._live, None
