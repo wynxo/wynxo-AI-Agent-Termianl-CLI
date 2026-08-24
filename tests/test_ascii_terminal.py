@@ -368,3 +368,146 @@ class TestEffortSurge:
         stream = capture(ui)
         await surge(ui, "ULTRA", "bold")
         assert stream.getvalue() == ""
+
+
+class TestActivityAnimation:
+    """A static word next to a spinner still reads as stalled -- the spinner
+    turns whether or not anything is happening."""
+
+    def bar(self, activity="thinking", unicode_ok=True, animate=True):
+        from wynxo.ui import ActivityBar, Glyphs
+
+        ui = UI()
+        ui.g = Glyphs(unicode_ok)
+        ui.width = 70
+        b = ActivityBar(ui, "medium")
+        b.activity = activity
+        b.animate = animate
+        return b
+
+    def test_the_label_changes_between_frames(self):
+        bar = self.bar()
+        seen = set()
+        for frame in range(12):
+            bar._frame = frame
+            seen.add(bar._activity_text().plain)
+        assert len(seen) > 1, "the label never moves"
+
+    def test_the_word_itself_is_always_intact(self):
+        """Animating must not eat characters out of the word."""
+        bar = self.bar()
+        for frame in range(20):
+            bar._frame = frame
+            assert bar._activity_text().plain.startswith("thinking")
+
+    def test_the_label_is_a_fixed_width_so_the_bar_does_not_jitter(self):
+        from rich.cells import cell_len
+
+        bar = self.bar()
+        widths = set()
+        for frame in range(20):
+            bar._frame = frame
+            widths.add(cell_len(bar._activity_text().plain))
+        assert len(widths) == 1, f"width wobbles: {widths}"
+
+    def test_only_thinking_gets_the_dots(self):
+        bar = self.bar(activity="writing")
+        bar._frame = 9
+        assert bar._activity_text().plain == "writing"
+
+    def test_animations_off_means_a_still_label(self):
+        bar = self.bar(animate=False)
+        frames = {bar._activity_text().plain for bar._frame in range(12)}
+        assert frames == {"thinking"}
+
+    def test_ascii_terminals_get_the_plain_word(self):
+        bar = self.bar(unicode_ok=False)
+        for frame in range(12):
+            bar._frame = frame
+            assert bar._activity_text().plain == "thinking"
+
+    def test_an_empty_activity_is_survivable(self):
+        bar = self.bar(activity="")
+        assert bar._activity_text().plain == ""
+
+
+class TestCodeStreamsLive:
+    """Watching a function appear a whole line at a time is the thing this
+    exists to avoid."""
+
+    def setup_streamer(self):
+        from wynxo.ui import ActivityBar, CodeStreamer
+
+        ui = UI()
+        ui.width = 70
+        bar = ActivityBar(ui, "medium")
+        ui.bar = bar
+        leads = []
+        bar.set_lead = lambda line: leads.append(line.plain if line else None)
+        return CodeStreamer(ui), leads
+
+    ANSWER = "Here:\n\n```python\ndef check(t):\n    return len(t) > 10\n```\n\nDone."
+
+    def test_a_code_line_grows_a_character_at_a_time(self):
+        streamer, leads = self.setup_streamer()
+        for char in self.ANSWER:
+            streamer.feed(char)
+        streamer.finish()
+
+        growing = [l for l in leads if l and "def check" in l]
+        assert len(growing) > 3, f"only {len(growing)} states: {growing}"
+        assert any(l.strip() == "def c" for l in leads if l)
+
+    def test_the_finished_block_is_still_correct(self):
+        streamer, _ = self.setup_streamer()
+        stream = capture(streamer.ui)
+        for char in self.ANSWER:
+            streamer.feed(char)
+        streamer.finish()
+        out = stream.getvalue()
+        assert "def check(t):" in out
+        assert "return len(t) > 10" in out
+        assert "```" not in out, "the fence must not reach the screen"
+
+    def test_the_fence_is_never_shown_half_written(self):
+        streamer, leads = self.setup_streamer()
+        for char in self.ANSWER:
+            streamer.feed(char)
+        streamer.finish()
+        for lead in leads:
+            if lead:
+                assert "`" not in lead, f"a backtick leaked: {lead!r}"
+
+    def test_prose_still_streams_by_word(self):
+        """Code goes character by character; prose by word, so a word never
+        appears split in half."""
+        streamer, _ = self.setup_streamer()
+        stream = capture(streamer.ui)
+        for char in "The quick brown fox jumps over it.\n":
+            streamer.feed(char)
+        streamer.finish()
+        assert "quick brown fox" in stream.getvalue()
+
+    def test_a_half_written_code_line_is_not_lost_at_the_end(self):
+        """A response cut off mid-line must still show what arrived."""
+        streamer, _ = self.setup_streamer()
+        stream = capture(streamer.ui)
+        for char in "```python\ndef check(t):\n    return len(":
+            streamer.feed(char)
+        streamer.finish()
+        assert "return len(" in stream.getvalue()
+
+    def test_no_bar_means_the_old_line_at_a_time_behaviour(self):
+        """Nothing pinned means nowhere to redraw, so waiting for the
+        newline is correct rather than a regression."""
+        from wynxo.ui import CodeStreamer
+
+        ui = UI()
+        ui.width = 70
+        ui.bar = None
+        streamer = CodeStreamer(ui)
+        stream = capture(ui)
+        for char in self.ANSWER:
+            streamer.feed(char)
+        streamer.finish()
+        assert "def check(t):" in stream.getvalue()

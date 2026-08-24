@@ -356,12 +356,16 @@ class UI:
     def code(self, text: str, language: str = "text") -> None:
         self.console.print(Syntax(text, language, theme=self.code_theme, word_wrap=True))
 
-    def code_line(self, line: str, language: str = "text",
-                  indent: str = "  ") -> None:
-        """One highlighted line, indented, with no block chrome.
+    def highlight(self, line: str, language: str = "text") -> Text:
+        """One line, syntax-highlighted, with no block chrome.
 
         Syntax() would draw its own background band per line and stack into a
         ragged column, so the lexer is used directly instead.
+
+        Safe on a half-written line: pygments will mis-lex an unterminated
+        string or a keyword that is still being typed, and both correct
+        themselves on the next character. That is the price of showing code
+        as it arrives rather than a line at a time.
         """
         try:
             rendered = Text.from_ansi(line) if "\x1b" in line else Text(line)
@@ -377,7 +381,12 @@ class UI:
                         rendered.append(value, style=self._token_style(token))
         except Exception:
             rendered = Text(line)
-        self.console.print(Text(indent) + rendered, highlight=False)
+        return rendered
+
+    def code_line(self, line: str, language: str = "text",
+                  indent: str = "  ") -> None:
+        self.console.print(Text(indent) + self.highlight(line, language),
+                           highlight=False)
 
     def _token_style(self, token) -> str:
         from pygments.token import (Comment, Error, Keyword, Name, Number,
@@ -479,6 +488,8 @@ class CodeStreamer:
         self.language = "text"
         self.started = False
         self.width = max(30, ui.width - len(indent) - 1)
+        self.partial = ""
+        """The half-written code line, while inside a fence."""
         self.line = Text()
         """The line being written. While the activity bar is up this is the
         bar's lead line rather than terminal output, so a partial line and a
@@ -494,14 +505,44 @@ class CodeStreamer:
                 self._segment(self.buffer[:newline], end_of_line=True)
                 self.buffer = self.buffer[newline + 1:]
                 continue
-            # No newline yet. Emit whole words and hold the partial one, so a
-            # word never appears split across a flush.
+
+            # Inside a fence, show every character as it lands. Waiting for a
+            # word boundary is wrong for code -- half of it has no spaces,
+            # and watching a function appear a whole line at a time is the
+            # thing this exists to avoid.
+            if self.in_code:
+                held = self._held_fence_length()
+                if held >= len(self.buffer):
+                    return
+                self._segment(self.buffer[:len(self.buffer) - held],
+                              end_of_line=False)
+                self.buffer = self.buffer[len(self.buffer) - held:]
+                return
+
+            # Prose: emit whole words and hold the partial one, so a word
+            # never appears split across a flush.
             space = self.buffer.rfind(" ")
             if space == -1:
                 return
             self._segment(self.buffer[: space + 1], end_of_line=False)
             self.buffer = self.buffer[space + 1:]
             return
+
+    def _held_fence_length(self) -> int:
+        """How much of the tail could still grow into a closing ``` fence.
+
+        Only at the start of a line: a backtick mid-expression is not a
+        fence, and holding it back would stall the stream on it.
+        """
+        if self.partial.strip():
+            return 0
+        tail = self.buffer[-3:]
+        for size in (3, 2, 1):
+            if len(tail) >= size and "```".startswith(tail[-size:]) \
+                    and tail[-size:] == self.buffer[-size:]:
+                if self.buffer[-size:] == "`" * size:
+                    return size
+        return 0
 
     # -- the two modes -----------------------------------------------------
 
@@ -514,20 +555,48 @@ class CodeStreamer:
             self._newline()
 
     def _code_segment(self, text: str, end_of_line: bool) -> None:
-        # Fences only ever matter on a complete line.
         if not end_of_line:
-            self.buffer = text + self.buffer
+            # A fence can only open or close on a whole line, so a partial
+            # one waits; anything else is code being written right now.
+            if not self.partial.strip() and text.lstrip().startswith("```"):
+                self.buffer = text + self.buffer
+                return
+            self.partial += text
+            self._show_partial()
             return
-        if text.lstrip().startswith("```"):
+
+        whole = self.partial + text
+        self.partial = ""
+        if whole.lstrip().startswith("```"):
+            self._clear_partial()
             if self.in_code:
                 self.in_code = False
             else:
                 self.in_code = True
-                self.language = _language(text.lstrip()[3:].strip())
+                self.language = _language(whole.lstrip()[3:].strip())
                 self._ensure_started()
             return
         self._ensure_started()
-        self.ui.code_line(text, self.language, indent=self.indent + "  ")
+        self._clear_partial()
+        self.ui.code_line(whole, self.language, indent=self.indent + "  ")
+
+    def _show_partial(self) -> None:
+        """Put the half-written line in the live region, highlighted.
+
+        The bar redraws in place, so the line can grow a character at a time
+        without each version being left behind in the scrollback. Without a
+        bar there is nowhere to redraw, so the line waits for its newline --
+        the old behaviour, which is correct when nothing is pinned.
+        """
+        if self.ui.bar is None:
+            return
+        line = Text(self.indent + "  ")
+        line.append_text(self.ui.highlight(self.partial, self.language))
+        self.ui.bar.set_lead(line)
+
+    def _clear_partial(self) -> None:
+        if self.ui.bar is not None:
+            self.ui.bar.set_lead(None)
 
     def _prose(self, text: str) -> None:
         for word in _words(text):
@@ -585,7 +654,7 @@ class CodeStreamer:
             self.started = True
 
     def finish(self) -> str:
-        if self.buffer:
+        if self.buffer or self.partial:
             self._segment(self.buffer, end_of_line=True)
             self.buffer = ""
         if self.column:
@@ -729,6 +798,9 @@ class ActivityBar:
         self.context_pct = 0.0
         self.queued = ""
         """What the user is typing, or how many messages are waiting."""
+        self.animate = True
+        """Off means a still bar: no sweep, no dots. Follows the same
+        setting the companion's animation does."""
         self.plan: str = ""
         """The current todo list, rendered. Held in the live region and
         redrawn in place, rather than printed again on every update -- the
@@ -764,6 +836,45 @@ class ActivityBar:
         """
         return effort_meter(self.effort, self.ui.g.unicode)
 
+    THINKING_DOTS = 4
+    """Cycle length for the trailing dots. Four reads as a rhythm; more
+    looks like the line is loading rather than the model is working."""
+
+    def _activity_text(self) -> Text:
+        """The activity word, with a highlight travelling through it.
+
+        A static word next to a spinner still reads as stalled -- the spinner
+        turns whether or not anything is happening. Moving the emphasis
+        through the word itself is a second, independent sign of life, and it
+        costs one Text per frame.
+        """
+        word = self.activity
+        out = Text(style=BAR_STYLE)
+        if not word:
+            return out
+
+        if not self.ui.g.unicode or not self.animate:
+            out.append(word, style="bold")
+            return out
+
+        # One bright cell sweeping left to right, with a lit tail behind it.
+        span = len(word) + 6
+        head = self._frame % span
+        for index, char in enumerate(word):
+            distance = head - index
+            if distance == 0:
+                out.append(char, style=f"bold {BAR_ACCENT}")
+            elif 0 < distance <= 2:
+                out.append(char, style="bold")
+            else:
+                out.append(char, style=BAR_DIM if distance < 0 else "bold")
+
+        if word == "thinking":
+            dots = (self._frame // 3) % (self.THINKING_DOTS + 1)
+            out.append(self.ui.g.dot * dots, style=BAR_ACCENT)
+            out.append(" " * (self.THINKING_DOTS - dots))
+        return out
+
     def _segments(self) -> list[tuple[str, str]]:
         """(text, style) pairs, most important first, for a fit-aware build."""
         out: list[tuple[str, str]] = []
@@ -790,7 +901,7 @@ class ActivityBar:
             frames = self.SPINNER if self.ui.g.unicode else self.SPINNER_ASCII
             left.append(f" {frames[self._frame % len(frames)]} ",
                         style=f"bold {BAR_ACCENT}")
-        left.append(self.activity, style="bold")
+        left.append_text(self._activity_text())
         if self.queued:
             # What you are typing beats what the agent is doing: you need to
             # see your own keystrokes, and the detail is still one line up.

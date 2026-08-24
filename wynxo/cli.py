@@ -646,6 +646,7 @@ class Repl:
 
         bar = ActivityBar(self.ui, self.policy.name, describe_bindings(LIVE_KEYS),
                           model=self.config.model, pet=self.pet)
+        bar.animate = self.config.animations
         bar.queued = self.pending.preview(ellipsis=self.ui.g.ellipsis)
         used = self.agent.session.token_estimate()
         limit = self.policy.context_budget or self.config.num_ctx
