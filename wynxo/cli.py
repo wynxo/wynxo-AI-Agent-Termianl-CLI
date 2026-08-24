@@ -252,11 +252,18 @@ class TerminalCallbacks(Callbacks):
         self._end_stream()
         if self.bar is not None:
             self.bar.update(activity=_ACTIVITY.get(name, name), detail=summary)
+            if name == "todo_write":
+                return       # the pinned plan is the announcement
         self.ui.tool_start(name, summary)
 
     async def on_tool_result(self, name: str, ok: bool, display: str, output: str) -> None:
         if self.journal is not None:
             self.journal.tool_result(name, ok, output)
+        # The pinned plan already shows every step and its state, so a result
+        # line per todo_write is the same information a second time -- and it
+        # scrolls, which is exactly what pinning the panel was meant to stop.
+        if name == "todo_write" and ok and self.bar is not None:
+            return
         if self.verbose_tools and output.strip():
             self.ui.tool_result(name, ok, "", "")
             self.ui.code(output[:4000], _LANGUAGE.get(name, "text"))
@@ -264,7 +271,19 @@ class TerminalCallbacks(Callbacks):
             self.ui.tool_result(name, ok, display, output)
 
     async def on_todos(self, rendered: str) -> None:
-        self.ui.todos(rendered)
+        """Pin the plan in the live region rather than printing it again.
+
+        It used to print a fresh panel on every update, so a five-step plan
+        left five panels in the scrollback and the current one was whichever
+        had scrolled past last. Now there is one, it is redrawn in place, and
+        it ticks itself off and leaves when the work is done.
+        """
+        if self.bar is None:
+            self.ui.todos(rendered)      # non-interactive: print it once
+            return
+        self.bar.set_plan(rendered)
+        if self.bar.plan_is_complete():
+            await self.bar.finish_plan()
 
     async def on_warning(self, message: str) -> None:
         self._end_stream()

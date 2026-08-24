@@ -8,6 +8,7 @@ checked against the active encoding at startup.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import sys
 import time
@@ -696,6 +697,12 @@ class ActivityBar:
         self.context_pct = 0.0
         self.queued = ""
         """What the user is typing, or how many messages are waiting."""
+        self.plan: str = ""
+        """The current todo list, rendered. Held in the live region and
+        redrawn in place, rather than printed again on every update -- the
+        plan is one thing that changes, not a stream of panels."""
+        self.plan_done_frame = 0
+        """Non-zero while the completion animation is playing."""
         self.lead: Text | None = None
         """A half-written line of the answer, drawn just above the strip.
 
@@ -821,6 +828,70 @@ class ActivityBar:
         self.tokens += count
         self.refresh()
 
+    PLAN_DONE_FRAMES = 8
+    """Long enough to register at 12fps, short enough not to be in the way."""
+
+    def set_plan(self, rendered: str) -> None:
+        self.plan = rendered or ""
+        self.plan_done_frame = 0
+        self.refresh()
+
+    def plan_is_complete(self) -> bool:
+        """Every line ticked, and there was at least one."""
+        lines = [ln for ln in self.plan.splitlines() if ln.strip()]
+        steps = [ln for ln in lines if ln.lstrip().startswith(("[ ]", "[>]", "[x]"))]
+        return bool(steps) and all(ln.lstrip().startswith("[x]") for ln in steps)
+
+    async def finish_plan(self) -> None:
+        """Tick the whole plan, hold it for a beat, then take it away.
+
+        The point is to show the thing completing rather than having it
+        vanish between frames -- a plan that simply disappears reads as
+        having been abandoned.
+        """
+        if not self.plan:
+            return
+        for frame in range(1, self.PLAN_DONE_FRAMES + 1):
+            self.plan_done_frame = frame
+            self.refresh()
+            await asyncio.sleep(0.06)
+        self.plan = ""
+        self.plan_done_frame = 0
+        self.refresh()
+
+    def _plan_panel(self):
+        """The pinned plan, or None when there is nothing to show."""
+        if not self.plan:
+            return None
+        g = self.ui.g
+        body = Text()
+        lines = [ln for ln in self.plan.splitlines() if ln.strip()]
+        for line in lines:
+            stripped = line.lstrip()
+            if self.plan_done_frame or stripped.startswith("[x]"):
+                body.append(f" {g.tick} ", style=GOOD)
+                body.append(stripped[3:].strip() + "\n", style=f"{MUTED} strike")
+            elif stripped.startswith("[>]"):
+                body.append(f" {g.gear} ", style=f"bold {ACCENT}")
+                body.append(stripped[3:].strip() + "\n", style=f"bold {ACCENT}")
+            else:
+                body.append("   ")
+                body.append(stripped[3:].strip() + "\n" if stripped.startswith("[ ]")
+                            else stripped + "\n", style=MUTED)
+
+        body.rstrip()
+        done = sum(1 for ln in lines if ln.lstrip().startswith("[x]"))
+        total = len(lines)
+        if self.plan_done_frame:
+            done = total
+        title = f"plan  {done}/{total}"
+        # The completion frames pulse the border so the tick registers.
+        border = GOOD if self.plan_done_frame else ACCENT
+        if self.plan_done_frame and self.plan_done_frame % 2 == 0:
+            border = ACCENT
+        return Panel(body, title=title, title_align="left", border_style=border,
+                     box=self.ui.box, padding=(0, 1))
+
     def set_lead(self, line: Text | None) -> None:
         """Show (or clear) the line of the answer currently being written."""
         self.lead = line
@@ -834,11 +905,15 @@ class ActivityBar:
             self._live.refresh()
 
     def _renderable(self):
-        """The bar, with the in-progress line of the answer above it."""
-        bar = self._render()
-        if self.lead is None or not self.lead.plain:
-            return bar
-        return Group(self.lead, bar)
+        """The pinned block: plan on top, then the line being written, then
+        the status strip. Everything here is redrawn in place."""
+        parts = []
+        if (panel := self._plan_panel()) is not None:
+            parts.append(panel)
+        if self.lead is not None and self.lead.plain:
+            parts.append(self.lead)
+        parts.append(self._render())
+        return parts[0] if len(parts) == 1 else Group(*parts)
 
     def __rich_console__(self, console, options):
         """Re-render on every refresh, not just when something calls update().

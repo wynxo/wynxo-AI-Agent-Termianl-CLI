@@ -231,3 +231,80 @@ class TestCprWarning:
 
         source = inspect.getsource(cli.Repl.__init__)
         assert "silence_cpr_warning(self.prompt_session.app)" in source
+
+
+class TestPinnedPlan:
+    """The plan is one thing that changes, not a stream of panels. It used
+    to print a fresh one on every update, so a five-step plan left five in
+    the scrollback and the current one was whichever scrolled past last."""
+
+    def bar(self, width=80, unicode_ok=True):
+        from wynxo.ui import ActivityBar, Glyphs
+
+        ui = UI()
+        ui.g = Glyphs(unicode_ok)
+        ui.box = ROUNDED if unicode_ok else ASCII_BOX
+        ui.width = width
+        return ActivityBar(ui, "medium")
+
+    PLAN = "[x] read the config\n[>] add the retry\n[ ] cover it with a test"
+
+    def test_no_plan_means_no_panel(self):
+        assert self.bar()._plan_panel() is None
+
+    def test_the_panel_counts_what_is_done(self):
+        bar = self.bar()
+        bar.set_plan(self.PLAN)
+        assert "1/3" in bar._plan_panel().title
+
+    def test_completion_is_recognised_only_when_every_step_is_ticked(self):
+        bar = self.bar()
+        bar.set_plan(self.PLAN)
+        assert bar.plan_is_complete() is False
+        bar.set_plan("[x] one\n[x] two")
+        assert bar.plan_is_complete() is True
+
+    def test_an_empty_plan_is_not_complete(self):
+        """Otherwise it would 'finish' the moment it appeared."""
+        bar = self.bar()
+        bar.set_plan("")
+        assert bar.plan_is_complete() is False
+        bar.set_plan("   \n  ")
+        assert bar.plan_is_complete() is False
+
+    async def test_finishing_ticks_everything_then_clears(self):
+        bar = self.bar()
+        bar.set_plan(self.PLAN)
+        assert bar._plan_panel() is not None
+        await bar.finish_plan()
+        assert bar.plan == ""
+        assert bar._plan_panel() is None, "it must leave when the work is done"
+
+    async def test_finishing_an_empty_plan_is_a_no_op(self):
+        bar = self.bar()
+        await bar.finish_plan()      # must not raise
+        assert bar.plan == ""
+
+    def test_setting_a_new_plan_cancels_a_stale_animation(self):
+        bar = self.bar()
+        bar.plan_done_frame = 4
+        bar.set_plan(self.PLAN)
+        assert bar.plan_done_frame == 0
+
+    def test_the_plan_sits_above_the_status_strip(self):
+        """Order matters: the strip is the thing anchored to the prompt."""
+        from rich.console import Group
+
+        bar = self.bar()
+        bar.set_plan(self.PLAN)
+        rendered = bar._renderable()
+        assert isinstance(rendered, Group)
+        assert rendered.renderables[0] is not None
+        assert len(rendered.renderables) == 2
+
+    def test_it_draws_in_ascii_too(self):
+        bar = self.bar(unicode_ok=False)
+        bar.set_plan(self.PLAN)
+        stream = capture(bar.ui)
+        bar.ui.console.print(bar._plan_panel())
+        assert stream.getvalue().isascii()
