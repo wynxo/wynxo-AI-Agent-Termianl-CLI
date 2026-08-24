@@ -765,3 +765,58 @@ class TestSmallTalkIsNotWork:
                           for m in r.get("messages", []))]
         assert carried == [], "NO PLAN NEEDED must not be executed"
         await agent.client.aclose()
+
+
+class TestAnswerNeverGoesMissing:
+    """"it answers me in thinking mode, or doesn't answer at all" -- both
+    symptoms of a chat template that pre-fills the opening <think>."""
+
+    async def test_a_dangling_close_tag_splits_correctly(self, tmp_path):
+        agent, _, cb = make_agent(tmp_path, [
+            {"content": "Working it out. 2+2 is 4.</think>\n\nThe answer is 4."},
+        ])
+        result = await agent.run("what is 2+2")
+        assert result.content == "The answer is 4."
+        assert "</think>" not in "".join(cb.content)
+        await agent.client.aclose()
+
+    async def test_the_reasoning_does_not_become_the_answer(self, tmp_path):
+        agent, _, _ = make_agent(tmp_path, [
+            {"content": "Let me think about this.</think>\n\nParis."},
+        ])
+        result = await agent.run("capital of france")
+        assert "Let me think" not in result.content
+        await agent.client.aclose()
+
+    async def test_a_turn_that_streamed_nothing_still_shows_its_answer(self, tmp_path):
+        """The filter can be started inside a think block the raw text never
+        mentions, so it and parse_turn can disagree. An answer nobody saw is
+        the one outcome worth any amount of care."""
+        agent, _, cb = make_agent(tmp_path, [
+            {"content": "Working it out.</think>\n\nFirst answer."},
+            {"content": "No tags here at all, just the answer."},
+        ])
+        await agent.run("one")
+        assert agent._template_prefills_think is True
+
+        await agent.run("two")
+        streamed = "".join(cb.content)
+        assert "No tags here at all" in streamed, "the second turn showed nothing"
+        await agent.client.aclose()
+
+    async def test_an_answer_labelled_as_thought_is_still_shown(self, tmp_path):
+        """A model whose whole reply arrives in the thinking field, with no
+        content, must not produce a blank response."""
+        agent, _, _ = make_agent(tmp_path, [
+            {"content": "", "thinking": "The capital is Paris."},
+        ])
+        result = await agent.run("capital of france")
+        assert "Paris" in result.content
+        await agent.client.aclose()
+
+    async def test_a_normal_answer_is_unaffected(self, tmp_path):
+        agent, _, cb = make_agent(tmp_path, [{"content": "Plain answer."}])
+        result = await agent.run("hi there friend")
+        assert result.content == "Plain answer."
+        assert "".join(cb.content) == "Plain answer."
+        await agent.client.aclose()

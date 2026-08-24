@@ -205,6 +205,13 @@ class Agent:
         """Set false when the model's template cannot do tool calls, in which
         case tools are described in the prompt in Hermes format instead."""
 
+        self._template_prefills_think = False
+        """Set once a closing </think> arrives with nothing having opened it.
+
+        The chat template put the opening tag in the prompt, so generation
+        starts inside the block. Remembering it lets every turn after the
+        first stream the answer cleanly instead of the reasoning."""
+
         self._model_info = None
         """Cached from the last detect_capabilities() call, so set_effort()
         can re-apply the same thinking downgrade without a network round
@@ -291,7 +298,8 @@ class Agent:
         # <think>...</think> and <tool_call>...</tool_call> straight into
         # plain content. The filter hides those from the live view; the raw
         # chunks still go to content_parts below, for parse_turn() to act on.
-        live_filter = LiveContentFilter()
+        live_filter = LiveContentFilter(
+            start_in_thinking=self._template_prefills_think)
         stream = self.client.chat(
             messages if messages is not None else self.session.wire(),
             model=self.config.model,
@@ -320,8 +328,29 @@ class Agent:
 
         if stream_content and (trailing := live_filter.finish()):
             await self.cb.on_content(trailing)
+        if live_filter.saw_dangling_close:
+            self._template_prefills_think = True
 
-        return parse_turn("".join(content_parts), "".join(thinking_parts), native_calls)
+        turn = parse_turn("".join(content_parts), "".join(thinking_parts),
+                          native_calls)
+
+        # An answer that ended up labelled as thought is still an answer.
+        # Some templates never close the block, so everything the model wrote
+        # is reasoning as far as the tags are concerned -- and showing nothing
+        # at all is the worst possible reading of that.
+        if not turn.content and not turn.tool_calls and turn.thinking:
+            turn.content = turn.thinking
+            turn.thinking = ""
+
+        # Last line of defence, whatever the cause: a turn that streamed
+        # nothing while the parsed result does have an answer means the live
+        # filter and parse_turn disagreed. They can, because the filter may
+        # be started inside a think block that the raw text never mentions.
+        # An answer nobody saw is the one outcome worth any amount of care.
+        if stream_content and turn.content and not live_filter.emitted_any:
+            await self.cb.on_content(turn.content)
+
+        return turn
 
     def _think_value(self) -> bool | str | None:
         """What to send as Ollama's ``think``.

@@ -240,3 +240,77 @@ class TestLiveContentFilter:
             filt = LiveContentFilter()
             assert self.feed_all(filt, chunks) == (
                 "Reading the file first.\n\nDone, it prints hi.")
+
+
+class TestTemplatePrefilledThinking:
+    """Qwen3 and the DeepSeek distills ship chat templates that put
+    ``<think>`` in the prompt themselves, so generation starts *inside* the
+    block and the model only ever emits the closing tag. Requiring a matched
+    pair read the whole reasoning section as the answer, tag and all."""
+
+    RAW = "Working it out. 2+2 is 4.</think>\n\nThe answer is 4."
+
+    def test_a_dangling_close_splits_reasoning_from_the_answer(self):
+        content, thinking = split_thinking(self.RAW)
+        assert content == "The answer is 4."
+        assert thinking == "Working it out. 2+2 is 4."
+
+    def test_the_literal_tag_never_reaches_the_answer(self):
+        content, _ = split_thinking(self.RAW)
+        assert "</think>" not in content
+
+    def test_a_matched_pair_still_works(self):
+        content, thinking = split_thinking("<think>hmm</think>The answer.")
+        assert content == "The answer."
+        assert thinking == "hmm"
+
+    def test_a_close_tag_after_a_matched_pair_is_not_double_counted(self):
+        content, _ = split_thinking("<think>a</think>answer </think> more")
+        assert "answer" in content
+
+    def test_text_with_no_tags_is_untouched(self):
+        content, thinking = split_thinking("Just an answer.")
+        assert content == "Just an answer."
+        assert thinking == ""
+
+
+class TestLiveFilterPrefill:
+    def feed_all(self, filt, text):
+        return "".join(filt.feed(c) for c in text) + filt.finish()
+
+    RAW = "Working it out. 2+2 is 4.</think>\n\nThe answer is 4."
+
+    def test_the_dangling_tag_is_swallowed_not_printed(self):
+        filt = LiveContentFilter()
+        out = self.feed_all(filt, self.RAW)
+        assert "</think>" not in out
+        assert "The answer is 4." in out
+
+    def test_it_is_detected_so_later_turns_can_start_clean(self):
+        filt = LiveContentFilter()
+        self.feed_all(filt, self.RAW)
+        assert filt.saw_dangling_close is True
+
+    def test_starting_inside_the_block_hides_the_reasoning(self):
+        filt = LiveContentFilter(start_in_thinking=True)
+        out = self.feed_all(filt, self.RAW)
+        assert "Working it out" not in out
+        assert "The answer is 4." in out
+
+    def test_a_close_tag_split_across_chunks_does_not_leak(self):
+        filt = LiveContentFilter()
+        out = "".join(filt.feed(c) for c in ["reasoning</thi", "nk>answer"])
+        out += filt.finish()
+        assert "</thi" not in out and "nk>" not in out
+        assert out.endswith("answer")
+
+    def test_emitted_any_is_false_when_everything_was_swallowed(self):
+        """This is what tells the caller the stream and the parse disagreed."""
+        filt = LiveContentFilter(start_in_thinking=True)
+        assert self.feed_all(filt, "all of this is reasoning") == ""
+        assert filt.emitted_any is False
+
+    def test_emitted_any_is_true_for_a_normal_answer(self):
+        filt = LiveContentFilter()
+        assert self.feed_all(filt, "a plain answer")
+        assert filt.emitted_any is True

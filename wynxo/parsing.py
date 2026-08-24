@@ -27,6 +27,14 @@ from typing import Any
 
 THINK_BLOCK = re.compile(r"<(think|thinking|reasoning)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
 OPEN_THINK = re.compile(r"<(think|thinking|reasoning)>(.*)$", re.DOTALL | re.IGNORECASE)
+DANGLING_CLOSE = re.compile(r"^(.*?)</(think|thinking|reasoning)>", re.DOTALL | re.IGNORECASE)
+"""A closing tag with no opening one before it.
+
+Qwen3 and the DeepSeek distills ship chat templates that put ``<think>`` in
+the prompt themselves, so generation starts *inside* the block and the model
+only ever emits the closing tag. Requiring a matched pair means the whole
+reasoning section is read as the answer, tag and all -- which is what
+"it answers me in thinking mode" looks like from the outside."""
 TOOL_CALL_BLOCK = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL | re.IGNORECASE)
 # Some checkpoints drop the closing tag when they hit the token limit.
 UNCLOSED_TOOL_CALL = re.compile(r"<tool_call>\s*(\{.*)$", re.DOTALL | re.IGNORECASE)
@@ -71,9 +79,22 @@ class LiveContentFilter:
     parse_turn() later extracts can never disagree.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, start_in_thinking: bool = False) -> None:
         self.buffer = ""
-        self.open_tag: str | None = None
+        self.open_tag: str | None = "think" if start_in_thinking else None
+        self.emitted_any = False
+        """Whether anything visible was ever handed back.
+
+        The caller uses this as a last check: if a whole turn streamed
+        nothing but the parsed result does have an answer, the two disagreed
+        and the answer must still be shown."""
+        self.saw_dangling_close = False
+        """Set when a closing tag arrives with nothing having opened it.
+
+        That means the chat template pre-filled ``<think>``, so generation
+        began inside the block. The reasoning already streamed cannot be
+        un-printed, but the caller can pass start_in_thinking=True next turn
+        and every turn after this one comes out clean."""
 
     def feed(self, text: str) -> str:
         """Consume one chunk of raw content; return what is safe to show."""
@@ -96,10 +117,24 @@ class LiveContentFilter:
             self.buffer = self.buffer[end + len(close):]
             self.open_tag = None
         if self.open_tag is None:
+            # A close tag we never opened: swallow it rather than printing
+            # "</think>" into the answer, and remember why it happened.
+            for tag in _HIDDEN_TAGS:
+                marker = f"</{tag}>"
+                idx = self.buffer.lower().find(marker)
+                if idx != -1:
+                    self.saw_dangling_close = True
+                    out.append(self.buffer[:idx])
+                    self.buffer = self.buffer[idx + len(marker):]
+                    break
+        if self.open_tag is None:
             safe = self._safe_emit_length()
             out.append(self.buffer[:safe])
             self.buffer = self.buffer[safe:]
-        return "".join(out)
+        joined = "".join(out)
+        if joined:
+            self.emitted_any = True
+        return joined
 
     def finish(self) -> str:
         """Flush whatever is left once the stream ends.
@@ -113,6 +148,8 @@ class LiveContentFilter:
             self.open_tag = None
             return ""
         remainder, self.buffer = self.buffer, ""
+        if remainder:
+            self.emitted_any = True
         return remainder
 
     def _find_open_tag(self) -> tuple[int, str, int] | None:
@@ -138,7 +175,7 @@ class LiveContentFilter:
             return len(self.buffer)
         tail = self.buffer[idx:].lower()
         for tag in _HIDDEN_TAGS:
-            if f"<{tag}>".startswith(tail):
+            if f"<{tag}>".startswith(tail) or f"</{tag}>".startswith(tail):
                 return idx
         return len(self.buffer)
 
@@ -152,6 +189,17 @@ def split_thinking(text: str) -> tuple[str, str]:
         return ""
 
     content = THINK_BLOCK.sub(take, text)
+
+    # A closing tag with nothing opening it: the template opened the block.
+    # Everything before it is reasoning; the answer is what follows.
+    #
+    # Only when no matched pair was found. If the model emits its own tags
+    # then the template did not pre-fill one, and a later stray close tag is
+    # noise rather than a boundary -- splitting on it would throw away the
+    # answer that came before it.
+    if not thoughts and (close_match := DANGLING_CLOSE.match(content)):
+        thoughts.append(close_match.group(1).strip())
+        content = content[close_match.end():]
 
     # An unterminated block means the model was cut off mid-thought. Everything
     # after the opening tag is reasoning, not an answer.
