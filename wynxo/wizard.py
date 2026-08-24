@@ -25,6 +25,7 @@ from .effort import ORDER, resolve
 from .discovery import Found, private_subnets, scan_loopback, scan_subnets, verify
 from .platforms import ollama_server_help as server_help  # re-exported
 from .provider import OllamaClient, ProviderError, inspect_all
+from .select import Choice, choose, supported as arrows_supported
 from rich.text import Text
 
 from .ui import ACCENT, MUTED, UI
@@ -183,6 +184,20 @@ async def _client_for(config: Config, client: OllamaClient | None):
         await owned.aclose()
 
 
+def _model_choice(model) -> Choice:
+    """One row of the arrow picker."""
+    badge, style = _badge(model)
+    facts = [model.human_size(), model.parameter_size,
+             _humanise_context(model.context_length)]
+    return Choice(
+        value=model.name,
+        label=model.name,
+        badge=badge,
+        badge_style={"green": "badge", "yellow": "badge.warn"}.get(style, "badge.muted"),
+        hint="  ".join(f for f in facts if f),
+    )
+
+
 def _badge(model) -> tuple[str, str]:
     """(text, style) for what this model can do. Short: it must always fit."""
     if not model.capabilities_known:
@@ -279,8 +294,9 @@ async def ask_model(ui: UI, prompt_session: PromptSession, config: Config,
     installed.sort(key=sort_key)
     usable = [m for m in installed if m.supports_tools]
 
-    ui.console.print()
-    _print_model_rows(ui, installed)
+    if not arrows_supported():
+        ui.console.print()
+        _print_model_rows(ui, installed)
 
     ui.console.print()
     if not usable:
@@ -297,14 +313,27 @@ async def ask_model(ui: UI, prompt_session: PromptSession, config: Config,
         ui.console.print()
 
     names = [m.name for m in installed]
-    default_index = 1 if usable else 1
+
+    if arrows_supported():
+        chosen = await choose(
+            [_model_choice(m) for m in installed],
+            title="",
+            default=0,
+            footer="↑↓ move   enter select   1-9 jump   esc cancel",
+            width=ui.width,
+            unicode=ui.g.unicode,
+        )
+        if chosen:
+            ui.success(f"model: {chosen}")
+            return chosen
+        # Cancelled, or no terminal to draw on: fall through and ask plainly.
 
     while True:
         answer = (await prompt_session.prompt_async(
-            HTML(f'<ansicyan>  choose [1-{len(names)}, default {default_index}]: </ansicyan>')
+            HTML(f'<ansicyan>  choose [1-{len(names)}, default 1]: </ansicyan>')
         )).strip()
         if answer == "":
-            return names[default_index - 1]
+            return names[0]
         if answer.isdigit() and 1 <= int(answer) <= len(names):
             return names[int(answer) - 1]
         if answer in names:

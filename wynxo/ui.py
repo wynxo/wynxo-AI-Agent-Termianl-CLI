@@ -25,18 +25,36 @@ from rich.text import Text
 
 from .platforms import is_narrow, terminal_width
 
-ACCENT = "bright_cyan"
-BAR_STYLE = "on grey23"
-"""The pinned bar's background. A filled strip is what separates a status bar
-from just another line that scrolled past."""
-BAR_ACCENT = "bright_cyan"
-BAR_DIM = "grey62"
+from .theme import Palette, resolve as resolve_theme
+
+# Module-level names kept for the many call sites that reference them. They are
+# rebound when a UI is constructed, so a palette change reaches everything
+# without threading a theme object through every render function.
+PALETTE: Palette = resolve_theme("purple")
+ACCENT = PALETTE.accent
+MUTED = PALETTE.muted
+GOOD = PALETTE.good
+WARN = PALETTE.warn
+BAD = PALETTE.bad
+BAR_STYLE = f"on {PALETTE.bar_bg}"
+BAR_ACCENT = PALETTE.bar_accent
+BAR_DIM = PALETTE.bar_dim
 MIN_ACTIVITY_WIDTH = 16
 """Cells kept for the activity text before the stats start claiming space."""
-MUTED = "grey58"
-GOOD = "green"
-BAD = "red"
-WARN = "yellow"
+
+
+def apply_palette(palette: Palette) -> None:
+    """Rebind the module colours. Called once when the UI is built."""
+    global PALETTE, ACCENT, MUTED, GOOD, WARN, BAD, BAR_STYLE, BAR_ACCENT, BAR_DIM
+    PALETTE = palette
+    ACCENT = palette.accent
+    MUTED = palette.muted
+    GOOD = palette.good
+    WARN = palette.warn
+    BAD = palette.bad
+    BAR_STYLE = f"on {palette.bar_bg}"
+    BAR_ACCENT = palette.bar_accent
+    BAR_DIM = palette.bar_dim
 
 
 def _supports_unicode() -> bool:
@@ -62,7 +80,7 @@ class Glyphs:
 
 
 class UI:
-    def __init__(self, theme: str = "dark", show_thinking: bool = True):
+    def __init__(self, theme: str = "purple", show_thinking: bool = True):
         self.console = Console(
             highlight=False,
             soft_wrap=False,
@@ -70,8 +88,10 @@ class UI:
             legacy_windows=False if sys.platform == "win32" else None,
         )
         self.g = Glyphs(_supports_unicode())
+        self.palette = resolve_theme(theme)
+        apply_palette(self.palette)
         self.show_thinking = show_thinking
-        self.code_theme = "monokai" if theme == "dark" else "friendly"
+        self.code_theme = self.palette.code_theme
         self.narrow = is_narrow()
         """Phone-width terminals get a stacked layout instead of tables."""
         self.width = terminal_width()
@@ -106,6 +126,18 @@ class UI:
         self.console.print()
         self.console.print(head, overflow="ellipsis", no_wrap=True)
         self.console.print(Rule(style=MUTED, characters="\u2500"))
+
+    def clear(self) -> None:
+        """Clear the screen and scrollback, so a session starts on a clean page.
+
+        Scrollback too: clearing only the visible rows leaves the previous
+        session one scroll away, which is worse than not clearing at all.
+        """
+        if not self.console.is_terminal:
+            return
+        self.console.clear()
+        self.console.file.write("\x1b[3J")   # erase saved lines
+        self.console.file.flush()
 
     def wake(self, pet, name: str) -> None:
         """A short wake-up before the header.

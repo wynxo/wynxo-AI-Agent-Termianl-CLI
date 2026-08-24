@@ -151,14 +151,36 @@ def is_read_only_command(command: str) -> bool:
     return False
 
 
-def summarise_call(tool_name: str, args: dict) -> str:
-    """A one-line description for the prompt. What is about to happen, exactly."""
+def summarise_call(tool_name: str, args: dict, workspace=None) -> str:
+    """A one-line description of what is about to happen.
+
+    Paths are shown relative to the project. Models routinely pass absolute
+    paths, and a line reading `read_file C:\\Users\\you\\proj\\src\\a.py`
+    buries the only part that matters.
+    """
     if tool_name == "shell":
         return str(args.get("command", ""))
     if pattern := args.get("pattern"):
         where = args.get("glob") or args.get("path")
-        return f"{pattern}" + (f"  in {where}" if where and where != "." else "")
+        shown = shorten_path(where, workspace) if where else ""
+        return f"{pattern}" + (f"  in {shown}" if shown and shown != "." else "")
     if path := args.get("path"):
-        return str(path)
-    bits = [f"{k}={v!r}" for k, v in list(args.items())[:3] if not isinstance(v, (dict, list))]
+        return shorten_path(path, workspace)
+    bits = [f"{k}={v!r}" for k, v in list(args.items())[:3]
+            if not isinstance(v, (dict, list))]
     return ", ".join(bits)
+
+
+def shorten_path(raw, workspace=None) -> str:
+    """Relative to the workspace where possible, else just the tail."""
+    from pathlib import Path
+
+    text = str(raw)
+    if workspace is None:
+        return text
+    try:
+        return str(Path(text).resolve().relative_to(Path(workspace).resolve()))
+    except (ValueError, OSError):
+        pass
+    parts = Path(text).parts
+    return str(Path(*parts[-2:])) if len(parts) > 2 else text

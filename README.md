@@ -301,7 +301,8 @@ Another box:    192.168.1.50      (or 192.168.1.50:11434)
 ```
 
 **Which model?** It asks the server what it has, then asks the server what
-each one can *do*, and shows you both:
+each one can *do*, and shows you both. Move with the arrow keys (or `j`/`k`),
+select with enter, or type a number to jump straight there:
 
 ```
 Which model?
@@ -619,6 +620,49 @@ any of it permanent.
 
 ---
 
+## Look and logs
+
+**Themes.** Purple by default. Colours are hex, which rich degrades
+automatically on terminals that cannot do truecolour.
+
+```
+/theme                   see them all
+/theme midnight          cool blue
+/theme ember             warm orange
+/theme plain             your terminal's own 16 colours
+```
+
+`good`, `warn` and `bad` stay distinguishable in every palette — the status
+lines have to keep carrying information.
+
+**A clean start.** wynxo clears the screen and the scrollback when it opens,
+so a session begins on a blank page. `"clear_on_start": false` turns it off.
+
+**Session logs.** Every prompt, reply, tool call, tool result and error is
+written to a JSON-lines file — one object per line, so a crash mid-write
+costs the last line and nothing else, and you can `grep` or `tail -f` it while
+the session is still running.
+
+```
+/log                     the path and size of this session's log
+/log tail                the last twenty events
+/log list                recent sessions
+/log off                 stop recording
+```
+
+| platform | location |
+|---|---|
+| Linux | `~/.local/share/wynxo/logs/` |
+| macOS | `~/Library/Application Support/wynxo/logs/` |
+| Windows | `%LOCALAPPDATA%\wynxo\logs\` |
+| Termux | `$HOME/.local/share/wynxo/logs/` |
+
+It stays on your machine, keeps the twenty most recent sessions, and caps any
+single field so a large file dumped into a tool result cannot make the log
+unreadable.
+
+---
+
 ## 8. Scope and modes
 
 Two separate dials, on purpose.
@@ -775,6 +819,8 @@ effort-level setting.
 /undo [n|list]           revert the last file change
 /memory ...              show | add <note> | forget <text> | edit | reload
 /pet ...                 on | off | still | name <x> | voice <x>
+/theme [name]            purple | midnight | ember | plain
+/log [tail|list|off]     where this session is being recorded
 /tools                   what the agent can call
 /thinking                show or hide the model's reasoning
 /plan                    the current todo list
@@ -847,6 +893,9 @@ wynxo [prompt]
   "pet": true,
   "pet_name": "wyn",
   "animations": true,
+  "theme": "purple",
+  "clear_on_start": true,
+  "log": true,
   "show_thinking": true,
   "stream": true
 }
@@ -1071,6 +1120,9 @@ wynxo/
   wizard.py      first-run setup
   ui.py          rendering, the pinned bar, the narrow-screen layout
   pet.py         the companion face and its moods
+  theme.py       the colour palettes
+  select.py      the inline arrow-key chooser
+  journal.py     the append-only session log
   cli.py         REPL and slash commands
   tools/         read, write, edit, list, glob, grep, shell, todo
 scripts/

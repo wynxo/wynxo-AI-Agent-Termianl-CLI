@@ -272,7 +272,7 @@ class Agent:
                 self.session.add_tool_result(call.name, f"ERROR: {message}", call.call_id)
                 continue
 
-            summary = summarise_call(call.name, call.arguments)
+            summary = summarise_call(call.name, call.arguments, self.workspace)
 
             if refusal := self.permissions.blocked(call.name, tool.mutating, tool.internal):
                 await self.cb.on_tool_result(call.name, False, refusal, refusal)

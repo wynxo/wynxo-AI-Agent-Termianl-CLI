@@ -29,8 +29,10 @@ from .permissions import Decision
 from .provider import OllamaClient, ProviderError, check_context
 from .session import Session
 from .keys import KeyWatcher, describe_bindings
+from .journal import Journal, recent as recent_logs
 from .memory import Memory
 from .pet import Mood, Pet
+from .select import choose, supported as arrows_supported
 from .scope import Mode, Scope, resolve as resolve_scope
 from .status import Status
 from .tools import build_registry
@@ -51,6 +53,15 @@ _LANGUAGE = {"read_file": "python", "shell": "console"}
 LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail"}
 from .platforms import ollama_server_help as server_help, suspicious_workspace
 from .wizard import probe, run_wizard
+
+def _theme_summary(name: str) -> str:
+    return {
+        "purple": "deep violet (default)",
+        "midnight": "cool blue",
+        "ember": "warm orange",
+        "plain": "your terminal's own 16 colours",
+    }.get(name, "")
+
 
 def _voice_summary(voice: str) -> str:
     return {
@@ -75,6 +86,8 @@ COMMANDS = {
     "/ctx": "show or set the context window (num_ctx)",
     "/tools": "list the tools the agent can call",
     "/pet": "the companion: on | off | name <x> | voice <x>",
+    "/theme": "colour palette: purple | midnight | ember | plain",
+    "/log": "where this session is being recorded",
     "/mode": "plan | manual | auto | yolo -- how much it asks first",
     "/scope": "folder | repo | machine -- what it may touch",
     "/undo": "revert the last file change",
@@ -103,6 +116,7 @@ class TerminalCallbacks(Callbacks):
         self._thinking_chars = 0
         self._thinker: ThoughtStreamer | None = None
         self.bar: ActivityBar | None = None
+        self.journal: Journal | None = None
         self.watcher: KeyWatcher | None = None
         """Set while a turn runs. It holds the terminal in cbreak mode, so it
         must be stopped before prompt_toolkit is asked to read a line --
@@ -174,6 +188,8 @@ class TerminalCallbacks(Callbacks):
         self.streamer.feed(text)
 
     async def on_stage(self, name: str, detail: str = "") -> None:
+        if self.journal is not None:
+            self.journal.stage(name, detail)
         self._end_stream()
         if self.bar is not None:
             self.bar.update(activity=name, detail=detail)
@@ -181,12 +197,16 @@ class TerminalCallbacks(Callbacks):
         self.ui.console.print(f"  [{ACCENT}]{self.ui.g.arrow}[/] [{MUTED}]{name}[/]{suffix}")
 
     async def on_tool_start(self, name: str, summary: str) -> None:
+        if self.journal is not None:
+            self.journal.tool(name, {"summary": summary})
         self._end_stream()
         if self.bar is not None:
             self.bar.update(activity=_ACTIVITY.get(name, name), detail=summary)
         self.ui.tool_start(name, summary)
 
     async def on_tool_result(self, name: str, ok: bool, display: str, output: str) -> None:
+        if self.journal is not None:
+            self.journal.tool_result(name, ok, output)
         if self.verbose_tools and output.strip():
             self.ui.tool_result(name, ok, "", "")
             self.ui.code(output[:4000], _LANGUAGE.get(name, "text"))
@@ -265,6 +285,8 @@ class Repl:
         self.boundary = resolve_scope(workspace, scope)
         self.mode = mode
         self.memory = Memory(workspace)
+        self.journal = Journal.open(
+            self.agent_session_id(), enabled=config.log)
         self.pet = Pet(
             name=config.pet_name,
             enabled=config.pet,
@@ -315,14 +337,22 @@ class Repl:
             complete_style=CompleteStyle.READLINE_LIKE,
         )
         self.callbacks = TerminalCallbacks(ui, self.prompt_session)
+        self.callbacks.journal = self.journal
         self.agent = Agent(self.client, config, self.policy, workspace, self.callbacks,
                            boundary=self.boundary, memory=self.memory)
         self.agent.permissions.mode = mode
         self.agent.refresh_system_prompt()
         self._task: asyncio.Task | None = None
 
+    def agent_session_id(self) -> str:
+        import uuid
+
+        return uuid.uuid4().hex[:8]
+
     async def _connect(self) -> bool:
         """Reach the server, report what is loaded, adapt to the model."""
+        if self.config.clear_on_start:
+            self.ui.clear()
         status = Status()
         print()
 
@@ -428,6 +458,7 @@ class Repl:
 
     async def turn(self, text: str) -> None:
         """Run one request, with a live status bar and mid-flight keybinds."""
+        self.journal.user(text)
         self.callbacks.tokens = 0
         self.callbacks._thinking_chars = 0
 
@@ -467,8 +498,12 @@ class Repl:
 
         if result.errors:
             self.pet.react(Mood.SAD)
+            for message in result.errors:
+                self.journal.error(message)
             self.ui.error("\n".join(result.errors))
             return
+        self.journal.assistant(result.content, tokens=self.callbacks.tokens,
+                               seconds=result.elapsed)
         self.pet.react(Mood.HAPPY if not result.interrupted else Mood.IDLE)
 
         if result.content and not self.config.stream:
@@ -668,6 +703,12 @@ class Repl:
         if name == "/pet":
             return self.cmd_pet(args)
 
+        if name == "/theme":
+            return self.cmd_theme(args)
+
+        if name == "/log":
+            return self.cmd_log(args)
+
         if name == "/yolo":
             self.agent.permissions.yolo = not self.agent.permissions.yolo
             if self.agent.permissions.yolo:
@@ -722,33 +763,53 @@ class Repl:
         return True
 
     async def cmd_model(self, args: list[str]) -> bool:
-        if not args:
-            try:
-                with self.ui.status("listing models..."):
-                    models = await self.client.list_models()
-            except ProviderError as exc:
-                self.ui.error(str(exc))
-                return True
-            self.ui.table(
-                ["model", "size", "params"],
-                [(m.name + ("  <-" if m.name == self.config.model else ""),
-                  m.human_size(), m.parameter_size) for m in models],
-                title=f"models on {self.client.base_url}",
-            )
-            self.ui.info("switch with /model <name>")
-            return True
+        """Switch model. With no argument this is the same capability-aware
+        picker the first-run wizard uses, rather than a second, dumber list."""
+        from .provider import inspect_all
+        from .wizard import _model_choice, _print_model_rows
 
-        target = args[0]
         try:
-            models = await self.client.list_models()
+            with self.ui.status("asking the server what it has..."):
+                models = await self.client.list_models()
         except ProviderError as exc:
             self.ui.error(str(exc))
             return True
+        if not models:
+            self.ui.warn("that server has no models installed")
+            return True
 
-        names = [m.name for m in models]
+        if args:
+            return await self._switch_model(args[0], [m.name for m in models])
+
+        with self.ui.status(f"checking what {len(models)} model(s) can do..."):
+            models = await inspect_all(self.client, models)
+        models.sort(key=lambda m: (not m.supports_tools, m.name))
+        current = next((i for i, m in enumerate(models)
+                        if m.name == self.config.model), 0)
+
+        if arrows_supported():
+            chosen = await choose(
+                [_model_choice(m) for m in models],
+                default=current,
+                footer="↑↓ move   enter select   1-9 jump   esc cancel",
+                width=self.ui.width,
+                unicode=self.ui.g.unicode,
+            )
+            if chosen and chosen != self.config.model:
+                return await self._switch_model(chosen, [m.name for m in models])
+            if chosen:
+                self.ui.info(f"already using {chosen}")
+            return True
+
+        self.ui.console.print()
+        _print_model_rows(self.ui, models)
+        self.ui.info("switch with /model <name>")
+        return True
+
+    async def _switch_model(self, target: str, names: list[str]) -> bool:
         if target not in names:
-            # Accept a bare name when exactly one tag matches.
-            matches = [n for n in names if n.split(":")[0] == target]
+            matches = [n for n in names if n.split(":")[0] == target
+                       or n.startswith(target)]
             if len(matches) == 1:
                 target = matches[0]
             else:
@@ -763,6 +824,7 @@ class Repl:
         self.agent.config.model = target
         await self.agent.detect_capabilities()
         self.ui.success(f"model: {target}")
+        self.journal.note("model switched", model=target)
         if warning := await check_context(self.client, self.config):
             self.ui.warn(warning)
         return True
@@ -925,6 +987,76 @@ class Repl:
                 self.ui.info(message)
                 break
             self.ui.success(message)
+        return True
+
+    def cmd_theme(self, args: list[str]) -> bool:
+        from . import theme as theme_module
+
+        if not args:
+            self.ui.table(
+                ["theme", "look"],
+                [(n + ("  <-" if n == self.config.theme else ""),
+                  _theme_summary(n)) for n in theme_module.names()],
+                title="themes",
+            )
+            self.ui.info("a new theme applies fully next time wynxo starts")
+            return True
+
+        choice = args[0].lower()
+        if choice not in theme_module.names():
+            self.ui.warn(f"unknown theme; choose one of "
+                         f"{', '.join(theme_module.names())}")
+            return True
+        self.config.theme = choice
+        self.config.save()
+        # Rebind now so the rest of this session picks it up, and say plainly
+        # that anything already drawn keeps the old colours.
+        from .ui import apply_palette
+
+        self.ui.palette = theme_module.resolve(choice)
+        apply_palette(self.ui.palette)
+        self.ui.code_theme = self.ui.palette.code_theme
+        self.ui.success(f"theme: {choice}")
+        self.ui.info("restart wynxo to recolour everything")
+        return True
+
+    def cmd_log(self, args: list[str]) -> bool:
+        action = args[0].lower() if args else "show"
+
+        if action in ("off", "on"):
+            self.journal.enabled = action == "on"
+            self.config.log = self.journal.enabled
+            self.config.save()
+            self.ui.success(f"logging {action}")
+            return True
+
+        if action in ("list", "sessions"):
+            logs = recent_logs()
+            if not logs:
+                self.ui.info("no logs yet")
+                return True
+            self.ui.table(
+                ["log", "size"],
+                [(p.name, f"{p.stat().st_size // 1024}KB") for p in logs],
+                title="recent sessions",
+            )
+            return True
+
+        if action == "tail":
+            for record in self.journal.tail(20):
+                kind = record.get("kind", "?")
+                body = (record.get("text") or record.get("message")
+                        or record.get("name") or "")
+                self.ui.console.print(
+                    f"  [{MUTED}]{kind:12}[/] {str(body)[:90]}")
+            return True
+
+        if not self.journal.enabled or self.journal.path is None:
+            self.ui.info("logging is off  ·  /log on to enable it")
+            return True
+        self.ui.info(f"{self.journal.path}")
+        self.ui.info(f"{self.journal.size() // 1024}KB  ·  /log tail  ·  "
+                     f"/log list  ·  /log off")
         return True
 
     def cmd_pet(self, args: list[str]) -> bool:
