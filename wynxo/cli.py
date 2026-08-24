@@ -646,6 +646,7 @@ class Repl:
 
         bar = ActivityBar(self.ui, self.policy.name, describe_bindings(LIVE_KEYS),
                           model=self.config.model, pet=self.pet)
+        review_mark = self.agent.checkpoints.mark()
         bar.animate = self.config.animations
         bar.queued = self.pending.preview(ellipsis=self.ui.g.ellipsis)
         used = self.agent.session.token_estimate()
@@ -729,7 +730,95 @@ class Repl:
         if result.compacted:
             self.ui.info("context was compacted during this turn")
 
+        await self._review_changes(review_mark)
         await self._narrate(text, result)
+
+    async def _review_changes(self, mark: int) -> None:
+        """In review mode, put the whole turn's changes up as one diff.
+
+        Manual mode interrupts a ten-file refactor ten times; auto never
+        shows you the shape of what happened. This waits until the work is
+        finished, then asks once.
+        """
+        if self.agent.permissions.mode is not Mode.REVIEW:
+            return
+        changes = self.agent.checkpoints.changes_since(mark)
+        if not changes:
+            return
+
+        from .tools.files import make_diff
+
+        diffs: list[tuple[str, str]] = []
+        for snapshot in changes:
+            name = self.ui.shorten_path(str(snapshot.path))
+            try:
+                now = snapshot.path.read_text(encoding="utf-8",
+                                              errors="surrogateescape") \
+                    if snapshot.path.exists() else ""
+            except OSError as exc:
+                diffs.append((name, f"(could not re-read: {exc})"))
+                continue
+            before = snapshot.content or ""
+            if before == now:
+                continue
+            diffs.append((name, make_diff(before, now, name)))
+        if not diffs:
+            return
+
+        self.ui.console.print()
+        self.ui.console.print(Text(
+            f"  {len(diffs)} file{'s' if len(diffs) != 1 else ''} changed",
+            style=f"bold {ACCENT}"))
+        for name, diff in diffs:
+            self.ui.console.print()
+            self.ui.console.print(Text(f"  {name}", style=f"bold {ACCENT}"))
+            self.ui.diff(diff)
+
+        self.ui.console.print()
+        answer = (await self.prompt_session.prompt_async(
+            HTML('<ansicyan>  [k] keep  [r] revert all  [s] step through: </ansicyan>')
+        )).strip().lower()
+
+        if answer in ("", "k", "keep", "y", "yes"):
+            self.ui.success(f"kept {len(diffs)} file(s)")
+            return
+        if answer in ("r", "revert", "n", "no"):
+            reverted, problems = self.agent.checkpoints.revert_since(mark)
+            for problem in problems:
+                self.ui.warn(problem)
+            self.ui.success(f"reverted {reverted} change(s)")
+            return
+        await self._step_through(mark, changes)
+
+    async def _step_through(self, mark: int, changes) -> None:
+        """One file at a time, keeping the rest.
+
+        Reverting a single file cannot go through the checkpoint stack --
+        that is ordered, and taking one out of the middle would put the
+        others back too. The snapshot holds the original, so it is written
+        straight back.
+        """
+        kept = reverted = 0
+        for snapshot in changes:
+            name = self.ui.shorten_path(str(snapshot.path))
+            answer = (await self.prompt_session.prompt_async(
+                HTML(f'<ansicyan>  {_escape(name)}  [k] keep  [r] revert: </ansicyan>')
+            )).strip().lower()
+            if answer in ("r", "revert", "n", "no"):
+                try:
+                    if snapshot.existed:
+                        snapshot.path.parent.mkdir(parents=True, exist_ok=True)
+                        snapshot.path.write_text(snapshot.content or "",
+                                                 encoding="utf-8", newline="",
+                                                 errors="surrogateescape")
+                    elif snapshot.path.exists():
+                        snapshot.path.unlink()
+                    reverted += 1
+                except OSError as exc:
+                    self.ui.warn(f"could not revert {name}: {exc}")
+            else:
+                kept += 1
+        self.ui.success(f"kept {kept}, reverted {reverted}")
 
     def _expand_mentions(self, text: str) -> str:
         """Inline any @path the user referenced, and say what could not be.

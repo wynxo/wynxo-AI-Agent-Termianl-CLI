@@ -58,6 +58,14 @@ class Mode(Enum):
     """Edit files inside scope without asking; still ask for shell commands
     and anything that reaches off the machine."""
 
+    REVIEW = "review"
+    """Edit freely, then show every change together at the end of the turn.
+
+    The middle ground between manual and auto: manual interrupts a ten-file
+    refactor ten times, and auto never shows you the shape of what happened.
+    This lets the work finish, then puts the whole diff in front of you with
+    one decision to make."""
+
     YOLO = "yolo"
     """Never ask. For a container or a scratch checkout."""
 
@@ -68,6 +76,7 @@ class Mode(Enum):
                    "ask": "manual", "default": "manual", "careful": "manual",
                    "edit": "auto", "acceptedits": "auto", "accept-edits": "auto",
                    "auto-accept": "auto",
+                   "batch": "review", "diff": "review", "after": "review",
                    "all": "yolo", "never-ask": "yolo", "bypass": "yolo"}
         key = aliases.get(key, key)
         try:
@@ -82,6 +91,7 @@ class Mode(Enum):
             Mode.PLAN: "read-only -- investigates and proposes, never writes",
             Mode.MANUAL: "asks before every write and command",
             Mode.AUTO: "edits freely in scope, still asks to run commands",
+            Mode.REVIEW: "edits freely, shows you every change together at the end",
             Mode.YOLO: "never asks",
         }[self]
 

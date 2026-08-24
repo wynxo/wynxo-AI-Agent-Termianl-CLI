@@ -96,9 +96,11 @@ class PermissionStore:
         if not mutating or internal:
             return False
 
-        if self.mode is Mode.AUTO:
+        if self.mode in (Mode.AUTO, Mode.REVIEW):
             # Edits in scope go through; anything that runs a command or
-            # reaches off the machine still asks.
+            # reaches off the machine still asks. Review mode defers the
+            # question rather than skipping it -- the whole diff is put up
+            # once the turn finishes.
             if tool_name != "shell":
                 return False
 

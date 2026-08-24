@@ -2,6 +2,7 @@
 able to widen a scope."""
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -219,3 +220,36 @@ class TestBoundarySummary:
         long_home.mkdir(parents=True)
         boundary = resolve(long_home, Scope.FOLDER)
         assert boundary.describe() == str(boundary.root)
+
+
+class TestReviewMode:
+    """The middle ground: manual interrupts a ten-file refactor ten times,
+    auto never shows you the shape of what happened."""
+
+    def test_it_is_a_mode(self):
+        assert Mode.parse("review") is Mode.REVIEW
+        assert Mode.parse("batch") is Mode.REVIEW
+
+    def test_edits_do_not_prompt_individually(self):
+        store = PermissionStore(mode=Mode.REVIEW)
+        assert not store.needs_prompt("write_file", True, {"path": "x"})
+        assert not store.needs_prompt("edit_file", True, {"path": "x"})
+
+    def test_commands_still_prompt(self):
+        """Deferring a file write is reversible; running a command is not."""
+        store = PermissionStore(mode=Mode.REVIEW)
+        assert store.needs_prompt("shell", True, {"command": "npm install"})
+
+    def test_nothing_is_blocked_outright(self):
+        store = PermissionStore(mode=Mode.REVIEW)
+        assert store.blocked("write_file", True) is None
+
+    def test_it_cannot_widen_the_scope(self):
+        """Mode is the friction, scope is the wall -- review is no different."""
+        boundary = resolve(Path.cwd(), Scope.FOLDER)
+        store = PermissionStore(mode=Mode.REVIEW)
+        assert store.mode is Mode.REVIEW
+        assert not boundary.contains(Path("/etc/passwd"))
+
+    def test_it_describes_itself(self):
+        assert "end" in Mode.REVIEW.describe()

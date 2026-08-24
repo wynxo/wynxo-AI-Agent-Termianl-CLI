@@ -75,6 +75,39 @@ class Checkpoints:
         except OSError as exc:
             return False, f"Could not undo {name}: {exc}"
 
+    def mark(self) -> int:
+        """A position to measure a turn's changes from."""
+        return len(self._stack)
+
+    def changes_since(self, mark: int) -> list[Snapshot]:
+        """The earliest snapshot per file taken after ``mark``.
+
+        Earliest, not latest: three edits to one file during a turn should
+        read as one change from how it started, not three overlapping ones.
+        """
+        seen: dict[str, Snapshot] = {}
+        for snapshot in self._stack[mark:]:
+            key = str(snapshot.path)
+            if key not in seen:
+                seen[key] = snapshot
+        return list(seen.values())
+
+    def revert_since(self, mark: int) -> tuple[int, list[str]]:
+        """Undo everything after ``mark``. Returns (reverted, problems).
+
+        Newest first, so a file written and then edited again lands back on
+        what it held before the turn rather than halfway through it.
+        """
+        problems: list[str] = []
+        reverted = 0
+        while len(self._stack) > mark:
+            ok, message = self.undo()
+            if ok:
+                reverted += 1
+            else:
+                problems.append(message)
+        return reverted, problems
+
     def peek(self) -> Snapshot | None:
         return self._stack[-1] if self._stack else None
 

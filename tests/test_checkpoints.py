@@ -81,3 +81,99 @@ class TestUndo:
         assert len(checkpoints) == 1   # recorded as "did not exist"
         done, _ = checkpoints.undo()
         assert done
+
+
+class TestTurnScopedChanges:
+    """Review mode needs "what changed during this turn", which is not the
+    same question undo answers."""
+
+    def test_the_earliest_snapshot_per_file_wins(self, tmp_path):
+        """Three edits to one file during a turn are one change from how it
+        started, not three overlapping ones."""
+        from wynxo.checkpoints import Checkpoints
+
+        target = tmp_path / "a.py"
+        target.write_text("one\n")
+        points = Checkpoints()
+        mark = points.mark()
+        points.capture(target, "write_file"); target.write_text("two\n")
+        points.capture(target, "edit_file"); target.write_text("three\n")
+
+        changes = points.changes_since(mark)
+        assert len(changes) == 1
+        assert changes[0].content == "one\n"
+
+    def test_several_files_all_appear(self, tmp_path):
+        from wynxo.checkpoints import Checkpoints
+
+        points = Checkpoints()
+        mark = points.mark()
+        for name in ("a.py", "b.py", "c.py"):
+            path = tmp_path / name
+            points.capture(path, "write_file")
+            path.write_text("x\n")
+        assert len(points.changes_since(mark)) == 3
+
+    def test_changes_before_the_mark_are_not_included(self, tmp_path):
+        """An earlier turn's edits are not this turn's business."""
+        from wynxo.checkpoints import Checkpoints
+
+        points = Checkpoints()
+        old = tmp_path / "old.py"
+        points.capture(old, "write_file"); old.write_text("x\n")
+
+        mark = points.mark()
+        new = tmp_path / "new.py"
+        points.capture(new, "write_file"); new.write_text("y\n")
+
+        changes = points.changes_since(mark)
+        assert [c.path.name for c in changes] == ["new.py"]
+
+    def test_reverting_a_turn_restores_the_starting_state(self, tmp_path):
+        from wynxo.checkpoints import Checkpoints
+
+        target = tmp_path / "a.py"
+        target.write_text("original\n")
+        points = Checkpoints()
+        mark = points.mark()
+        points.capture(target, "write_file"); target.write_text("changed\n")
+        points.capture(target, "edit_file"); target.write_text("changed twice\n")
+
+        reverted, problems = points.revert_since(mark)
+        assert reverted == 2
+        assert problems == []
+        assert target.read_text() == "original\n"
+
+    def test_reverting_removes_files_the_turn_created(self, tmp_path):
+        from wynxo.checkpoints import Checkpoints
+
+        created = tmp_path / "new.py"
+        points = Checkpoints()
+        mark = points.mark()
+        points.capture(created, "write_file")     # did not exist yet
+        created.write_text("x\n")
+
+        points.revert_since(mark)
+        assert not created.exists()
+
+    def test_reverting_leaves_earlier_turns_alone(self, tmp_path):
+        from wynxo.checkpoints import Checkpoints
+
+        keep = tmp_path / "keep.py"
+        keep.write_text("first\n")
+        points = Checkpoints()
+        points.capture(keep, "write_file"); keep.write_text("second\n")
+
+        mark = points.mark()
+        other = tmp_path / "other.py"
+        points.capture(other, "write_file"); other.write_text("x\n")
+
+        points.revert_since(mark)
+        assert keep.read_text() == "second\n", "an earlier turn was rolled back"
+        assert not other.exists()
+
+    def test_reverting_nothing_is_not_an_error(self):
+        from wynxo.checkpoints import Checkpoints
+
+        points = Checkpoints()
+        assert points.revert_since(points.mark()) == (0, [])
