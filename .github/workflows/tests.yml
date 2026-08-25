@@ -1,6 +1,8 @@
-# wynxo claims to run on Linux, macOS, Windows and Termux. Three of those
-# can be checked here, and until now none of them were: every cross-platform
-# claim in this project rested on reading the code.
+# The targets are Linux and Windows (and Termux, which cannot be checked
+# here -- the pure-python job below is the part of it that can be).
+#
+# Until this existed, every cross-platform claim in the project rested on
+# someone reading the code.
 #
 # Windows earns its place twice over. It is the platform where the paths,
 # the console and the process handling all differ, and the one a Linux
@@ -28,7 +30,8 @@ jobs:
       # break is Windows-only or everywhere is most of the diagnosis.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Linux and Windows only. macOS is not a target for this project.
+        os: [ubuntu-latest, windows-latest]
         python: ["3.10", "3.13"]
         include:
           # The oldest and newest supported Python on every OS is more

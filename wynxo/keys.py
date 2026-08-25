@@ -99,11 +99,40 @@ class KeyWatcher:
             # cbreak, not raw: ISIG stays enabled so Ctrl-C still raises
             # SIGINT and the existing interrupt path keeps working.
             tty.setcbreak(self._fd)
+            self._free_the_bound_keys(termios)
             return True
         except Exception:
             self._saved = None
             self._fd = None
             return False
+
+    def _free_the_bound_keys(self, termios) -> None:
+        """Stop the terminal driver from eating keys we bind.
+
+        On BSD and macOS, Ctrl-O is VDISCARD and Ctrl-V is VLNEXT: the driver
+        acts on them itself and the byte never reaches us. Linux documents
+        VDISCARD as not implemented, which is why ^O worked there and
+        silently did nothing on a Mac.
+
+        IEXTEN is what enables both, and it is separate from ISIG -- so
+        clearing it frees the keys without touching Ctrl-C.
+        """
+        try:
+            attrs = termios.tcgetattr(self._fd)
+            attrs[3] &= ~termios.IEXTEN          # lflag
+            # Belt and braces: disable the characters individually too, for
+            # drivers that honour them regardless of IEXTEN.
+            disable = getattr(termios, "_POSIX_VDISABLE", 0)
+            for name in ("VDISCARD", "VLNEXT", "VREPRINT", "VSTATUS"):
+                if (index := getattr(termios, name, None)) is not None:
+                    try:
+                        attrs[6][index] = disable
+                    except (IndexError, TypeError):
+                        pass
+            termios.tcsetattr(self._fd, termios.TCSANOW, attrs)
+        except Exception:
+            # The keys stay bound to the driver; the agent still works.
+            pass
 
     def _loop_posix(self) -> None:
         import select
