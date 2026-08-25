@@ -13,6 +13,7 @@ back clean. Same code path; the policy decides which parts execute.
 from __future__ import annotations
 
 import asyncio
+import copy
 import re
 import time
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ from .session import Session
 from . import testing
 from .secrets import Shield
 from .tools import Registry, build_registry
+from .tools.base import ToolResult
 
 VERIFIED = "VERIFIED"
 
@@ -441,79 +443,159 @@ class Agent:
         return plan
 
     async def _run_tool_calls(self, turn: ParsedTurn) -> bool:
-        """Execute a turn's tool calls. Returns False if the user aborted."""
-        # Read-only calls in a turn can run together; anything mutating is
-        # serialised so two writes to one file cannot interleave.
-        for call in turn.tool_calls:
+        """Execute a turn's tool calls. Returns False if the user aborted.
+
+        Read-only calls that need no decision from the user are run together;
+        everything else is serialised, so two writes to one file cannot
+        interleave and two permission prompts cannot arrive at once.
+        """
+        pending = list(turn.tool_calls)
+        while pending:
+            batch = self._parallel_batch(pending)
+            if batch:
+                await self._run_together(batch)
+                del pending[:len(batch)]
+                continue
+            call = pending.pop(0)
+            if not await self._run_one(call):
+                return False
+        return True
+
+    def _parallel_batch(self, pending: list) -> list:
+        """The leading run of calls that may safely go at once.
+
+        A call qualifies only if it changes nothing, its tool allows
+        concurrency, and it needs no answer from the user -- so the batch can
+        never reorder a write or stack up prompts. Fewer than two is not
+        worth the machinery, and reads straight through the ordinary path.
+        """
+        batch = []
+        for call in pending:
             tool = self.tools.get(call.name)
-            if tool is None:
-                suggestion = self.tools.suggest(call.name)
-                hint = f" Did you mean {suggestion}?" if suggestion else ""
-                message = (
-                    f"No tool named {call.name!r}.{hint} "
-                    f"Available: {', '.join(self.tools.names())}"
-                )
-                await self.cb.on_tool_result(call.name, False, message, message)
-                self.session.add_tool_result(call.name, f"ERROR: {message}", call.call_id)
-                continue
+            if tool is None or tool.mutating or not tool.concurrency_safe:
+                break
+            if self.permissions.blocked(call.name, tool.mutating, tool.internal):
+                break
+            if self.permissions.needs_prompt(call.name, tool.mutating,
+                                             call.arguments, tool.internal):
+                break
+            batch.append(call)
+        return batch if len(batch) > 1 else []
 
-            summary = summarise_call(call.name, call.arguments, self.workspace)
+    async def _run_together(self, batch: list) -> None:
+        """Run a batch of read-only calls at once.
 
-            if refusal := self.permissions.blocked(call.name, tool.mutating, tool.internal):
-                await self.cb.on_tool_result(call.name, False, refusal, refusal)
-                self.session.add_tool_result(call.name, f"ERROR: {refusal}", call.call_id)
-                continue
+        Started together, but reported strictly in the order the model asked
+        for -- both on screen and in the conversation. Results that arrived
+        in a race-dependent order would make the same turn read differently
+        each time it ran, and the model's next step depends on that order.
+        """
+        for call in batch:
+            await self.cb.on_tool_start(
+                call.name, summarise_call(call.name, call.arguments, self.workspace))
 
-            if self.permissions.needs_prompt(
-                call.name, tool.mutating, call.arguments, tool.internal):
-                preview = await self._permission_preview(call.name, call.arguments)
-                decision = await self.cb.ask_permission(call.name, summary, preview)
-                if decision is Decision.ABORT:
-                    self.session.add_tool_result(
-                        call.name, "User stopped the agent here.", call.call_id
-                    )
-                    return False
-                if decision is Decision.DENY:
-                    self.permissions.record_denial(call.name, summary)
-                    self.session.add_tool_result(
-                        call.name,
-                        "The user declined this action. Do not retry it. "
-                        "Continue with a different approach, or ask what they want instead.",
-                        call.call_id,
-                    )
-                    continue
-                if decision is Decision.ALLOW_ALWAYS:
-                    self.permissions.remember(call.name, call.arguments)
+        context_share = max(1, self._context_left() // len(batch))
 
-            await self.cb.on_tool_start(call.name, summary)
-            self._checkpoint(tool, call)
-            # Long-running tools report as they go. Cleared afterwards so a
-            # tool object reused for a later call cannot write into a line
-            # that has already been closed.
-            tool.on_output = lambda line, _n=call.name: self.cb.on_tool_output(_n, line)
-            tool.context_left = self._context_left()
-            try:
-                result = await tool.invoke(call.arguments)
-            finally:
-                tool.on_output = None
-                tool.context_left = 0
+        async def one(call):
+            tool = self.tools.get(call.name)
+            # Each gets a slice of the budget rather than all of it: they are
+            # about to land in the same context together, and three reads
+            # each sized against the whole of it would overflow between them.
+            tool = copy.copy(tool)
+            tool.context_left = context_share
+            tool.on_output = None
+            return await tool.invoke(call.arguments)
+
+        results = await asyncio.gather(*(one(c) for c in batch),
+                                       return_exceptions=True)
+
+        for call, result in zip(batch, results):
+            if isinstance(result, BaseException):
+                if isinstance(result, (asyncio.CancelledError, Interrupted)):
+                    raise result
+                result = ToolResult.failure(
+                    f"{call.name} raised {type(result).__name__}: {result}")
             self.session.usage.tool_calls += 1
+            await self.cb.on_tool_result(call.name, result.ok, result.display,
+                                         result.output)
+            self.session.add_tool_result(
+                call.name, self._trim_output(result.output), call.call_id)
 
-            output = result.output
-            if len(output) > self.policy.max_tool_output:
-                keep = self.policy.max_tool_output
-                output = (
-                    output[: keep // 2]
-                    + f"\n\n... [{len(result.output) - keep} characters truncated] ...\n\n"
-                    + output[-keep // 2 :]
+    def _trim_output(self, output: str) -> str:
+        keep = self.policy.max_tool_output
+        if len(output) <= keep:
+            return output
+        return (output[: keep // 2]
+                + f"\n\n... [{len(output) - keep} characters truncated] ...\n\n"
+                + output[-keep // 2:])
+
+    async def _run_one(self, call) -> bool:
+        """One tool call, with any permission question it needs.
+
+        Returns False only when the user aborted the whole turn; a call that
+        was refused or declined returns True, because the turn carries on
+        with that answer in hand.
+        """
+        tool = self.tools.get(call.name)
+        if tool is None:
+            suggestion = self.tools.suggest(call.name)
+            hint = f" Did you mean {suggestion}?" if suggestion else ""
+            message = (
+                f"No tool named {call.name!r}.{hint} "
+                f"Available: {', '.join(self.tools.names())}"
+            )
+            await self.cb.on_tool_result(call.name, False, message, message)
+            self.session.add_tool_result(call.name, f"ERROR: {message}", call.call_id)
+            return True
+
+        summary = summarise_call(call.name, call.arguments, self.workspace)
+
+        if refusal := self.permissions.blocked(call.name, tool.mutating, tool.internal):
+            await self.cb.on_tool_result(call.name, False, refusal, refusal)
+            self.session.add_tool_result(call.name, f"ERROR: {refusal}", call.call_id)
+            return True
+
+        if self.permissions.needs_prompt(
+                call.name, tool.mutating, call.arguments, tool.internal):
+            preview = await self._permission_preview(call.name, call.arguments)
+            decision = await self.cb.ask_permission(call.name, summary, preview)
+            if decision is Decision.ABORT:
+                self.session.add_tool_result(
+                    call.name, "User stopped the agent here.", call.call_id
                 )
+                return False
+            if decision is Decision.DENY:
+                self.permissions.record_denial(call.name, summary)
+                self.session.add_tool_result(
+                    call.name,
+                    "The user declined this action. Do not retry it. "
+                    "Continue with a different approach, or ask what they want instead.",
+                    call.call_id,
+                )
+                return True
+            if decision is Decision.ALLOW_ALWAYS:
+                self.permissions.remember(call.name, call.arguments)
 
-            await self.cb.on_tool_result(call.name, result.ok, result.display, result.output)
-            self.session.add_tool_result(call.name, output, call.call_id)
+        await self.cb.on_tool_start(call.name, summary)
+        self._checkpoint(tool, call)
+        # Long-running tools report as they go. Cleared afterwards so a
+        # tool object reused for a later call cannot write into a line
+        # that has already been closed.
+        tool.on_output = lambda line, _n=call.name: self.cb.on_tool_output(_n, line)
+        tool.context_left = self._context_left()
+        try:
+            result = await tool.invoke(call.arguments)
+        finally:
+            tool.on_output = None
+            tool.context_left = 0
+        self.session.usage.tool_calls += 1
 
-            if call.name == "todo_write" and result.ok:
-                await self.cb.on_todos(result.display)
+        await self.cb.on_tool_result(call.name, result.ok, result.display, result.output)
+        self.session.add_tool_result(
+            call.name, self._trim_output(result.output), call.call_id)
 
+        if call.name == "todo_write" and result.ok:
+            await self.cb.on_todos(result.display)
         return True
 
     def _checkpoint(self, tool, call) -> None:

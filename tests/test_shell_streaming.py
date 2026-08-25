@@ -124,16 +124,32 @@ class TestAwkwardOutput:
 
 
 class TestTheHookIsClearedAfterwards:
-    def test_the_agent_unsets_it_even_when_the_tool_fails(self):
+    def test_the_agent_unsets_it_even_when_the_tool_fails(self, tmp_path):
         """A tool object outlives one call, so a stale hook would write into
         a line that has already been closed."""
-        import inspect
+        from unittest.mock import MagicMock
 
         from wynxo.agent import Agent
+        from wynxo.config import Config
+        from wynxo.effort import resolve
+        from wynxo.parsing import ToolCall
 
-        source = inspect.getsource(Agent._run_tool_calls)
-        assert "finally:" in source
-        assert "tool.on_output = None" in source
+        agent = Agent(client=MagicMock(), config=Config(),
+                      policy=resolve("medium"), workspace=tmp_path)
+        tool = agent.tools.get("read_file")
+
+        async def explode(_args):
+            raise RuntimeError("tool fell over")
+
+        # Replacing invoke rather than run, so the failure escapes the
+        # layer that normally turns it into a result -- the worst case for
+        # leaving state behind.
+        tool.invoke = explode
+        with pytest.raises(RuntimeError):
+            asyncio.run(agent._run_one(
+                ToolCall(name="read_file", arguments={"path": "x"}, call_id="1")))
+        assert tool.on_output is None
+        assert tool.context_left == 0
 
 
 class TestStoppingMeansStopping:

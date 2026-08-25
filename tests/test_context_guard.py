@@ -116,10 +116,14 @@ class TestTheAgentSuppliesTheNumber:
         agent.session.add_user("x" * 5_000_000)
         assert agent._context_left() == 0
 
-    def test_the_hook_is_cleared_after_the_call(self):
-        import inspect
+    def test_the_budget_is_cleared_after_the_call(self, tmp_path):
+        """A stale budget on a reused tool would size the next read against
+        a number from the wrong turn."""
+        from wynxo.parsing import ToolCall
 
-        from wynxo.agent import Agent
-
-        source = inspect.getsource(Agent._run_tool_calls)
-        assert "tool.context_left = 0" in source
+        agent = self._agent(tmp_path)
+        (tmp_path / "x.py").write_text("print(1)\n", encoding="utf-8")
+        tool = agent.tools.get("read_file")
+        asyncio.run(agent._run_one(
+            ToolCall(name="read_file", arguments={"path": "x.py"}, call_id="1")))
+        assert tool.context_left == 0
