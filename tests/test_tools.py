@@ -312,6 +312,46 @@ class TestListDir:
         assert ".git" not in result.output and "__pycache__" not in result.output
 
 
+class TestALinkIsNotADirectory:
+    """Two directories pointing at each other made the listing a tree of
+    itself repeating -- a/to_b/to_a/to_b for as many levels as were asked
+    for -- and a link back to the project root duplicated the whole listing
+    under a name nothing actually lives at."""
+
+    def _tangle(self, tmp_path):
+        import os
+
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "app.py").write_text("x = 1\n")
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        os.symlink(tmp_path / "b", tmp_path / "a" / "to_b",
+                   target_is_directory=True)
+        os.symlink(tmp_path / "a", tmp_path / "b" / "to_a",
+                   target_is_directory=True)
+        os.symlink(tmp_path, tmp_path / "whole", target_is_directory=True)
+        return tmp_path
+
+    async def test_the_loop_is_not_walked(self, tmp_path):
+        self._tangle(tmp_path)
+        result = await ListDir(tmp_path).invoke({"path": ".", "depth": 5})
+        assert result.ok
+        assert "to_b" in result.output
+        assert "to_a/" not in result.output.replace("to_a/ ->", "")
+
+    async def test_a_link_says_where_it_goes(self, tmp_path):
+        self._tangle(tmp_path)
+        result = await ListDir(tmp_path).invoke({"path": ".", "depth": 5})
+        assert "->" in result.output
+
+    async def test_the_real_tree_is_still_listed(self, tmp_path):
+        self._tangle(tmp_path)
+        result = await ListDir(tmp_path).invoke({"path": ".", "depth": 5})
+        assert "app.py" in result.output
+        # ... and only once, rather than again under the link to the root.
+        assert result.output.count("app.py") == 1
+
+
 class TestShell:
     async def test_runs_and_captures_output(self, tmp_path):
         command = "echo hello" if sys.platform != "win32" else "Write-Output hello"

@@ -425,11 +425,32 @@ class ListDir(Tool):
             if len(out) >= MAX_ENTRIES:
                 return True
             last = i == len(entries) - 1
-            out.append(f"{prefix}{'`-- ' if last else '|-- '}{entry.name}{'/' if entry.is_dir() else ''}")
+            branch = "`-- " if last else "|-- "
+            # A symlinked directory is shown as what it is and not walked
+            # into. Following them turns a project with two directories
+            # pointing at each other into a tree of itself repeating -- five
+            # levels of a/to_b/to_a/to_b -- and a link back to the root
+            # duplicates the whole listing under a name that is not where
+            # anything lives.
+            if entry.is_symlink():
+                out.append(f"{prefix}{branch}{entry.name}"
+                           f"{'/' if entry.is_dir() else ''} -> "
+                           f"{self._target(entry)}")
+                continue
+            out.append(f"{prefix}{branch}{entry.name}"
+                       f"{'/' if entry.is_dir() else ''}")
             if entry.is_dir():
                 if self._walk(entry, depth - 1, prefix + ("    " if last else "|   "), out):
                     return True
         return False
+
+    @staticmethod
+    def _target(entry: Path) -> str:
+        """Where a link points, said briefly and without following it."""
+        try:
+            return str(entry.readlink())
+        except OSError:
+            return "?"
 
 
 class EditOp(Schema):
