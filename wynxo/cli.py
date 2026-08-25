@@ -731,7 +731,8 @@ class Repl:
         width, _ = self.chat.size() if self.chat else (self.ui.width, 0)
         bar = self.ui.bar
         if bar is not None:
-            if rendered := tui.render_to_ansi(bar, width):
+            rows = self.chat.MAX_STATUS_ROWS if self.chat else 1
+            if rendered := tui.render_to_ansi(bar, width, max_rows=rows):
                 return rendered
         return "  " + self._status_line()
 

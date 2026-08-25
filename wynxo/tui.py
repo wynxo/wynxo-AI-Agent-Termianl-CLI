@@ -166,7 +166,10 @@ class ChatUI:
 
     HEADER_ROWS = 2        # the identity line, and a rule under it
     COMPOSER_ROWS = 3      # top border, the line you type on, bottom border
-    STATUS_ROWS = 1
+    STATUS_ROWS = 1        # the floor: the activity bar on its own
+    MAX_STATUS_ROWS = 14
+    """The ceiling. The pinned block grows to fit a plan and the line being
+    written, but never so far that there is no conversation left to read."""
 
     def __init__(self, status: Callable[[], str] | None = None,
                  completer=None, on_interrupt: Callable[[], None] | None = None,
@@ -206,6 +209,8 @@ class ChatUI:
         """Told the new width when the window changes, so whatever wraps
         text for this pane can be told too."""
         self._last_width = 0
+        self._status_lines = 1
+        """Rows the pinned block took last time it was drawn."""
         self.typed: "asyncio.Future[str] | None" = None
         """Set while a line of free text is being read, by prompt()."""
         self.default = ""
@@ -252,10 +257,23 @@ class ChatUI:
                 self.on_resize(width)
         return width, rows
 
+    def status_rows(self) -> int:
+        """How many rows the pinned block needs, as of the last repaint.
+
+        The previous frame's height rather than this one's: prompt_toolkit
+        settles the layout before it asks for content, and re-rendering the
+        bar here to measure it would advance its spinner twice per frame.
+        One frame of lag at ten frames a second is not visible.
+        """
+        _, rows = self.size()
+        room = max(1, rows - self.HEADER_ROWS - self.COMPOSER_ROWS - 3)
+        return max(self.STATUS_ROWS,
+                   min(self._status_lines, self.MAX_STATUS_ROWS, room))
+
     def transcript_rows(self) -> int:
         _, rows = self.size()
         return max(1, rows - self.HEADER_ROWS - self.COMPOSER_ROWS
-                   - self.STATUS_ROWS)
+                   - self.status_rows())
 
     # -- rendering ---------------------------------------------------------
 
@@ -306,6 +324,7 @@ class ChatUI:
         if self.scroll > 0:
             marker = "  ^ scrolled back -- End to follow again"
             text = f"{text}{marker}" if text else marker.strip()
+        self._status_lines = text.count("\n") + 1 if text else 1
         return ANSI(text)
 
     def _edge(self, top: bool):
@@ -328,7 +347,7 @@ class ChatUI:
         status = Window(
             content=FormattedTextControl(self._status_fragments,
                                          focusable=False),
-            height=self.STATUS_ROWS,
+            height=lambda: self.status_rows(),
         )
         composer = Window(
             content=BufferControl(buffer=self.buffer,
@@ -717,22 +736,34 @@ class ChatUI:
             pass
 
 
-def render_to_ansi(renderable, width: int) -> str:
-    """One rich renderable as a single line of ANSI, for the status row.
+def render_to_ansi(renderable, width: int, max_rows: int = 1) -> str:
+    """A rich renderable as ANSI, for the pinned rows.
 
     Its own Console because the transcript's is mid-stream: writing the bar
     through that would interleave a repainting widget with the conversation
     it is supposed to sit beneath.
+
+    max_rows matters. The header is one line and always will be, but the
+    pinned block below the conversation is the activity bar *and* whatever
+    sits above it -- the plan, the line currently being written. Keeping
+    only the first line meant that with a plan up, the pinned row showed the
+    panel's top border and nothing else: no items, and no activity bar
+    either, for as long as the plan lived.
     """
     sink = io.StringIO()
     console = Console(file=sink, force_terminal=True, color_system="truecolor",
                       highlight=False, soft_wrap=False,
-                      width=max(MIN_WIDTH, width), height=4)
+                      width=max(MIN_WIDTH, width), height=max(4, max_rows + 2))
     try:
         console.print(renderable, end="")
     except Exception:
         return ""
-    return sink.getvalue().split("\n")[0]
+    lines = sink.getvalue().split("\n")
+    if len(lines) <= max_rows:
+        return "\n".join(lines)
+    # Keep the end: the activity bar is the last line of the block, and it
+    # is the part that must never be pushed off.
+    return "\n".join(lines[-max_rows:])
 
 
 # The same pink-through-violet sweep the logo uses. Imported lazily to keep

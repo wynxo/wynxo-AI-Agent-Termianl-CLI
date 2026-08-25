@@ -482,6 +482,82 @@ class TestTheCompletionMenuOnAShortWindow:
         assert "reserve_space_for_menu=_menu_rows()" in source
 
 
+class TestThePinnedBlockGrowsForThePlan:
+    """The pinned area is the activity bar and whatever sits above it -- the
+    plan, the line being written. It was one row, and the renderer kept only
+    the first line of what it was given.
+
+    So with a plan up, the pinned row showed the top border of the plan
+    panel and nothing else: no items, and no activity bar either -- no
+    tokens, no elapsed time, no context figure -- for as long as the plan
+    lived, which on a multi-step job is the whole job.
+    """
+
+    def _block(self, lines):
+        from rich.text import Text
+
+        return Text("\n".join(lines))
+
+    def test_more_than_one_line_survives(self):
+        from wynxo.tui import render_to_ansi
+
+        rendered = render_to_ansi(self._block(["one", "two", "three"]),
+                                  width=40, max_rows=6)
+        assert rendered.count("\n") == 2
+
+    def test_the_default_is_still_one_line(self):
+        """The header is one line and always will be."""
+        from wynxo.tui import render_to_ansi
+
+        rendered = render_to_ansi(self._block(["one", "two"]), width=40)
+        assert "\n" not in rendered
+
+    def test_the_bar_is_what_survives_a_squeeze(self):
+        """It is the last line of the block, and the one that must never be
+        pushed off: it holds the token count and the context figure."""
+        from wynxo.tui import render_to_ansi
+
+        rendered = render_to_ansi(
+            self._block(["plan top", "item", "item", "THE BAR"]),
+            width=40, max_rows=2)
+        assert "THE BAR" in rendered
+        assert "plan top" not in rendered
+
+    def test_the_status_area_grows(self):
+        chat = ChatUI(status=lambda: "a\nb\nc\nd")
+        chat._status_fragments()
+        assert chat.status_rows() == 4
+
+    def test_and_shrinks_again(self):
+        text = ["a\nb\nc"]
+        chat = ChatUI(status=lambda: text[0])
+        chat._status_fragments()
+        assert chat.status_rows() == 3
+        text[0] = "just the bar"
+        chat._status_fragments()
+        assert chat.status_rows() == 1
+
+    def test_it_never_eats_the_whole_screen(self):
+        chat = ChatUI(status=lambda: "\n".join(["x"] * 400))
+        chat._status_fragments()
+        assert chat.status_rows() <= chat.MAX_STATUS_ROWS
+        assert chat.transcript_rows() >= 1
+
+    def test_the_conversation_keeps_room_on_a_short_window(self):
+        chat = ChatUI(status=lambda: "\n".join(["x"] * 40), width=80)
+        chat.size = lambda: (80, 12)
+        chat._status_fragments()
+        assert chat.transcript_rows() >= 3
+
+    def test_the_transcript_gives_up_the_rows(self):
+        chat = ChatUI(status=lambda: "one line")
+        chat._status_fragments()
+        tall = chat.transcript_rows()
+        chat._status = lambda: "a\nb\nc\nd\ne"
+        chat._status_fragments()
+        assert chat.transcript_rows() == tall - 4
+
+
 class TestTheWindowChangingSize:
     """rich wraps to ui.width before anything reaches the pane, and the pane
     truncates rather than wraps. So a window made narrower mid-session cut
