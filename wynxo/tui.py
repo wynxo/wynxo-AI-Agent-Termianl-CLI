@@ -166,11 +166,21 @@ class ChatUI:
     # -- geometry ----------------------------------------------------------
 
     def size(self) -> tuple[int, int]:
-        try:
-            size = self.app.output.get_size()
-            return max(MIN_WIDTH, size.columns), max(4, size.rows)
-        except Exception:
-            return 80, 24
+        """The screen, in columns and rows.
+
+        Asked of the application only while it is actually running. Reading
+        `app.output` before that builds the platform's output object, and on
+        Windows that means opening a console handle -- which a test runner
+        or a CI job does not have. Off the terminal size otherwise, which
+        every platform answers without side effects.
+        """
+        if self.app.is_running:
+            try:
+                size = self.app.output.get_size()
+                return max(MIN_WIDTH, size.columns), max(4, size.rows)
+            except Exception:
+                pass
+        return max(MIN_WIDTH, _terminal_width()), max(4, _terminal_height())
 
     def transcript_rows(self) -> int:
         _, rows = self.size()
@@ -521,6 +531,15 @@ def _terminal_width(default: int = 80) -> int:
 
     try:
         return shutil.get_terminal_size((default, 24)).columns
+    except (OSError, ValueError):
+        return default
+
+
+def _terminal_height(default: int = 24) -> int:
+    import shutil
+
+    try:
+        return shutil.get_terminal_size((80, default)).lines
     except (OSError, ValueError):
         return default
 

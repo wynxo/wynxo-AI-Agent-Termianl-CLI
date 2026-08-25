@@ -10,3 +10,4 @@ venv/
 .ruff_cache/
 .wynxo.json
 .DS_Store
+hang-traceback.txt

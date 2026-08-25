@@ -61,6 +61,20 @@ jobs:
       - name: Tests
         run: python -m pytest -q
 
+      - name: Where it hung
+        # A hung suite is killed by the watchdog in tests/conftest.py, which
+        # writes every thread's stack here. Without this the log shows a job
+        # that stopped and nothing else.
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f hang-traceback.txt ]; then
+            echo "The suite hung. Stacks at the moment it was killed:"
+            cat hang-traceback.txt
+          else
+            echo "No hang report -- the suite failed rather than hung."
+          fi
+
       - name: The CLI actually starts
         # --version goes through argparse and every module-level import,
         # which is where a platform difference tends to surface first.
