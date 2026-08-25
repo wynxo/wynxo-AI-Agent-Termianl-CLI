@@ -321,6 +321,20 @@ class UI:
             line.append(f"  (+{extra} lines)", style=MUTED)
         self.console.print(line)
 
+    def tool_output(self, line: str) -> None:
+        """One line from a command that is still running.
+
+        Dimmed and indented past the tool line so a long build reads as
+        something happening underneath the step, rather than as the agent's
+        own words. Truncated per line: a stray 5000-column line from a
+        minifier would otherwise wrap into a screenful.
+        """
+        text = line.rstrip()
+        if not text.strip():
+            return
+        limit = max(24, self.width - 8)
+        self.console.print(Text("      " + text[:limit], style=MUTED))
+
     def diff(self, text: str) -> None:
         if not text.strip():
             return

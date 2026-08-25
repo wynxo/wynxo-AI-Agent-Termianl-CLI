@@ -361,6 +361,24 @@ class TerminalCallbacks(Callbacks):
         else:
             self.ui.tool_result(name, ok, display, output)
 
+    async def on_tool_output(self, name: str, line: str) -> None:
+        """A line from a command while it is still running.
+
+        Only shell gets this. A build or a test run is the case where
+        waiting in silence is worst: the output that explains what went
+        wrong arrives long before the exit code does, and if the command
+        times out it is the only output there will ever be.
+        """
+        if name != "shell":
+            return
+        self._end_stream()
+        self.ui.tool_output(line)
+        if self.bar is not None:
+            # Doubles as the keep-alive: the pinned bar now says what the
+            # command is doing right now, so a slow build looks busy rather
+            # than hung.
+            self.bar.update(detail=line.strip()[:60])
+
     async def on_todos(self, rendered: str) -> None:
         """Pin the plan in the live region rather than printing it again.
 

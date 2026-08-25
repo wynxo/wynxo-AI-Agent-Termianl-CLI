@@ -169,6 +169,7 @@ class Callbacks:
     async def on_stage(self, name: str, detail: str = "") -> None: ...
     async def on_tool_start(self, name: str, summary: str) -> None: ...
     async def on_tool_result(self, name: str, ok: bool, display: str, output: str) -> None: ...
+    async def on_tool_output(self, name: str, line: str) -> None: ...
     async def on_todos(self, rendered: str) -> None: ...
     async def on_warning(self, message: str) -> None: ...
 
@@ -482,7 +483,14 @@ class Agent:
 
             await self.cb.on_tool_start(call.name, summary)
             self._checkpoint(tool, call)
-            result = await tool.invoke(call.arguments)
+            # Long-running tools report as they go. Cleared afterwards so a
+            # tool object reused for a later call cannot write into a line
+            # that has already been closed.
+            tool.on_output = lambda line, _n=call.name: self.cb.on_tool_output(_n, line)
+            try:
+                result = await tool.invoke(call.arguments)
+            finally:
+                tool.on_output = None
             self.session.usage.tool_calls += 1
 
             output = result.output

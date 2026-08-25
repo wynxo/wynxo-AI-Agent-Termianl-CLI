@@ -70,6 +70,9 @@ class Tool(ABC):
         # Likewise: no shield given means the protective one, not none. A
         # tool built in a test or by future code should not leak by default.
         self.shield = shield if shield is not None else Shield(self.workspace)
+        self.on_output = None
+        """Optional async hook the agent sets so a long-running tool can show
+        its output while it is still running, instead of only at the end."""
 
     @abstractmethod
     async def run(self, args: Schema) -> ToolResult: ...
