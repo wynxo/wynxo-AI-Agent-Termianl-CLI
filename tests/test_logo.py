@@ -168,3 +168,32 @@ class TestTheSetting:
         from wynxo.cli import COMMANDS
 
         assert "/logo" in COMMANDS
+
+
+class TestArtThatAlreadyFits:
+    """Line art must not be round-tripped through the ink ramp.
+
+    Resampling substitutes a character of similar weight for every one,
+    which is right for a photograph and ruinous for hand-drawn art -- every
+    / and \\ comes back as a +.
+    """
+
+    ART = "  /\\_/\\\n ( o.o )\n  > ^ <"
+
+    def test_it_is_returned_character_for_character(self):
+        assert logo.fit(self.ART, width=40, max_height=20) == [
+            "  /\\_/\\", " ( o.o )", "  > ^ <"]
+
+    def test_the_bundled_line_art_survives(self):
+        drawn = logo.fit(logo.read("cat"), width=100, max_height=40)
+        assert any("/\\" in line for line in drawn)
+        assert any("\\_/" in line for line in drawn)
+
+    def test_art_too_wide_is_still_resampled(self):
+        """The photograph has to shrink; only art that already fits is
+        passed through."""
+        lines = logo.fit(logo.read("wyn"), width=50, max_height=40)
+        assert max(len(l) for l in lines) <= 50
+
+    def test_squeezing_line_art_does_not_crash(self):
+        assert logo.fit(logo.read("cat"), width=6, max_height=40)

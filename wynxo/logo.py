@@ -84,6 +84,13 @@ def fit(art: str, width: int, max_height: int) -> list[str]:
         height = max(1, max_height)
         width = max(8, min(width, round(height * source_w / source_h)))
 
+    if width >= source_w and height >= source_h:
+        # It already fits. Returned untouched rather than round-tripped
+        # through the ink ramp, which substitutes a character of similar
+        # weight for every one -- fine for a photograph, ruinous for
+        # hand-drawn line art, where it turns every / and \ into a +.
+        return [r.rstrip() for r in rows]
+
     grid = asciiart.normalise(asciiart.from_text(art, width, height))
     return asciiart.render(grid, style="simple").split("\n")
 

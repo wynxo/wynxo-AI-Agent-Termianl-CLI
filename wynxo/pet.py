@@ -33,37 +33,40 @@ class Mood(Enum):
 # Frames per mood. The last frame of a cycle is usually a blink, which is what
 # makes a still face look alive without moving anything else.
 FACES: dict[Mood, list[str]] = {
-    Mood.IDLE:     ["(•ᴗ•)", "(•ᴗ•)", "(•ᴗ•)", "(-ᴗ-)"],
-    Mood.THINKING: ["(◐ᴗ◐)", "(◓ᴗ◓)", "(◑ᴗ◑)", "(◒ᴗ◒)"],
-    Mood.READING:  ["(◉ᴗ◉)", "(◉ᴗ◉)", "(◉ᴗ◉)", "(-ᴗ-)"],
-    Mood.WORKING:  ["(¬ᴗ¬)", "(ºᴗº)"],
-    Mood.RUNNING:  ["(•ᴗ•)╭", "(•ᴗ•)─", "(•ᴗ•)╰", "(•ᴗ•)─"],
-    Mood.ASKING:   ["(•ᴗ•)?", "(•ᴗ•) ", "(•ᴗ•)?", "(•ᴗ•) "],
-    Mood.HAPPY:    ["(≧ᴗ≦)", "(ˆᴗˆ)"],
-    Mood.SAD:      ["(×ᴗ×)", "(×ᴗ×)", "(⊙ᴗ⊙)"],
+    # ^...^ with the outer brackets angled is read as ears, which is what
+    # makes these cats rather than faces with whiskers drawn on.
+    Mood.IDLE:     ["≽^•⩊•^≼", "≽^•⩊•^≼", "≽^•⩊•^≼", "≽^-⩊-^≼"],
+    Mood.THINKING: ["≽^˘⩊•^≼", "≽^•⩊˘^≼", "≽^˘⩊•^≼", "≽^•⩊•^≼"],
+    Mood.READING:  ["≽^◉⩊◉^≼", "≽^◉⩊◉^≼", "≽^◉⩊◉^≼", "≽^-⩊-^≼"],
+    Mood.WORKING:  ["≽^•̀⩊•́^≼", "≽^•́⩊•̀^≼"],
+    Mood.RUNNING:  ["≽^•⩊•^≼ฅ", "≽^•⩊•^≼ﾉ", "≽^•⩊•^≼ฅ", "≽^•⩊•^≼ﾉ"],
+    Mood.ASKING:   ["≽^•⩊•^≼?", "≽^•⩊•^≼ ", "≽^•⩊•^≼?", "≽^•⩊•^≼ "],
+    Mood.HAPPY:    ["≽^≧⩊≦^≼", "≽^ᵕ⩊ᵕ^≼"],
+    Mood.SAD:      ["≽^╥⩊╥^≼", "≽^╥⩊╥^≼", "≽^×⩊×^≼"],
 }
 
 FACES_ASCII: dict[Mood, list[str]] = {
-    Mood.IDLE:     ["(o_o)", "(o_o)", "(o_o)", "(-_-)"],
-    Mood.THINKING: ["(o_O)", "(O_o)", "(o_O)", "(O_o)"],
-    Mood.READING:  ["(0_0)", "(0_0)", "(0_0)", "(-_-)"],
-    Mood.WORKING:  ["(>_<)", "(>_>)"],
-    Mood.RUNNING:  ["(o_o)/", "(o_o)-", "(o_o)\\", "(o_o)-"],
-    Mood.ASKING:   ["(o_o)?", "(o_o) ", "(o_o)?", "(o_o) "],
-    Mood.HAPPY:    ["(^_^)", "(^-^)"],
-    Mood.SAD:      ["(x_x)", "(x_x)", "(@_@)"],
+    # =^.^= is the oldest cat in the book and the only one every font has.
+    Mood.IDLE:     ["=^.^=", "=^.^=", "=^.^=", "=^-^="],
+    Mood.THINKING: ["=^o.^=", "=^.o^=", "=^o.^=", "=^.o^="],
+    Mood.READING:  ["=^O.O^=", "=^O.O^=", "=^O.O^=", "=^-.-^="],
+    Mood.WORKING:  ["=^>.<^=", "=^>.>^="],
+    Mood.RUNNING:  ["=^.^=/", "=^.^=-", "=^.^=\\", "=^.^=-"],
+    Mood.ASKING:   ["=^.^=?", "=^.^= ", "=^.^=?", "=^.^= "],
+    Mood.HAPPY:    ["=^_^=", "=^v^="],
+    Mood.SAD:      ["=^x.x^=", "=^x.x^=", "=^@.@^="],
 }
 
-# An alternate face set for the kawaii voice. Same moods, same widths.
+# Rounder and fluffier, for the kawaii voice. Paws out.
 FACES_KAWAII: dict[Mood, list[str]] = {
-    Mood.IDLE:     ["(｡•ᴗ•｡)", "(｡•ᴗ•｡)", "(｡•ᴗ•｡)", "(｡-ᴗ-｡)"],
-    Mood.THINKING: ["(｡◐ᴗ◐｡)", "(｡◓ᴗ◓｡)", "(｡◑ᴗ◑｡)", "(｡◒ᴗ◒｡)"],
-    Mood.READING:  ["(｡◉ᴗ◉｡)", "(｡◉ᴗ◉｡)", "(｡◉ᴗ◉｡)", "(｡-ᴗ-｡)"],
-    Mood.WORKING:  ["(｡•̀ᴗ•́｡)", "(｡•́ᴗ•̀｡)"],
-    Mood.RUNNING:  ["(｡•ᴗ•｡)ﾉ", "(｡•ᴗ•｡)/", "(｡•ᴗ•｡)ﾉ", "(｡•ᴗ•｡)/"],
-    Mood.ASKING:   ["(｡•ᴗ•｡)?", "(｡•ᴗ•｡) ", "(｡•ᴗ•｡)?", "(｡•ᴗ•｡) "],
-    Mood.HAPPY:    ["(｡≧ᴗ≦｡)", "(｡^ᴗ^｡)"],
-    Mood.SAD:      ["(｡×ᴗ×｡)", "(｡×ᴗ×｡)", "(｡╥ᴗ╥｡)"],
+    Mood.IDLE:     ["₍ᐢ•ﻌ•ᐢ₎", "₍ᐢ•ﻌ•ᐢ₎", "₍ᐢ•ﻌ•ᐢ₎", "₍ᐢ-ﻌ-ᐢ₎"],
+    Mood.THINKING: ["₍ᐢ˘ﻌ•ᐢ₎", "₍ᐢ•ﻌ˘ᐢ₎", "₍ᐢ˘ﻌ•ᐢ₎", "₍ᐢ•ﻌ•ᐢ₎"],
+    Mood.READING:  ["₍ᐢ◉ﻌ◉ᐢ₎", "₍ᐢ◉ﻌ◉ᐢ₎", "₍ᐢ◉ﻌ◉ᐢ₎", "₍ᐢ-ﻌ-ᐢ₎"],
+    Mood.WORKING:  ["₍ᐢ•̀ﻌ•́ᐢ₎", "₍ᐢ•́ﻌ•̀ᐢ₎"],
+    Mood.RUNNING:  ["ฅ₍ᐢ•ﻌ•ᐢ₎ฅ", "₍ᐢ•ﻌ•ᐢ₎ﾉ ", "ฅ₍ᐢ•ﻌ•ᐢ₎ฅ", "₍ᐢ•ﻌ•ᐢ₎ﾉ "],
+    Mood.ASKING:   ["₍ᐢ•ﻌ•ᐢ₎?", "₍ᐢ•ﻌ•ᐢ₎ ", "₍ᐢ•ﻌ•ᐢ₎?", "₍ᐢ•ﻌ•ᐢ₎ "],
+    Mood.HAPPY:    ["₍ᐢ≧ﻌ≦ᐢ₎", "₍ᐢᵕﻌᵕᐢ₎"],
+    Mood.SAD:      ["₍ᐢ╥ﻌ╥ᐢ₎", "₍ᐢ╥ﻌ╥ᐢ₎", "₍ᐢ×ﻌ×ᐢ₎"],
 }
 
 MOOD_STYLES: dict[Mood, str] = {

@@ -100,7 +100,11 @@ class TestBarIntegration:
         ui.width = 90
         bar = ActivityBar(ui, "medium", pet=Pet())
         bar.update(activity="reading", tokens=5)
-        assert "(◉ᴗ◉)" in bar._render().plain
+        # Taken from the table rather than written out, so redesigning the
+        # faces does not break a test about the bar.
+        from wynxo.pet import FACES, Mood
+
+        assert FACES[Mood.READING][0] in bar._render().plain
 
     def test_disabled_pet_falls_back_to_the_spinner(self):
         ui = UI()
