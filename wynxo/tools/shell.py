@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
+import subprocess
 from collections import deque
 
 from ..platforms import default_shell
@@ -18,6 +20,42 @@ what matters -- a failing build says why on its last lines."""
 MAX_LINE_BYTES = 16_384
 """A "line" longer than this is a progress bar redrawing with \\r, not a
 line. Flushed rather than buffered until the process exits."""
+
+
+def _new_process_group() -> dict:
+    """Keyword arguments that give the command its own process group."""
+    if os.name == "nt":
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        return {"creationflags": flags} if flags else {}
+    # POSIX: a new session, which is also a new process group.
+    return {"start_new_session": True}
+
+
+def _signal_group(process, terminate: bool) -> None:
+    """Signal the command's whole process group, falling back to the one
+    process where the platform will not do groups."""
+    if process.pid is None:
+        return
+    if os.name == "nt":
+        # Windows has no process groups in the POSIX sense; taskkill /T is
+        # the equivalent, and /F is the only reliable form of it.
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                           capture_output=True, timeout=10)
+            return
+        except (OSError, subprocess.SubprocessError):
+            pass          # fall through to the single-process attempt
+    else:
+        sig = signal.SIGTERM if terminate else signal.SIGKILL
+        try:
+            os.killpg(os.getpgid(process.pid), sig)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass          # already gone, or never got its own group
+    try:
+        process.terminate() if terminate else process.kill()
+    except (ProcessLookupError, OSError, ValueError):
+        pass
 
 
 def _clean(raw: bytes) -> str:
@@ -94,11 +132,24 @@ class Shell(Tool):
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                # Its own process group, so the whole command can be killed
+                # rather than just the shell that launched it. `make -j8` and
+                # `npm install` spawn workers, and killing their parent leaves
+                # those workers running -- eating the machine long after the
+                # user thinks they stopped it.
+                **_new_process_group(),
             )
         except OSError as exc:
             return ToolResult.failure(f"Could not start {shell}: {exc}")
 
-        output, timed_out = await self._stream(process, args.timeout)
+        try:
+            output, timed_out = await self._stream(process, args.timeout)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # Ctrl-C. Without this the await is abandoned and the command
+            # carries on in the background, still writing to the project,
+            # while the user believes they stopped it.
+            await self._terminate(process)
+            raise
         if timed_out:
             await self._terminate(process)
             # The output is handed back rather than discarded. A command that
@@ -203,11 +254,27 @@ class Shell(Tool):
 
     @staticmethod
     async def _terminate(process) -> None:
+        """Stop the command and everything it started.
+
+        Politely first: SIGTERM to the group gives a test runner the chance
+        to tear down its own children and remove its temp files. SIGKILL is
+        the follow-up for anything that ignores it.
+        """
+        if process.returncode is not None:
+            return
+        _signal_group(process, terminate=True)
         try:
-            process.terminate()
-            await asyncio.wait_for(process.wait(), timeout=5.0)
+            await asyncio.wait_for(asyncio.shield(process.wait()), timeout=5.0)
+            return
         except (asyncio.TimeoutError, ProcessLookupError):
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
+            pass
+        except asyncio.CancelledError:
+            # Interrupted again while cleaning up. Finish the job -- leaving
+            # a half-killed process group is the thing we are here to avoid.
+            _signal_group(process, terminate=False)
+            raise
+        _signal_group(process, terminate=False)
+        try:
+            await asyncio.wait_for(asyncio.shield(process.wait()), timeout=5.0)
+        except (asyncio.TimeoutError, ProcessLookupError, asyncio.CancelledError):
+            pass

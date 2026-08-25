@@ -134,3 +134,89 @@ class TestTheHookIsClearedAfterwards:
         source = inspect.getsource(Agent._run_tool_calls)
         assert "finally:" in source
         assert "tool.on_output = None" in source
+
+
+class TestStoppingMeansStopping:
+    """Killing the shell is not killing the command.
+
+    `make -j8` and `npm install` spawn workers, so signalling only the
+    process wynxo launched leaves those workers running -- eating the machine
+    long after the user believes they stopped it. And an abandoned await
+    stops nothing at all: the command carries on writing to the project.
+    """
+
+    @pytest.fixture
+    def probe(self, tmp_path):
+        """A script we can look for by name, so the search cannot match the
+        test runner's own command line."""
+        script = tmp_path / "probe.sh"
+        script.write_text("#!/bin/sh\nsleep 60\n")
+        script.chmod(0o755)
+        return script
+
+    def survivors(self, probe) -> list[str]:
+        import os
+        import subprocess
+
+        found = subprocess.run(["pgrep", "-f", str(probe)],
+                               capture_output=True, text=True).stdout.split()
+        return [p for p in found if p.isdigit() and int(p) != os.getpid()]
+
+    def reap(self, pids) -> None:
+        import os
+        import signal as _signal
+
+        for pid in pids:
+            try:
+                os.kill(int(pid), _signal.SIGKILL)
+            except OSError:
+                pass
+
+    def test_a_timeout_takes_the_workers_with_it(self, shell, probe):
+        result = run(shell, f"{probe} & {probe} & wait", timeout=2)
+        assert result.ok is False
+        time.sleep(0.5)
+        left = self.survivors(probe)
+        self.reap(left)
+        assert left == [], f"{len(left)} workers outlived the timeout"
+
+    def test_cancelling_takes_the_command_with_it(self, shell, probe):
+        """Ctrl-C during a build. The await used to be abandoned while the
+        command carried on in the background."""
+        async def cancel_midway():
+            task = asyncio.create_task(
+                shell.run(ShellInput(command=f"{probe} & {probe} & wait",
+                                     timeout=60)))
+            await asyncio.sleep(0.6)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(cancel_midway())
+        time.sleep(0.5)
+        left = self.survivors(probe)
+        self.reap(left)
+        assert left == [], f"{len(left)} processes survived the interrupt"
+
+    def test_cancelling_does_not_swallow_the_interrupt(self, shell):
+        """The REPL relies on CancelledError reaching it to end the turn."""
+        async def cancel_midway():
+            task = asyncio.create_task(
+                shell.run(ShellInput(command="sleep 30", timeout=60)))
+            await asyncio.sleep(0.3)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(cancel_midway())
+
+    def test_a_command_that_already_finished_is_not_signalled(self, shell):
+        """Signalling a reaped pid can hit whatever reused the number."""
+        async def check():
+            result = await shell.run(ShellInput(command="echo quick"))
+            assert result.ok
+            # A second teardown must be a no-op rather than an error.
+            await shell._terminate(
+                type("Done", (), {"returncode": 0, "pid": 999999})())
+
+        asyncio.run(check())
