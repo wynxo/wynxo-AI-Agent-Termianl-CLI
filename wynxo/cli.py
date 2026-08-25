@@ -664,14 +664,29 @@ class Repl:
             status=self._chat_status,
             completer=CommandCompleter(lambda: self.workspace),
             on_interrupt=self.interrupt,
+            on_thinking=self.callbacks.toggle_thinking,
+            on_tools=self.callbacks.toggle_verbose,
             unicode=self.ui.g.unicode,
         )
         self.chat = chat
         self.ui.console = chat.transcript.console
+        # rich wraps to ui.width, and the pane truncates rather than wraps,
+        # so the two have to agree -- including after the window is resized.
+        chat.on_resize = self._resized
+        self.ui.width = chat.size()[0]
         self.ui.live_ok = False        # the bar goes in the pinned row
         self.ui.on_refresh = chat.invalidate
         self.callbacks.chat = chat
         return chat
+
+    def _resized(self, width: int) -> None:
+        """The window changed size; tell what wraps to it.
+
+        One place, because everything else reads ui.width when it draws --
+        the activity bar included. Only the console needs telling as well,
+        and that is the transcript's own, which the pane resizes itself.
+        """
+        self.ui.width = width
 
     def _chat_header(self) -> str:
         """The pinned identity line: who you are talking to, and about what."""
@@ -966,7 +981,15 @@ class Repl:
             await self._talk(await self.talker.opening(text))
         self._task = asyncio.ensure_future(self.agent.run(text))
         bar.start()
-        watcher.start()
+        if self.chat is None:
+            # Only where nothing else is reading the terminal. Under the chat
+            # layout prompt_toolkit owns stdin, and a watcher thread reading
+            # it too means every byte goes to whichever gets there first --
+            # so characters typed during a turn simply vanished from the
+            # composer, and Ctrl-O worked or did not depending on the race.
+            # The layout binds those keys itself, and its composer is the
+            # type-ahead queue.
+            watcher.start()
         try:
             result = await self._task
         except (asyncio.CancelledError, Interrupted):

@@ -170,6 +170,8 @@ class ChatUI:
 
     def __init__(self, status: Callable[[], str] | None = None,
                  completer=None, on_interrupt: Callable[[], None] | None = None,
+                 on_thinking: Callable[[], None] | None = None,
+                 on_tools: Callable[[], None] | None = None,
                  unicode: bool = True, accent: str = "ansimagenta",
                  width: int | None = None,
                  header: Callable[[], str] | None = None):
@@ -185,6 +187,13 @@ class ChatUI:
         self._status = status or (lambda: "")
         self._header = header or (lambda: "")
         self._on_interrupt = on_interrupt
+        # Ctrl-O and Ctrl-T used to reach the session only through a
+        # KeyWatcher thread reading the tty behind this application's back.
+        # Two readers of one terminal means each byte goes to whichever wins
+        # the race, so the keys worked intermittently and stole characters
+        # out of the composer while they were at it. Bound here instead.
+        self._on_thinking = on_thinking
+        self._on_tools = on_tools
         self._unicode = unicode
         self._accent = accent
         self._closed = False
@@ -193,6 +202,10 @@ class ChatUI:
         self.answer: "asyncio.Future[str] | None" = None
         self.picker: dict | None = None
         self.picked: "asyncio.Future[str | None] | None" = None
+        self.on_resize: "Callable[[int], None] | None" = None
+        """Told the new width when the window changes, so whatever wraps
+        text for this pane can be told too."""
+        self._last_width = 0
         self.typed: "asyncio.Future[str] | None" = None
         """Set while a line of free text is being read, by prompt()."""
         self.default = ""
@@ -217,10 +230,27 @@ class ChatUI:
         if self.app.is_running:
             try:
                 size = self.app.output.get_size()
-                return max(MIN_WIDTH, size.columns), max(4, size.rows)
+                return self._measured(max(MIN_WIDTH, size.columns),
+                                      max(4, size.rows))
             except Exception:
                 pass
-        return max(MIN_WIDTH, _terminal_width()), max(4, _terminal_height())
+        return self._measured(max(MIN_WIDTH, _terminal_width()),
+                              max(4, _terminal_height()))
+
+    def _measured(self, width: int, rows: int) -> tuple[int, int]:
+        """Announce a width that has changed since the last measurement.
+
+        Everything drawn into the transcript is wrapped by rich before it
+        gets here, at whatever width the UI was told about -- and the pane
+        does not wrap, it truncates. So a window made narrower mid-session
+        cut the right-hand end off every line written after it until the
+        session was restarted.
+        """
+        if width != self._last_width:
+            self._last_width = width
+            if self.on_resize is not None:
+                self.on_resize(width)
+        return width, rows
 
     def transcript_rows(self) -> int:
         _, rows = self.size()
@@ -460,6 +490,18 @@ class ChatUI:
             # survives the answer being cut short.
             if self._on_interrupt is not None:
                 self._on_interrupt()
+
+        @keys.add("c-o")
+        def _(event):
+            """Show or hide the model's thinking, at the prompt or mid-turn."""
+            if self._on_thinking is not None:
+                self._on_thinking()
+
+        @keys.add("c-t")
+        def _(event):
+            """Full tool output, or the summary."""
+            if self._on_tools is not None:
+                self._on_tools()
 
         @keys.add("c-d")
         def _(event):

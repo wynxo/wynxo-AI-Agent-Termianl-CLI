@@ -270,6 +270,77 @@ class TestWhereItIsUsed:
         assert parser.parse_args(["--chat"]).chat is True
 
 
+class TestOnlyOneThingReadsTheKeyboard:
+    """The bug: characters typed during a turn simply vanished.
+
+    A turn started a KeyWatcher, which reads the tty in a thread of its own
+    to catch Ctrl-O and to collect type-ahead. Under the chat layout
+    prompt_toolkit is already reading that same terminal, so every byte went
+    to whichever reader got there first -- one keystroke in eight or so
+    disappeared out of the composer, and Ctrl-O worked or did not depending
+    on the race. Typing "second message" during a turn produced "econd
+    message".
+    """
+
+    def test_the_watcher_stays_out_of_the_layout(self):
+        import ast
+        import inspect
+
+        from wynxo.cli import Repl
+
+        tree = ast.parse(inspect.getsource(Repl.turn).strip())
+        starts = [node for node in ast.walk(tree)
+                  if isinstance(node, ast.Call)
+                  and ast.unparse(node.func) == "watcher.start"]
+        assert starts, "the watcher is gone entirely; the classic REPL needs it"
+        guarded = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            if "self.chat is None" not in ast.unparse(node.test):
+                continue
+            if any(ast.unparse(inner.func) == "watcher.start"
+                   for inner in ast.walk(node)
+                   if isinstance(inner, ast.Call)):
+                guarded = True
+        assert guarded, (
+            "the watcher reads the same terminal prompt_toolkit does; "
+            "starting it under the chat layout steals keystrokes")
+
+    def _press(self, chat, key: str):
+        import types
+
+        for binding in chat.app.key_bindings.bindings:
+            names = tuple(getattr(k, "value", str(k)) for k in binding.keys)
+            if names == (key,):
+                binding.handler(types.SimpleNamespace(data="", app=chat.app))
+                return True
+        return False
+
+    def test_the_layout_binds_the_keys_the_watcher_used_to_catch(self):
+        """Otherwise turning the watcher off would take Ctrl-O with it."""
+        pressed = []
+        chat = ChatUI(status=lambda: "",
+                      on_thinking=lambda: pressed.append("thinking"),
+                      on_tools=lambda: pressed.append("tools"))
+        assert self._press(chat, "c-o")
+        assert self._press(chat, "c-t")
+        assert pressed == ["thinking", "tools"]
+
+    def test_those_keys_are_harmless_when_nothing_is_wired(self):
+        chat = ChatUI(status=lambda: "")
+        assert self._press(chat, "c-o")      # must not raise
+        assert self._press(chat, "c-t")
+
+    def test_the_repl_wires_them(self):
+        import inspect
+
+        from wynxo.cli import Repl
+
+        source = inspect.getsource(Repl.use_chat_layout)
+        assert "on_thinking" in source and "on_tools" in source
+
+
 class TestStartingWithAPrompt:
     """`wynxo "add retries"` -- a prompt on the command line.
 
@@ -335,6 +406,34 @@ class TestStartingWithAPrompt:
         repl._connect, repl.turn, repl._loop = _connect, turn, _loop
         assert _asyncio.run(repl.start_with("add retries")) == 0
         assert repl.turn_calls == ["add retries"]
+
+
+class TestTheWindowChangingSize:
+    """rich wraps to ui.width before anything reaches the pane, and the pane
+    truncates rather than wraps. So a window made narrower mid-session cut
+    the right-hand end off every line written after it: eight words of a
+    sixteen-word answer, gone, until the session was restarted."""
+
+    def test_a_new_width_is_announced_once(self):
+        chat = ChatUI(status=lambda: "", width=100)
+        seen = []
+        chat.on_resize = seen.append
+        chat._measured(80, 24)
+        chat._measured(80, 24)
+        chat._measured(60, 24)
+        assert seen == [80, 60]
+
+    def test_it_survives_having_nobody_listening(self):
+        chat = ChatUI(status=lambda: "", width=100)
+        assert chat._measured(80, 24) == (80, 24)
+
+    def test_the_repl_keeps_the_ui_in_step(self):
+        import inspect
+
+        from wynxo.cli import Repl
+
+        assert "on_resize" in inspect.getsource(Repl.use_chat_layout)
+        assert "self.ui.width" in inspect.getsource(Repl._resized)
 
 
 class TestTheStartupChecklist:
