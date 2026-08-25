@@ -66,6 +66,74 @@ class ParsedTurn:
 _HIDDEN_TAGS = ("think", "thinking", "reasoning", "tool_call")
 
 
+# The argument a file-writing tool puts the actual code in. Watched while a
+# tool call streams so the file can be shown being written, rather than
+# appearing whole once the call completes.
+CODE_KEYS = ("content", "new_text", "new_string", "text")
+
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f",
+            '"': '"', "\\": "\\", "/": "/"}
+
+
+def partial_string_value(buffer: str, keys=CODE_KEYS) -> str:
+    """The value of the first of ``keys`` in half-written JSON, decoded.
+
+    A streaming tool call arrives as JSON a few characters at a time, so the
+    object never parses until it is finished -- which is exactly when it
+    stops being interesting. This reads the one field that matters straight
+    out of the partial text and decodes as much of it as has arrived.
+
+    Returns "" until the opening quote is seen, so nothing is shown on the
+    strength of a key name alone.
+    """
+    for key in keys:
+        marker = f'"{key}"'
+        at = buffer.find(marker)
+        if at == -1:
+            continue
+        rest = buffer[at + len(marker):]
+        colon = rest.find(":")
+        if colon == -1:
+            continue
+        rest = rest[colon + 1:].lstrip()
+        if not rest.startswith('"'):
+            # Either the value has not started, or it is not a string at all.
+            continue
+        return _decode_partial(rest[1:])
+    return ""
+
+
+def _decode_partial(text: str) -> str:
+    """Decode a JSON string body that may stop anywhere, including mid-escape."""
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == '"':
+            break                      # the value ended here
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        # An escape that has not finished arriving yet: stop, and pick it up
+        # on the next chunk rather than printing a stray backslash.
+        if i + 1 >= len(text):
+            break
+        nxt = text[i + 1]
+        if nxt == "u":
+            if i + 6 > len(text):
+                break
+            try:
+                out.append(chr(int(text[i + 2:i + 6], 16)))
+            except ValueError:
+                out.append(text[i:i + 6])
+            i += 6
+            continue
+        out.append(_ESCAPES.get(nxt, nxt))
+        i += 2
+    return "".join(out)
+
+
 class LiveContentFilter:
     """Strips <think>/<thinking>/<reasoning>/<tool_call> blocks out of a
     live token stream, without ever showing a partial tag.
@@ -88,6 +156,8 @@ class LiveContentFilter:
         The caller uses this as a last check: if a whole turn streamed
         nothing but the parsed result does have an answer, the two disagreed
         and the answer must still be shown."""
+        self._shown = ""
+        """How much of the streaming tool call's code has been reported."""
         self.saw_dangling_close = False
         """Set when a closing tag arrives with nothing having opened it.
 
@@ -95,6 +165,25 @@ class LiveContentFilter:
         began inside the block. The reasoning already streamed cannot be
         un-printed, but the caller can pass start_in_thinking=True next turn
         and every turn after this one comes out clean."""
+
+    def code_delta(self) -> str:
+        """New code written since this was last asked, while a call streams.
+
+        Only inside a tool call, and only the argument that holds the file's
+        contents. Everything else in the call -- the name, the path, the
+        closing braces -- is protocol, and watching it arrive tells you
+        nothing you want to know.
+        """
+        if self.open_tag != "tool_call":
+            return ""
+        whole = partial_string_value(self.buffer)
+        if not whole.startswith(self._shown):
+            # The model restarted the value, or a different argument came
+            # first. Start again rather than showing a spliced mixture.
+            self._shown = ""
+        delta = whole[len(self._shown):]
+        self._shown = whole
+        return delta
 
     def feed(self, text: str) -> str:
         """Consume one chunk of raw content; return what is safe to show."""
@@ -116,6 +205,7 @@ class LiveContentFilter:
                 break
             self.buffer = self.buffer[end + len(close):]
             self.open_tag = None
+            self._shown = ""
         if self.open_tag is None:
             # A close tag we never opened: swallow it rather than printing
             # "</think>" into the answer, and remember why it happened.

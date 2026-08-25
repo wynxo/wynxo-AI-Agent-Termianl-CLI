@@ -72,10 +72,18 @@ _SAFE_WORDS = {"public", "publickey", "pub", "fingerprint", "id", "name",
 _ASSIGNMENT = re.compile(
     r"""(?x)
     ([A-Za-z_][A-Za-z0-9_.\-]{0,60})      # the name
-    \s*[:=]\s*
-    (["']?)([^\s"',;]{6,})\2             # the value
+    [ \t]*[:=][ \t]*                      # ... and its value, same line
+    (["']?)([^\s"',;\\`]{6,})\2
     """
 )
+# Spaces and tabs rather than \s: a name and its value are on one line. With
+# \s the separator could span a newline, so `for key in keys:` followed by
+# `marker = ...` read as the setting "keys" holding the value "marker", and
+# the next line of ordinary code was masked.
+#
+# Backslashes and backticks end a value for the same reason: they are never
+# part of one, and including them made "export TOKEN=keepme\n" inside a test
+# fixture and `token=self.token` inside a doc comment look like credentials.
 
 
 def _names_a_secret(name: str) -> bool:
@@ -117,8 +125,12 @@ _KNOWN_TOKEN = re.compile(
 # a real credential ends up committed.
 _URL_CRED = re.compile(r"([a-zA-Z][\w+.-]*://[^\s:/@]+):([^\s:/@]+)@")
 
+# The body has to actually span lines. A real key does; the one-line string
+# literal that *builds* the replacement ("BEGIN...\\n{MASK}\\n...END") does
+# not, and without this wynxo could not read this very file.
 _PEM = re.compile(
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----[^\n]*\n.*?"
+    r"-----END [A-Z ]*PRIVATE KEY-----",
     re.DOTALL,
 )
 
@@ -131,6 +143,41 @@ _PLACEHOLDER = re.compile(
     r"[_\-]\S*|placeholder\S*|changeme\S*|xxx+|<.*>|\{\{.*\}\}|"
     r"\$\{.*\}|none|null|nil|true|false|empty|todo|tbd|\.\.\.|\*+)$"
 )
+
+
+# An unquoted value made only of letters, underscores and dots is usually a
+# name being referred to rather than a credential: `tokens=self.tokens`,
+# `key_bindings=bindings`, `protect_secrets = enabled`. Masking those
+# corrupts the code the model is trying to read.
+#
+# "Only letters" alone is too generous, though -- `client_secret:
+# GOCSPXabcdefghijklmnop` is also only letters. So the value has to be
+# shaped like something a person would type as a name: either it carries
+# identifier punctuation (a dot or an underscore), or it is a short single
+# word in one of the casings identifiers actually use. A 22-character run
+# of letters with `GOCSPX` welded to the front is none of those.
+_REFERENCE = re.compile(r"^[A-Za-z_][A-Za-z_]*(?:\.[A-Za-z_][A-Za-z_]*)*$")
+
+# The longest single word worth believing is a variable name. Past this a
+# bare run of letters is far likelier to be a key than an identifier.
+_LONGEST_NAME = 16
+
+_SHOUTING = re.compile(r"[A-Z]{2}")
+
+
+def _looks_like_a_reference(value: str) -> bool:
+    value = value.strip()
+    if not _REFERENCE.match(value):
+        return False
+    if "." in value or "_" in value:
+        # self.tokens, key_bindings -- punctuation no secret carries.
+        return True
+    if len(value) > _LONGEST_NAME:
+        return False
+    # tokens, ENABLED, keyBindings: lower, upper or camel. Two capitals in a
+    # row inside a mixed-case word is not a casing anyone writes by hand.
+    return (value.islower() or value.isupper()
+            or not _SHOUTING.search(value))
 
 
 def _is_placeholder(value: str) -> bool:
@@ -199,8 +246,10 @@ def redact(text: str) -> tuple[str, int]:
 
     def mask_named(match: re.Match) -> str:
         nonlocal count
-        name, value = match.group(1), match.group(3)
+        name, quote, value = match.group(1), match.group(2), match.group(3)
         if not _names_a_secret(name) or _is_placeholder(value):
+            return match.group(0)
+        if not quote and _looks_like_a_reference(value):
             return match.group(0)
         count += 1
         # Keep the name and the shape of the line: the model still needs to

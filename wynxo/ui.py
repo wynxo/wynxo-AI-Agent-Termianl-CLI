@@ -505,13 +505,17 @@ class CodeStreamer:
     """
 
     def __init__(self, ui: "UI", indent: str = "", style: str = "",
-                 code: bool = True):
+                 code: bool = True, literal: bool = False):
         self.ui = ui
         self.indent = indent
         self.style = style
         self.code = code
         """False for reasoning: a model's scratchpad is full of stray
         backticks and half-fences that are not code blocks."""
+        self.literal = literal
+        """True when the text is known to be a file's contents. Prose drops
+        whitespace at the start of a line, which is right for a sentence and
+        destroys the indentation of every line of Python."""
         self.buffer = ""
         self.column = 0
         self.in_code = False
@@ -520,6 +524,8 @@ class CodeStreamer:
         self.width = max(30, ui.width - len(indent) - 1)
         self.partial = ""
         """The half-written code line, while inside a fence."""
+        self.word = ""
+        """The word being typed, so a wrap can carry it down whole."""
         self.line = Text()
         """The line being written. While the activity bar is up this is the
         bar's lead line rather than terminal output, so a partial line and a
@@ -536,61 +542,82 @@ class CodeStreamer:
                 self.buffer = self.buffer[newline + 1:]
                 continue
 
-            # Inside a fence, show every character as it lands. Waiting for a
-            # word boundary is wrong for code -- half of it has no spaces,
-            # and watching a function appear a whole line at a time is the
-            # thing this exists to avoid.
-            if self.in_code:
-                held = self._held_fence_length()
-                if held >= len(self.buffer):
-                    return
-                self._segment(self.buffer[:len(self.buffer) - held],
-                              end_of_line=False)
-                self.buffer = self.buffer[len(self.buffer) - held:]
+            # Everything else goes out the moment it arrives -- code and
+            # prose alike, one character at a time. Holding back the partial
+            # word is what made replies land in jumps, and holding back the
+            # partial line is what made a function appear all at once when
+            # the model finally pressed enter.
+            held = self._held_length()
+            if held >= len(self.buffer):
                 return
-
-            # Prose: emit whole words and hold the partial one, so a word
-            # never appears split across a flush.
-            space = self.buffer.rfind(" ")
-            if space == -1:
-                return
-            self._segment(self.buffer[: space + 1], end_of_line=False)
-            self.buffer = self.buffer[space + 1:]
+            self._segment(self.buffer[:len(self.buffer) - held],
+                          end_of_line=False)
+            self.buffer = self.buffer[len(self.buffer) - held:]
             return
 
-    def _held_fence_length(self) -> int:
-        """How much of the tail could still grow into a closing ``` fence.
+    def _held_length(self) -> int:
+        """How much of the tail cannot be shown yet.
 
-        Only at the start of a line: a backtick mid-expression is not a
-        fence, and holding it back would stall the stream on it.
+        Exactly one thing can't: text that might turn out to be a fence.
+        Three backticks at the start of a line stop being characters and
+        become a marker, and once one has been printed as prose there is no
+        taking it back -- which is how "``" and then "`" leaked onto the
+        screen either side of a code block.
+
+        So a line that has begun with a backtick waits, and nothing else
+        does. The wait is at most a couple of characters: the moment the
+        line turns out to be `inline code` rather than a fence it is
+        released, and a fence's own line is never printed anyway.
         """
-        if self.partial.strip():
+        if not self.code:
             return 0
-        tail = self.buffer[-3:]
-        for size in (3, 2, 1):
-            if len(tail) >= size and "```".startswith(tail[-size:]) \
-                    and tail[-size:] == self.buffer[-size:]:
-                if self.buffer[-size:] == "`" * size:
-                    return size
+        # A fence only means anything at the start of a line. Mid-expression
+        # -- inside a string, in a comment -- a backtick is just a character,
+        # and waiting on it would stall the stream.
+        if self.in_code:
+            if self.partial.strip():
+                return 0
+        elif self.line.plain:
+            return 0
+        stripped = self.buffer.lstrip(" \t")
+        if not stripped:
+            return 0
+        if stripped.startswith("```") or "```".startswith(stripped):
+            # Either a fence, or still too short to tell. Its whole line
+            # goes: the rest of an opening fence is the language name, which
+            # is a label rather than text to show.
+            return len(self.buffer)
         return 0
 
     # -- the two modes -----------------------------------------------------
 
     def _segment(self, text: str, end_of_line: bool) -> None:
-        if self.code and (self.in_code or text.lstrip().startswith("```")):
+        if self.code and (self.in_code or self._opens_a_fence(text)):
             self._code_segment(text, end_of_line)
+            return
+        if self.literal:
+            self._literal(text)
+            if end_of_line:
+                self._newline()
             return
         self._prose(text)
         if end_of_line:
             self._newline()
 
+    def _opens_a_fence(self, text: str) -> bool:
+        """Whether this segment is a fence opening, rather than prose.
+
+        The segment has to be the start of its line. A chunk boundary can
+        fall anywhere, so "see ```` ``` ```` in the docs" arrives as a
+        segment beginning with three backticks without being a fence at all.
+        """
+        return not self.line.plain and text.lstrip().startswith("```")
+
     def _code_segment(self, text: str, end_of_line: bool) -> None:
         if not end_of_line:
-            # A fence can only open or close on a whole line, so a partial
-            # one waits; anything else is code being written right now.
-            if not self.partial.strip() and text.lstrip().startswith("```"):
-                self.buffer = text + self.buffer
-                return
+            # A partial fence never reaches here: _held_length keeps the
+            # whole of a line that begins with a backtick until its newline
+            # arrives, so anything unterminated is code being written now.
             self.partial += text
             self._show_partial()
             return
@@ -628,17 +655,76 @@ class CodeStreamer:
         if self.ui.bar is not None:
             self.ui.bar.set_lead(None)
 
-    def _prose(self, text: str) -> None:
-        for word in _words(text):
-            if word.isspace():
-                if self.column:
-                    self._write(word)
-                continue
-            if self.column and self.column + len(word) > self.width:
+    def _literal(self, text: str) -> None:
+        """Every character exactly as written, indentation included.
+
+        No reflowing: a line of code means what its leading whitespace says,
+        and a line too long for the terminal is broken at the edge rather
+        than rearranged into something that no longer parses.
+        """
+        for char in text:
+            if self.column >= self.width:
                 self._newline()
+            if not self.column and self.indent:
+                self._write(self.indent)
+            self._write(char)
+
+    def _prose(self, text: str) -> None:
+        """One character at a time, wrapping without splitting words.
+
+        Emitting whole words is easier and reads worse: the answer arrives in
+        little jumps, and a model that pauses mid-word appears to have
+        stopped. Writing every character as it lands is what makes the reply
+        look like it is being typed.
+
+        Wrapping is the reason this is not simply "print the character". The
+        line width is only exceeded part-way through a word, and by then the
+        word is already on screen -- so it is lifted off the end of the line
+        and carried down to the next one, which is what a word processor does
+        and what the eye expects.
+        """
+        for char in text:
+            if char.isspace():
+                self.word = ""
+                if self.column:
+                    self._write(char)
+                continue
+
+            if self.column + 1 > self.width:
+                if (self.word and self._rewritable
+                        and len(self.word) + len(self.indent) < self.width):
+                    self._carry_word_down()
+                else:
+                    # Either the word is longer than the line, or the line has
+                    # already gone to the terminal and cannot be taken back.
+                    self._newline()
             if not self.column:
                 self._write(self.indent)
-            self._write(word)
+            self._write(char)
+            self.word += char
+
+    @property
+    def _rewritable(self) -> bool:
+        """Whether the line in progress can still be changed.
+
+        While the activity bar is up the line lives inside it and is redrawn
+        on every repaint, so a word can be lifted off the end. Written
+        straight to the terminal it is already gone, and the only honest
+        thing left is to break at the edge.
+        """
+        return self.ui.bar is not None
+
+    def _carry_word_down(self) -> None:
+        """Move the half-written word to the next line, taking it with us."""
+        keep = self.line.plain[: len(self.line.plain) - len(self.word)]
+        carried = self.word
+        self.line = Text(keep, style=self.style or None)
+        self.column = cell_len(keep)
+        self._newline()
+        self.word = ""
+        self._write(self.indent)
+        self._write(carried)
+        self.word = carried
 
     # -- output ------------------------------------------------------------
 

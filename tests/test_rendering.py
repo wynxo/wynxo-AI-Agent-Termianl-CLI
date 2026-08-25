@@ -102,6 +102,27 @@ class TestCodeStreaming:
         assert "def foo():" in out and "pass" in out
         assert "```" not in out
 
+    def test_a_fence_split_one_backtick_at_a_time(self, capsys):
+        """The worst case a real stream produces: a token boundary between
+        every character of the marker."""
+        self._render(list("`" "`" "`" "python\nvalue = 1\n" "`" "`" "`" "\n"))
+        out = capsys.readouterr().out
+        assert "value = 1" in out
+        assert "`" not in out
+
+    def test_an_inline_backtick_is_not_held_forever(self, capsys):
+        """A line starting with a backtick waits only until it is clear it is
+        not a fence -- otherwise the reply would stall on `like this`."""
+        self._render(["`inline` at the start of a line\n"])
+        assert "inline" in capsys.readouterr().out
+
+    def test_backticks_mid_line_are_not_a_fence(self, capsys):
+        """A chunk boundary can fall anywhere, so a segment may begin with
+        three backticks without its line doing so."""
+        self._render(["see ", "```", " in the docs\n"])
+        out = capsys.readouterr().out
+        assert "in the docs" in out
+
 
 class TestPinnedBar:
     def test_bar_is_exactly_one_line(self):

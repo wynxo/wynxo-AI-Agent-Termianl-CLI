@@ -110,11 +110,38 @@ class TestRedactionLeavesOrdinaryCodeAlone:
         assert count == 0, f"false positive on: {line} -> {cleaned}"
         assert cleaned == line
 
-    def test_a_whole_source_file_survives_unchanged(self):
-        source = Path("wynxo/parsing.py").read_text(encoding="utf-8")
-        cleaned, count = redact(source)
-        assert count == 0, "wynxo cannot read its own source"
-        assert cleaned == source
+    @pytest.mark.parametrize("line", [
+        # Unquoted values that are names being referred to, not credentials.
+        # Masking these rewrites working code into something that cannot run.
+        'tokens=self.tokens',
+        'key_bindings=bindings',
+        'protect_secrets = enabled',
+        'api_key = default_key',
+        'secret: SETTINGS',
+        'password=hashed',
+        # Prose about code. A doc comment saying `token=self.token` is not a
+        # leak, and neither is an escape sequence inside a test fixture.
+        '# the setting `token=self.token` is read here',
+        '"export TOKEN=keepme\\n"',
+    ])
+    def test_a_name_is_not_a_secret(self, line):
+        cleaned, count = redact(line)
+        assert count == 0, f"false positive on: {line} -> {cleaned}"
+
+    def test_a_long_run_of_letters_is_still_a_secret(self):
+        """The exemption above is shaped, not blanket: a bare unquoted value
+        can still be a key, and `GOCSPX...` is exactly that."""
+        _, count = redact("client_secret: GOCSPXabcdefghijklmnop")
+        assert count == 1
+
+    def test_the_whole_package_survives_unchanged(self):
+        """One module proves little -- the redactor is only usable if it can
+        read every file wynxo might be asked to open, including its own."""
+        for source_file in sorted(Path("wynxo").rglob("*.py")):
+            source = source_file.read_text(encoding="utf-8")
+            cleaned, count = redact(source)
+            assert count == 0, f"wynxo cannot read {source_file}"
+            assert cleaned == source
 
 
 class TestTheShieldInTheTools:

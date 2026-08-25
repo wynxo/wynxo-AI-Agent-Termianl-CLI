@@ -178,6 +178,7 @@ class Callbacks:
     async def on_tool_start(self, name: str, summary: str) -> None: ...
     async def on_tool_result(self, name: str, ok: bool, display: str, output: str) -> None: ...
     async def on_tool_output(self, name: str, line: str) -> None: ...
+    async def on_code(self, text: str) -> None: ...
     async def on_todos(self, rendered: str) -> None: ...
     async def on_warning(self, message: str) -> None: ...
 
@@ -337,6 +338,12 @@ class Agent:
                 if stream_content:
                     if visible := live_filter.feed(chunk.content):
                         await self.cb.on_content(visible)
+                    # A file being written is worth watching. Without this the
+                    # screen shows nothing at all between "the model started a
+                    # tool call" and "the file exists", which on a slow local
+                    # model is long enough to wonder whether it is working.
+                    if code := live_filter.code_delta():
+                        await self.cb.on_code(code)
             if chunk.tool_calls:
                 native_calls.extend(chunk.tool_calls)
             if chunk.done:

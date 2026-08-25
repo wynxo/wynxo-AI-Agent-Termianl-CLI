@@ -271,6 +271,8 @@ class TerminalCallbacks(Callbacks):
         self.verbose_tools = False
         """Ctrl-T: show full tool output instead of a one-line summary."""
         self.tokens = 0
+        self._coder: CodeStreamer | None = None
+        """The file currently being written, while a tool call streams."""
         self._thinking_buffer: list[str] = []
         """Every thought of the current turn, shown or not."""
 
@@ -396,6 +398,7 @@ class TerminalCallbacks(Callbacks):
         self.ui.console.print(f"  [{ACCENT}]{self.ui.g.arrow}[/] [{MUTED}]{name}[/]{suffix}")
 
     async def on_tool_start(self, name: str, summary: str) -> None:
+        self._end_code()
         if self.journal is not None:
             self.journal.tool(name, {"summary": summary})
         self._end_stream()
@@ -418,6 +421,27 @@ class TerminalCallbacks(Callbacks):
             self.ui.code(output[:4000], _LANGUAGE.get(name, "text"))
         else:
             self.ui.tool_result(name, ok, display, output)
+
+    async def on_code(self, text: str) -> None:
+        """Code arriving inside a tool call, shown as it is written.
+
+        Its own streamer rather than the prose one: this is known to be a
+        file's contents, so none of the fence-detection guesswork applies and
+        every character can go straight out.
+        """
+        if self._streaming:
+            self._end_stream()
+        if self._coder is None:
+            self.ui.console.print()
+            self.ui.console.print(Text("  writing", style=f"bold {MUTED}"))
+            self._coder = CodeStreamer(self.ui, indent="    ",
+                                       style=MUTED, code=False, literal=True)
+        self._coder.feed(text)
+
+    def _end_code(self) -> None:
+        if self._coder is not None:
+            self._coder.finish()
+            self._coder = None
 
     async def on_tool_output(self, name: str, line: str) -> None:
         """A line from a command while it is still running.
