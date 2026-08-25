@@ -104,8 +104,14 @@ class TestJournal:
         import wynxo.journal as module
         from pathlib import Path
 
-        monkeypatch.setattr(module, "data_dir",
-                            lambda: Path("/proc/definitely-not-writable"))
+        # Made unwritable by refusing the mkdir rather than by naming a
+        # path: "/proc/..." is a perfectly writable relative path on Windows,
+        # so the test passed there without testing anything.
+        def refuse(*args, **kwargs):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(module, "data_dir", lambda: Path("anywhere"))
+        monkeypatch.setattr(Path, "mkdir", refuse)
         broken = module.Journal.open("x")
         broken.user("still fine")       # must not raise
         assert not broken.enabled

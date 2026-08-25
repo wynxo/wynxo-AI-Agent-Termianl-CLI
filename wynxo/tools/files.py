@@ -263,6 +263,13 @@ class EditFile(Tool):
             return ToolResult.failure(f"{rel} does not exist. Use write_file to create it.")
         if args.old_text == args.new_text:
             return ToolResult.failure("old_text and new_text are identical; nothing to do.")
+        if not args.old_text:
+            # Empty matches between every character, so the count that would
+            # otherwise be reported ("appears 7 times") describes nothing and
+            # tells the model nothing about what to do differently.
+            return ToolResult.failure(
+                "old_text is empty. Give the exact text to replace, or use "
+                "write_file if you mean to create or replace the whole file.")
 
         before = _read_text(path)
         count = before.count(args.old_text)
@@ -400,6 +407,10 @@ class MultiEdit(Tool):
         for i, edit in enumerate(args.edits, 1):
             if edit.old_text == edit.new_text:
                 return ToolResult.failure(f"edit {i}: old_text and new_text are identical.")
+            if not edit.old_text:
+                return ToolResult.failure(
+                    f"edit {i}: old_text is empty. Give the exact text to "
+                    "replace.")
             count = text.count(edit.old_text)
             if count == 0:
                 hint = EditFile._near_miss(text, edit.old_text)

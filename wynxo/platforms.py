@@ -176,6 +176,52 @@ def looks_like_a_project(path: Path) -> bool:
     return False
 
 
+def _system_locations() -> list[tuple[Path, str]]:
+    """Directories nobody means to start a project in.
+
+    Taken from the environment rather than by name, because matching a path
+    *component* called "windows" or "appdata" flags any project with a
+    src/windows/ directory in it -- which is most cross-platform projects --
+    and on Windows the temp directory lives under AppData, so it flagged
+    practically everything.
+    """
+    found: list[tuple[Path, str]] = []
+    if os.name == "nt":
+        for variable, label in (("APPDATA", "your roaming profile"),
+                                ("LOCALAPPDATA", "your local profile"),
+                                ("SystemRoot", "the Windows directory"),
+                                ("ProgramFiles", "Program Files"),
+                                ("ProgramFiles(x86)", "Program Files")):
+            if raw := os.environ.get(variable):
+                found.append((Path(raw), label))
+    else:
+        for raw, label in (("/usr", "a system directory"),
+                           ("/etc", "a system directory"),
+                           ("/bin", "a system directory"),
+                           ("/sbin", "a system directory"),
+                           ("/boot", "a system directory")):
+            found.append((Path(raw), label))
+    return found
+
+
+def _inside_a_system_location(resolved: Path) -> str | None:
+    """Whether this is a system directory itself -- not merely under one.
+
+    Under is too broad: the Windows temp directory sits inside AppData, and
+    people do keep checkouts there. Being *exactly* one of these is the case
+    worth refusing.
+    """
+    if str(resolved) in ("/", "\\"):
+        return "this is the filesystem root"
+    for location, label in _system_locations():
+        try:
+            if resolved == location.resolve():
+                return f"this is {label}"
+        except OSError:
+            continue
+    return None
+
+
 def suspicious_workspace(path: Path) -> str | None:
     """A reason this directory is probably not where you meant to work."""
     try:
@@ -191,12 +237,8 @@ def suspicious_workspace(path: Path) -> str | None:
         if (resolved / name).is_file() and not (resolved / "pyproject.toml").exists():
             return "this is where wynxo itself is installed"
 
-    parts = {p.lower() for p in resolved.parts}
-    for marker in ("appdata", "system32", "windows", "program files"):
-        if marker in parts:
-            return f"this is inside {marker}"
-    if str(resolved) in ("/", "/usr", "/etc", "/bin", "/tmp"):
-        return "this is a system directory"
+    if system := _inside_a_system_location(resolved):
+        return system
 
     if not looks_like_a_project(resolved):
         return "no project files here (no .git, no package manifest)"

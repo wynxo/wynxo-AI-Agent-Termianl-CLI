@@ -55,8 +55,11 @@ def supported(stream=None) -> bool:
     except (AttributeError, ValueError, OSError):
         return False
     term = os.environ.get("TERM", "").lower()
-    if term in ("dumb", "unknown", ""):
-        # An empty TERM on Windows is normal: the modern console handles
+    if term in ("dumb", "unknown"):
+        # Set deliberately, on any platform, and it means what it says.
+        return False
+    if not term:
+        # An unset TERM on Windows is normal: the modern console handles
         # these sequences and simply does not advertise itself this way.
         return sys.platform == "win32"
     return True

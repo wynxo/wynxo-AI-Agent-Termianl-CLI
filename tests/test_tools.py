@@ -224,3 +224,55 @@ class TestRegistry:
         assert registry.get("shell").mutating
         assert not registry.get("read_file").mutating
         assert not registry.get("grep").mutating
+
+
+class TestAnEmptyOldText:
+    """Empty matches between every character, so the count that would
+    otherwise come back ("appears 7 times") describes nothing and tells the
+    model nothing about what to do differently."""
+
+    def test_edit_file_says_it_is_empty(self, tmp_path):
+        import asyncio
+
+        from wynxo.tools.files import EditFile, EditInput
+
+        (tmp_path / "a.py").write_text("a = 1\n", encoding="utf-8")
+        result = asyncio.run(EditFile(workspace=tmp_path).run(
+            EditInput(path="a.py", old_text="", new_text="X")))
+        assert result.ok is False
+        assert "empty" in result.output and "times" not in result.output
+
+    def test_it_points_at_write_file_instead(self, tmp_path):
+        import asyncio
+
+        from wynxo.tools.files import EditFile, EditInput
+
+        (tmp_path / "a.py").write_text("a = 1\n", encoding="utf-8")
+        result = asyncio.run(EditFile(workspace=tmp_path).run(
+            EditInput(path="a.py", old_text="", new_text="X")))
+        assert "write_file" in result.output
+
+    def test_multi_edit_names_which_edit(self, tmp_path):
+        import asyncio
+
+        from wynxo.tools.files import MultiEdit, MultiEditInput
+
+        (tmp_path / "a.py").write_text("a = 1\n", encoding="utf-8")
+        result = asyncio.run(MultiEdit(workspace=tmp_path).run(
+            MultiEditInput(path="a.py", edits=[
+                {"old_text": "a = 1", "new_text": "a = 2"},
+                {"old_text": "", "new_text": "X"}])))
+        assert result.ok is False and "edit 2" in result.output
+
+    def test_the_file_is_untouched(self, tmp_path):
+        """A refused batch must not half-apply."""
+        import asyncio
+
+        from wynxo.tools.files import MultiEdit, MultiEditInput
+
+        (tmp_path / "a.py").write_text("a = 1\n", encoding="utf-8")
+        asyncio.run(MultiEdit(workspace=tmp_path).run(
+            MultiEditInput(path="a.py", edits=[
+                {"old_text": "a = 1", "new_text": "a = 2"},
+                {"old_text": "", "new_text": "X"}])))
+        assert (tmp_path / "a.py").read_text() == "a = 1\n"

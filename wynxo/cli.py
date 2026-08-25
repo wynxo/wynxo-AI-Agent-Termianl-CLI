@@ -2418,7 +2418,11 @@ def read_piped_stdin(grace: float = 0.25) -> str:
     except (OSError, ValueError):
         return ""
 
-    if hasattr(select, "select"):
+    # Gated on the platform, not on hasattr: Windows *has* select.select, it
+    # just cannot use it on a pipe. Testing for the attribute sent Windows
+    # down this branch, where the call raised and the input was dropped -- so
+    # `git diff | wynxo -p "review"` silently reviewed nothing.
+    if os.name != "nt":
         try:
             ready, _, _ = select.select([sys.stdin], [], [], grace)
         except (OSError, ValueError):
@@ -2430,8 +2434,9 @@ def read_piped_stdin(grace: float = 0.25) -> str:
         except (OSError, UnicodeDecodeError):
             return ""
 
-    # Windows cannot select on a pipe, so read in a thread we can abandon.
-    # A slow producer may miss the window; redirect from a file to be certain.
+    # Windows: read in a thread we can abandon, since there is no way to ask
+    # whether a pipe has data first. A slow producer may miss the window;
+    # redirecting from a file takes the deterministic path above.
     result: list[str] = []
 
     def _read() -> None:

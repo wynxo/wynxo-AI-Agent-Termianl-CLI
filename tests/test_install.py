@@ -74,12 +74,14 @@ class TestEntryPointScript:
         import sys
 
         scripts_dir = tmp_path
-        (scripts_dir / "wynxo").write_text("#!/bin/sh\n")
+        # pip names it wynxo.exe on Windows, which is what the code looks for.
+        name = "wynxo.exe" if sys.platform == "win32" else "wynxo"
+        (scripts_dir / name).write_text("#!/bin/sh\n")
         monkeypatch.setattr(
             install.subprocess, "run",
             lambda *a, **k: type("R", (), {"returncode": 0,
                                            "stdout": str(scripts_dir) + "\n"})())
-        assert install.entry_point_script(Path(sys.executable)) == scripts_dir / "wynxo"
+        assert install.entry_point_script(Path(sys.executable)) == scripts_dir / name
 
     def test_a_missing_script_is_not_returned(self, monkeypatch, tmp_path):
         import sys
@@ -125,7 +127,9 @@ class TestLauncher:
         assert launcher is not None
         body = launcher.read_text()
         assert str(python) in body and "-m wynxo" in body
-        assert launcher.stat().st_mode & 0o111, "must be executable"
+        if os.name != "nt":
+            # Windows has no executable bit; a .cmd is executable by name.
+            assert launcher.stat().st_mode & 0o111, "must be executable"
 
     def test_declining_the_link_returns_none(self, monkeypatch, tmp_path):
         monkeypatch.setattr(install, "user_bin_dir", lambda: tmp_path / "bin")
@@ -249,7 +253,7 @@ class TestWindowsEntryPoints:
         assert "install.bat" in text
 
     def test_readme_does_not_tell_windows_users_to_activate(self):
-        readme = (ROOT / "README.md").read_text()
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
         for line in readme.splitlines():
             stripped = line.strip()
             # A bare activation command in a code block is the trap; prose
@@ -258,7 +262,7 @@ class TestWindowsEntryPoints:
                 raise AssertionError(f"README instructs activation: {line!r}")
 
     def test_readme_gives_the_full_path_pip_invocation(self):
-        readme = (ROOT / "README.md").read_text()
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
         assert ".venv\\Scripts\\python.exe -m pip install -e ." in readme
 
 

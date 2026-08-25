@@ -95,3 +95,37 @@ class TestReadPipedStdinUnit:
         with os.fdopen(read_fd) as reader:
             monkeypatch.setattr(sys, "stdin", reader)
             assert read_piped_stdin() == "hello from the pipe"
+
+
+class TestWindowsCanPipeToo:
+    """`git diff | wynxo -p "review"` silently reviewed nothing on Windows.
+
+    The thread-based fallback was there, but the branch guarding it tested
+    `hasattr(select, "select")` -- and Windows *has* select.select, it just
+    cannot use it on a pipe. So Windows took the select path, the call
+    raised, and the piped input was dropped.
+    """
+
+    def test_the_branch_is_chosen_by_platform_not_by_attribute(self):
+        import inspect
+
+        from wynxo import cli
+
+        source = inspect.getsource(cli.read_piped_stdin)
+        assert 'os.name != "nt"' in source
+        assert 'hasattr(select, "select")' not in source
+
+    def test_the_thread_fallback_reads_a_pipe(self, monkeypatch):
+        """Exercise the Windows path directly, on any platform."""
+        import os
+        import sys
+
+        from wynxo import cli
+
+        monkeypatch.setattr(cli.os, "name", "nt")
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, b"piped on windows\n")
+        os.close(write_fd)
+        with os.fdopen(read_fd) as reader:
+            monkeypatch.setattr(sys, "stdin", reader)
+            assert cli.read_piped_stdin(grace=2.0) == "piped on windows"

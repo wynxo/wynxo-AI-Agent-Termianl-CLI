@@ -75,6 +75,8 @@ class TestTermuxPaths:
 
 
 class TestTermuxShell:
+    @pytest.mark.skipif(os.name == "nt",
+                        reason="Termux is Android; these are POSIX paths")
     def test_finds_bash_under_prefix(self, termux):
         """Termux binaries are never in /bin, so a bare lookup would miss."""
         shell, flags = platforms.default_shell()
@@ -172,10 +174,38 @@ class TestWorkspaceSanity:
         (tmp_path / ".git").mkdir()   # even a repo: still your home directory
         assert "home directory" in platforms.suspicious_workspace(tmp_path)
 
-    def test_appdata_is_flagged(self, tmp_path):
-        target = tmp_path / "AppData" / "Local" / "Programs" / "wynxo"
-        target.mkdir(parents=True)
-        assert "appdata" in platforms.suspicious_workspace(target)
+    def test_a_system_directory_itself_is_flagged(self, tmp_path,
+                                                   monkeypatch):
+        """Named from the environment rather than matched by component."""
+        system = tmp_path / "Local"
+        system.mkdir()
+        monkeypatch.setattr(platforms, "_system_locations",
+                            lambda: [(system, "your local profile")])
+        assert "local profile" in platforms.suspicious_workspace(system)
+
+    def test_a_project_underneath_one_is_not(self, tmp_path, monkeypatch):
+        """On Windows the temp directory lives inside AppData, so treating
+        "under a system location" as suspicious flagged nearly everything."""
+        system = tmp_path / "Local"
+        project = system / "Temp" / "my-checkout"
+        project.mkdir(parents=True)
+        (project / ".git").mkdir()
+        monkeypatch.setattr(platforms, "_system_locations",
+                            lambda: [(system, "your local profile")])
+        assert platforms.suspicious_workspace(project) is None
+
+    def test_a_folder_merely_named_windows_is_not_flagged(self, tmp_path):
+        """src/windows/ is in most cross-platform projects, and matching the
+        path component flagged every one of them."""
+        project = tmp_path / "src" / "windows"
+        project.mkdir(parents=True)
+        (project / ".git").mkdir()
+        assert platforms.suspicious_workspace(project) is None
+
+    def test_the_filesystem_root_is_still_flagged(self):
+        from pathlib import Path
+
+        assert platforms.suspicious_workspace(Path("/")) is not None
 
     def test_project_markers_are_recognised(self, tmp_path):
         for marker in ("package.json", "Cargo.toml", "go.mod", "Makefile", "WYNXO.md"):
