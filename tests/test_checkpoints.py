@@ -1,5 +1,7 @@
 """Undo for file changes."""
 
+import pytest
+
 from wynxo.checkpoints import Checkpoints
 
 
@@ -177,3 +179,51 @@ class TestTurnScopedChanges:
 
         points = Checkpoints()
         assert points.revert_since(points.mark()) == (0, [])
+
+
+class TestUndoPutsBackExactlyWhatWasThere:
+    """An undo that changes anything except what was edited is not an undo.
+
+    The snapshot was read with the default newline handling, which
+    translates CRLF to LF, and written back untranslated -- so undoing one
+    edit to a CRLF file converted the whole file to LF. Inside a git repo
+    that is every line showing as changed.
+    """
+
+    CASES = {
+        "utf16.ps1": ("Write-Host 'hi'\n", "utf-16"),
+        "cp1252.txt": ("café résumé\n", "cp1252"),
+        "bom.py": ("# héllo\n", "utf-8-sig"),
+        "crlf.txt": ("one\r\ntwo\r\n", "utf-8"),
+        "mixed.txt": ("a\rb\r\nc\n", "utf-8"),
+        "lf.py": ("x = 1\n", "utf-8"),
+    }
+
+    @pytest.mark.parametrize("name", list(CASES))
+    def test_the_bytes_come_back(self, tmp_path, name):
+        text, encoding = self.CASES[name]
+        path = tmp_path / name
+        path.write_text(text, encoding=encoding, newline="")
+        before = path.read_bytes()
+
+        checkpoints = Checkpoints()
+        checkpoints.capture(path, "edit_file")
+        path.write_bytes(b"CLOBBERED")
+        did, _ = checkpoints.undo()
+
+        assert did is True
+        assert path.read_bytes() == before
+
+    def test_even_a_file_that_is_not_text(self, tmp_path):
+        """A tool may refuse to edit one, but a shell command can write
+        anything, and undo has to put back what it found."""
+        path = tmp_path / "blob.bin"
+        path.write_bytes(bytes(range(256)) * 4)
+        before = path.read_bytes()
+
+        checkpoints = Checkpoints()
+        checkpoints.capture(path, "shell")
+        path.write_bytes(b"gone")
+        checkpoints.undo()
+
+        assert path.read_bytes() == before

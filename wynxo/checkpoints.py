@@ -43,7 +43,19 @@ class Checkpoints:
             if path.exists():
                 if path.stat().st_size > MAX_FILE_BYTES:
                     return   # too big to hold; better no undo than an OOM
-                content = path.read_text(encoding="utf-8", errors="surrogateescape")
+                # newline="" so nothing is translated on the way in. The
+                # default translates CRLF to LF, and undo writes back
+                # untranslated -- so undoing an edit to a CRLF file
+                # converted the whole file to LF, which inside a git repo
+                # is every line of it showing as changed.
+                #
+                # surrogateescape is what makes the rest of it exact: a byte
+                # that is not valid UTF-8 becomes a lone surrogate and comes
+                # back as the same byte, so a cp1252 or UTF-16 file is
+                # restored to what it was rather than to a re-encoding of it.
+                with path.open("r", encoding="utf-8",
+                               errors="surrogateescape", newline="") as handle:
+                    content = handle.read()
             else:
                 content = None
         except OSError:
