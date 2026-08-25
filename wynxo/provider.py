@@ -14,6 +14,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from .coerce import as_int, as_list, as_text
 from .config import Config, MIN_USABLE_CONTEXT
 
 LARGE_CONTEXT = 131_072
@@ -68,57 +69,6 @@ class Chunk:
     completion_tokens: int = 0
     total_duration_ns: int = 0
     load_duration_ns: int = 0
-
-
-def _as_text(value: object) -> str:
-    """A wire field as a string, whatever the server actually sent.
-
-    ``None`` and ``""`` both mean absent, so both come back empty. Anything
-    else is stringified rather than dropped: a server that wraps reasoning in
-    an object is being odd, but the text inside is still the model's thought
-    and the user would rather see it than lose it.
-    """
-    if value is None or isinstance(value, bool):
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (list, tuple)):
-        return "".join(_as_text(item) for item in value)
-    if isinstance(value, dict):
-        # The shapes seen in the wild all park the text under one of these.
-        for key in ("text", "content", "thinking", "reasoning", "value"):
-            if key in value:
-                return _as_text(value[key])
-        return ""
-    return str(value)
-
-
-def _as_list(value: object) -> list:
-    if isinstance(value, list):
-        return value
-    if isinstance(value, tuple):
-        return list(value)
-    if isinstance(value, dict):
-        # A single call sent unwrapped, which some shims do.
-        return [value]
-    return []
-
-
-def _as_int(value: object) -> int:
-    """A count as an int. Strings and floats appear in compat servers."""
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value) if value == value and value not in (
-            float("inf"), float("-inf")) else 0
-    if isinstance(value, str):
-        try:
-            return int(float(value.strip()))
-        except (ValueError, OverflowError):
-            return 0
-    return 0
 
 
 def _is_template_parse_error(low: str) -> bool:
@@ -388,17 +338,17 @@ class OllamaClient:
         if not isinstance(message, dict):
             message = {}
         return Chunk(
-            content=_as_text(message.get("content")),
+            content=as_text(message.get("content")),
             # Ollama has used both keys across versions.
-            thinking=_as_text(message.get("thinking"))
-                     or _as_text(message.get("reasoning")),
-            tool_calls=[c for c in _as_list(message.get("tool_calls"))
+            thinking=as_text(message.get("thinking"))
+                     or as_text(message.get("reasoning")),
+            tool_calls=[c for c in as_list(message.get("tool_calls"))
                         if isinstance(c, dict)],
             done=bool(data.get("done")),
-            prompt_tokens=_as_int(data.get("prompt_eval_count")),
-            completion_tokens=_as_int(data.get("eval_count")),
-            total_duration_ns=_as_int(data.get("total_duration")),
-            load_duration_ns=_as_int(data.get("load_duration")),
+            prompt_tokens=as_int(data.get("prompt_eval_count")),
+            completion_tokens=as_int(data.get("eval_count")),
+            total_duration_ns=as_int(data.get("total_duration")),
+            load_duration_ns=as_int(data.get("load_duration")),
         )
 
     def _explain_error(self, status: int, body: str, payload: dict) -> str:

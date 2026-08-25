@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .coerce import as_float, as_int, as_list, as_text
 from .config import data_dir
 
 
@@ -178,19 +179,29 @@ class Session:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
+        if not isinstance(data, dict):
+            return None       # valid JSON, but not a session
+
         session = cls(
             workspace=workspace,
-            session_id=data.get("session_id", session_id),
-            created_at=data.get("created_at", time.time()),
-            compactions=data.get("compactions", 0),
+            session_id=as_text(data.get("session_id")) or session_id,
+            created_at=as_float(data.get("created_at"), time.time()),
+            compactions=as_int(data.get("compactions")),
         )
-        session.messages = data.get("messages", [])
-        usage = data.get("usage") or {}
+        # A file half-written by a crash, or written by another version, can
+        # parse cleanly and still hold the wrong shapes. Anything that is not
+        # a usable message is dropped rather than carried into the history,
+        # where it would break the next request instead of this one.
+        session.messages = [m for m in as_list(data.get("messages"))
+                            if isinstance(m, dict)]
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            usage = {}
         session.usage = Usage(
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-            requests=usage.get("requests", 0),
-            tool_calls=usage.get("tool_calls", 0),
+            prompt_tokens=as_int(usage.get("prompt_tokens")),
+            completion_tokens=as_int(usage.get("completion_tokens")),
+            requests=as_int(usage.get("requests")),
+            tool_calls=as_int(usage.get("tool_calls")),
         )
         return session
 
@@ -199,21 +210,34 @@ class Session:
         directory = data_dir() / "sessions"
         if not directory.is_dir():
             return []
+        def when(path: Path) -> float:
+            # A session file can vanish between the glob and the stat --
+            # /new prunes them, and another wynxo may be running.
+            try:
+                return -path.stat().st_mtime
+            except OSError:
+                return 0.0
+
         out = []
-        for path in sorted(directory.glob("*.json"), key=lambda p: -p.stat().st_mtime)[:limit]:
+        for path in sorted(directory.glob("*.json"), key=when)[:limit]:
+            # Guarded per file, deliberately. This list is what /resume and
+            # /sessions show, so one unreadable file must cost the user that
+            # one session -- not every conversation they have ever had.
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                if not isinstance(data, dict):
+                    continue
+                messages = [m for m in as_list(data.get("messages"))
+                            if isinstance(m, dict)]
+                first = next((as_text(m.get("content")) for m in messages
+                              if m.get("role") == "user"), "")
+                out.append({
+                    "session_id": as_text(data.get("session_id")) or path.stem,
+                    "workspace": as_text(data.get("workspace")) or "?",
+                    "updated_at": as_float(data.get("updated_at"), 0.0),
+                    "messages": len(messages),
+                    "preview": first[:70].replace("\n", " "),
+                })
+            except (OSError, json.JSONDecodeError, ValueError):
                 continue
-            first = next(
-                (m["content"] for m in data.get("messages", []) if m.get("role") == "user"),
-                "",
-            )
-            out.append({
-                "session_id": data.get("session_id", path.stem),
-                "workspace": data.get("workspace", "?"),
-                "updated_at": data.get("updated_at", 0),
-                "messages": len(data.get("messages", [])),
-                "preview": str(first)[:70].replace("\n", " "),
-            })
         return out
