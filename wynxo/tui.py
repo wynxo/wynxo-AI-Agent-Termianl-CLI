@@ -768,6 +768,12 @@ def _terminal_height(default: int = 24) -> int:
         return default
 
 
+MIN_ROWS = ChatUI.HEADER_ROWS + ChatUI.COMPOSER_ROWS + ChatUI.STATUS_ROWS + 2
+"""The furniture, plus two rows of conversation worth reading. Below this
+prompt_toolkit gives up and draws "Window too small..." instead of the
+layout, which is not something to leave a user staring at."""
+
+
 def usable() -> bool:
     """Whether this terminal can host the chat layout.
 
@@ -775,6 +781,12 @@ def usable() -> bool:
     something to read keys from -- and a TERM that admits to handling escape
     sequences. Anywhere else falls back to the scrolling prompt, which works
     on anything.
+
+    Height counts too. Header, status row and composer are pinned, so a very
+    short window (a split pane, a phone in landscape) has nothing left for
+    the conversation: at five rows the whole screen was replaced by
+    prompt_toolkit's "Window too small...". The scrolling prompt has no
+    such floor, so that is where a small window goes.
     """
     import os
     import sys
@@ -786,6 +798,8 @@ def usable() -> bool:
         return False
     term = os.environ.get("TERM", "").lower()
     if term in ("dumb", "unknown"):
+        return False
+    if _terminal_height() < MIN_ROWS:
         return False
     if not term:
         return sys.platform == "win32"

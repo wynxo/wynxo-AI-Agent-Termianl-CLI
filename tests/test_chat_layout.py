@@ -408,6 +408,80 @@ class TestStartingWithAPrompt:
         assert repl.turn_calls == ["add retries"]
 
 
+class TestAWindowTooSmallForTheLayout:
+    """Header, status row and composer are pinned, so a very short window
+    has nothing left for the conversation -- and prompt_toolkit replaces the
+    whole screen with "Window too small..." rather than drawing it. A five
+    row pane got that and nothing else."""
+
+    def _usable(self, monkeypatch, rows, tty=True):
+        from wynxo import tui
+
+        monkeypatch.setattr(tui, "_terminal_height", lambda default=24: rows)
+        monkeypatch.setenv("TERM", "xterm-256color")
+
+        class _TTY:
+            def isatty(self):
+                return tty
+
+        # usable() imports sys itself, so the real module is what to patch.
+        monkeypatch.setattr("sys.stdin", _TTY())
+        monkeypatch.setattr("sys.stdout", _TTY())
+        return tui.usable()
+
+    def test_a_short_window_takes_the_scrolling_prompt(self, monkeypatch):
+        from wynxo.tui import MIN_ROWS
+
+        assert self._usable(monkeypatch, MIN_ROWS - 1) is False
+
+    def test_a_tall_enough_window_keeps_the_layout(self, monkeypatch):
+        from wynxo.tui import MIN_ROWS
+
+        assert self._usable(monkeypatch, MIN_ROWS) is True
+
+    def test_the_floor_leaves_room_to_read_something(self):
+        from wynxo.tui import MIN_ROWS, ChatUI
+
+        furniture = (ChatUI.HEADER_ROWS + ChatUI.COMPOSER_ROWS
+                     + ChatUI.STATUS_ROWS)
+        assert MIN_ROWS - furniture >= 2
+
+
+class TestTheCompletionMenuOnAShortWindow:
+    """The scrolling prompt is where a small window ends up, so it has to
+    work there. It reserved six rows for the suggestion list on top of its
+    own prompt and toolbar, which a four-row pane cannot pay -- so that
+    fallback was showing "Window too small..." too."""
+
+    def _rows(self, monkeypatch, rows):
+        from wynxo import cli
+
+        monkeypatch.setattr(cli, "terminal_height", lambda: rows)
+        return cli._menu_rows()
+
+    def test_a_normal_window_keeps_the_menu(self, monkeypatch):
+        assert self._rows(monkeypatch, 40) == 6
+
+    def test_a_short_window_reserves_less(self, monkeypatch):
+        assert 0 < self._rows(monkeypatch, 11) < 6
+
+    def test_a_tiny_window_reserves_nothing(self, monkeypatch):
+        assert self._rows(monkeypatch, 5) == 0
+
+    def test_it_never_asks_for_more_than_the_window_has(self, monkeypatch):
+        for rows in range(3, 40):
+            assert self._rows(monkeypatch, rows) < rows
+
+    def test_the_prompt_actually_uses_it(self):
+        """A constant here is the bug; the point is that it varies."""
+        import inspect
+
+        from wynxo.cli import Repl
+
+        source = inspect.getsource(Repl.__init__)
+        assert "reserve_space_for_menu=_menu_rows()" in source
+
+
 class TestTheWindowChangingSize:
     """rich wraps to ui.width before anything reaches the pane, and the pane
     truncates rather than wraps. So a window made narrower mid-session cut

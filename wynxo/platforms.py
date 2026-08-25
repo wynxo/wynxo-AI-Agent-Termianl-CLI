@@ -131,6 +131,13 @@ def terminal_width(default: int = 80) -> int:
         return default
 
 
+def terminal_height(default: int = 24) -> int:
+    try:
+        return shutil.get_terminal_size((80, default)).lines
+    except (OSError, ValueError):
+        return default
+
+
 def is_dumb_terminal() -> bool:
     """TERM=dumb, or no terminal at all.
 

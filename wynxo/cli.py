@@ -61,7 +61,7 @@ _LANGUAGE = {"read_file": "python", "shell": "console"}
 LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail"}
 from .platforms import (
     is_dumb_terminal, ollama_server_help as server_help,
-    suspicious_workspace)
+    suspicious_workspace, terminal_height)
 from .wizard import probe, run_wizard
 
 # Short forms for the prefixes that are genuinely ambiguous. An exact command
@@ -546,6 +546,21 @@ class TerminalCallbacks(Callbacks):
             self.ui.warn("y, a, n or q.")
 
 
+def _menu_rows() -> int:
+    """How many rows the completion menu may reserve, given the window.
+
+    The prompt itself and its toolbar need room too, so on a short terminal
+    the menu gives way: a suggestion list is a convenience, and a prompt
+    that cannot be drawn at all is not.
+    """
+    rows = terminal_height()
+    if rows >= 14:
+        return 6
+    if rows >= 10:
+        return 2
+    return 0
+
+
 class Repl:
     chat: "tui.ChatUI | None" = None
     """The pinned-composer layout, when this session uses it. A class-level
@@ -634,8 +649,10 @@ class Repl:
             # Readline-style completion prints inline and needs none.
             # Enough rows for the menu to open downward without the prompt
             # jumping, but not so many that an empty slab sits under the
-            # input the rest of the time.
-            reserve_space_for_menu=6,
+            # input the rest of the time -- and never more than the window
+            # has, or prompt_toolkit replaces the whole screen with "Window
+            # too small...", which is what a four-row pane got.
+            reserve_space_for_menu=_menu_rows(),
             complete_style=CompleteStyle.COLUMN,
         )
         silence_cpr_warning(self.prompt_session.app)
