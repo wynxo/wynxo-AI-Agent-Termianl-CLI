@@ -64,6 +64,41 @@ class TestSafety:
         watcher._dispatch("\x14")
         assert calls == ["t"]
 
+    def test_a_handler_runs_on_the_loop_not_the_reader_thread(self):
+        """Handlers print into the console the answer is streaming to, and
+        rich cannot be written from two threads at once. The watcher reads
+        on a thread of its own, so what it catches is handed back."""
+        import asyncio
+        import threading
+
+        where = {}
+
+        async def go():
+            watcher = KeyWatcher({"ctrl+o": lambda: where.setdefault(
+                "thread", threading.current_thread().name)})
+            watcher._loop = asyncio.get_running_loop()
+            main = threading.current_thread().name
+
+            done = threading.Event()
+
+            def reader():
+                watcher._dispatch("\x0f")     # as the watcher's thread does
+                done.set()
+
+            threading.Thread(target=reader).start()
+            done.wait(1)
+            await asyncio.sleep(0.05)          # let the loop run it
+            return main
+
+        main = asyncio.run(go())
+        assert where.get("thread") == main
+
+    def test_it_still_works_with_no_loop_to_hand_back_to(self):
+        calls = []
+        watcher = KeyWatcher({"ctrl+o": lambda: calls.append("o")})
+        watcher._dispatch("\x0f")
+        assert calls == ["o"]
+
     def test_unknown_key_is_ignored(self):
         calls = []
         watcher = KeyWatcher({"ctrl+o": lambda: calls.append("o")})

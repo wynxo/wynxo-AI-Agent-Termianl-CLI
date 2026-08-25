@@ -12,6 +12,7 @@ restore runs from a ``finally`` and is safe to call twice.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import sys
@@ -44,6 +45,9 @@ class KeyWatcher:
         """Everything no binding claimed. This is how type-ahead gets its
         characters without a second reader competing for stdin."""
         self._thread: threading.Thread | None = None
+        self._loop = None
+        """The event loop to hand keypresses back to, so handlers run where
+        everything else does rather than on this thread."""
         self._stop = threading.Event()
         self._saved = None
         self._fd: int | None = None
@@ -62,6 +66,16 @@ class KeyWatcher:
         if self._thread is not None or not self.available:
             return
         self._stop.clear()
+        # Captured here because start() is called from the turn, which is
+        # async. Handlers are then run on the loop instead of on the reader
+        # thread: they print into the same console the answer is streaming
+        # to, and rich is not safe to write from two threads at once -- a
+        # Ctrl-O landing mid-stream could interleave the backlog with the
+        # line being written.
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
         if sys.platform == "win32":
             target = self._loop_windows
         else:
@@ -177,12 +191,25 @@ class KeyWatcher:
     def _dispatch(self, char: str) -> None:
         handler = self.handlers.get(key_name(char))
         if handler is not None:
-            with contextlib.suppress(Exception):
-                handler()
+            self._hand_over(handler)
             return
         if self.on_key is not None:
+            self._hand_over(self.on_key, char)
+
+    def _hand_over(self, handler, *args) -> None:
+        """Run a handler where the rest of the session runs."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
             with contextlib.suppress(Exception):
-                self.on_key(char)
+                handler(*args)
+            return
+
+        def call() -> None:
+            with contextlib.suppress(Exception):
+                handler(*args)
+
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(call)
 
     def _restore(self) -> None:
         if self._saved is None or self._fd is None:
