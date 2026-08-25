@@ -336,3 +336,35 @@ class TestSakuraPalette:
 
         palette = resolve("sakura")
         assert palette.accent != palette.bad
+
+
+class TestSheStopsWhenWynxoDoes:
+    """A speech process is a child that outlives its parent. Quitting
+    mid-sentence left the voice talking to an empty terminal."""
+
+    def test_both_exits_silence_her(self):
+        import inspect
+
+        from wynxo.cli import Repl
+
+        for loop in (Repl._chat_loop, Repl._loop):
+            source = inspect.getsource(loop)
+            assert "self.speaker.stop()" in source, loop.__name__
+
+    def test_stop_terminates_a_running_process(self):
+        import subprocess
+
+        from wynxo.speech import Speaker
+
+        speaker = Speaker()
+        speaker._process = subprocess.Popen(
+            [__import__("sys").executable, "-c", "import time; time.sleep(30)"])
+        assert speaker.is_speaking() is True
+        speaker.stop()
+        speaker._process = None
+        assert speaker.is_speaking() is False
+
+    def test_stopping_when_silent_is_harmless(self):
+        from wynxo.speech import Speaker
+
+        Speaker().stop()          # must not raise

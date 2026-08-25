@@ -171,6 +171,25 @@ _HIDDEN_WRITE_FLAGS = {
 }
 
 
+def _git_config_only_reads(args: list[str]) -> bool:
+    """`git config` reads or writes depending on how many arguments it has.
+
+    `git config user.email` prints the value; `git config user.email x` sets
+    it, and with --global it sets it for every repository on the machine.
+    Both were being waved through as "git config, that's a read".
+
+    So only the forms that say out loud that they are reading count.
+    """
+    if not args:
+        return True                      # bare `git config` prints usage
+    reading = {"--get", "--get-all", "--get-regexp", "--list", "-l"}
+    if any(a in reading or a.startswith("--get") for a in args):
+        return True
+    # One argument that is a name, not a flag: `git config user.email`.
+    named = [a for a in args if not a.startswith("-")]
+    return len(named) == 1 and len(args) == 1
+
+
 def is_read_only_command(command: str) -> bool:
     """Whether a command only observes. Conservative: unsure means no."""
     text = command.strip()
@@ -178,7 +197,13 @@ def is_read_only_command(command: str) -> bool:
         return False
     # Anything chained or redirected is analysed as a whole and refused: the
     # safe half tells you nothing about the other half.
-    if any(token in text for token in ("&&", "||", ";", "|", ">", "<", "`", "$(")):
+    #
+    # The newline is not a nicety. Every shell treats it as a command
+    # separator, so "ls\nrm -rf build" was read as the safe command "ls" and
+    # run without asking. A bare & separates commands too -- "ls & rm -rf
+    # build" backgrounds the first and runs the second. Both were missing.
+    if any(token in text for token in
+           ("&&", "||", ";", "|", ">", "<", "`", "$(", "&", "\n", "\r")):
         return False
 
     parts = text.split()
@@ -188,7 +213,11 @@ def is_read_only_command(command: str) -> bool:
     if head in SAFE_COMMANDS:
         return True
     if head in SAFE_SUBCOMMANDS and len(parts) > 1:
-        return parts[1].lower() in SAFE_SUBCOMMANDS[head]
+        if parts[1].lower() not in SAFE_SUBCOMMANDS[head]:
+            return False
+        if head == "git" and parts[1].lower() == "config":
+            return _git_config_only_reads(parts[2:])
+        return True
     if len(parts) == 2 and parts[1] in ("--version", "-v", "--help", "-h"):
         return True
     return False

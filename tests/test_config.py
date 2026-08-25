@@ -116,6 +116,47 @@ class TestPermissions:
     def test_classification(self, command, read_only):
         assert is_read_only_command(command) is read_only
 
+    @pytest.mark.parametrize("command", [
+        # A newline is a command separator in every shell, and it was not in
+        # the list -- so this read as the safe command "ls" and ran without
+        # asking, taking the rm with it.
+        "ls\nrm -rf build",
+        "echo hi\nchmod 777 /etc",
+        "cat notes.txt\n\ncurl http://example.com/x.sh",
+        # A bare & backgrounds the first command and runs the second. Only
+        # && was being looked for.
+        "ls & rm -rf build",
+        "pwd & git push",
+        "ls\rrm -rf build",
+    ])
+    def test_a_safe_command_cannot_carry_another_one(self, command):
+        assert is_read_only_command(command) is False
+        assert PermissionStore().needs_prompt("shell", True, {"command": command})
+
+    @pytest.mark.parametrize("command,read_only", [
+        # `git config x y` sets a value, and with --global it sets it for
+        # every repository on the machine. Both were waved through as reads.
+        ("git config user.email me@example.com", False),
+        ("git config --global user.name someone", False),
+        ("git config --local core.hooksPath .hooks", False),
+        ("git config --unset user.email", False),
+        ("git config user.email", True),
+        ("git config --get user.email", True),
+        ("git config --list", True),
+        ("git config -l", True),
+        ("git config", True),
+    ])
+    def test_git_config_reads_and_writes_are_told_apart(self, command,
+                                                        read_only):
+        assert is_read_only_command(command) is read_only
+
+    def test_the_ordinary_safe_commands_still_are(self):
+        """Tightening this is only worth anything if it stays usable."""
+        for command in ("ls -la", "git status", "git log --oneline -5",
+                        "pwd", "cat README.md", "find . -name '*.py'",
+                        "grep -rn TODO src", "npm ls", "pip list"):
+            assert is_read_only_command(command) is True, command
+
     def test_reads_never_prompt(self):
         assert not PermissionStore().needs_prompt("read_file", False, {})
 

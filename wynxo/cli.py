@@ -881,6 +881,7 @@ class Repl:
             for pending in (task, painter):
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await pending
+            self.speaker.stop()
             await self.client.aclose()
         return 0
 
@@ -908,6 +909,10 @@ class Repl:
             if await self._guarded(self._drain_queue()) is False:
                 break
 
+        # She stops when wynxo does. A speech process is a child that
+        # outlives its parent, so quitting mid-sentence used to leave the
+        # voice talking to an empty terminal.
+        self.speaker.stop()
         await self.client.aclose()
         self.ui.console.print(f"  [{MUTED}]bye[/]")
         return 0
