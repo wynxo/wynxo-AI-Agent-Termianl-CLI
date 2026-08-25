@@ -124,6 +124,53 @@ class TestCodeStreaming:
         assert "in the docs" in out
 
 
+class TestOneStylePerLineNotPerLetter:
+    """Streaming a character at a time made the styling per character too.
+
+    Appending with a style creates a span per call, and there is now a call
+    for every letter -- so a styled line went out as one escape pair per
+    character, ten bytes of colour for each byte of text. All of it kept in
+    the transcript, and re-rendered on every repaint.
+    """
+
+    def _stream(self, text, style):
+        import io
+
+        from rich.console import Console
+
+        from wynxo.ui import ActivityBar, CodeStreamer
+
+        ui = UI()
+        ui.console = Console(file=io.StringIO(), force_terminal=True, width=80)
+        ui.live_ok = False
+        ui.bar = ActivityBar(ui, "low")
+        ui.bar.set_lead = lambda line: None
+        streamer = CodeStreamer(ui, style=style, code=False, literal=True)
+        for character in text:
+            streamer.feed(character)
+        streamer.finish()
+        return ui.console.file.getvalue()
+
+    def test_a_styled_line_is_wrapped_once(self):
+        written = self._stream("return get(url)\n", "#8a8a8a")
+        assert written.count("\x1b[") <= 4
+
+    def test_the_text_survives_intact(self):
+        import re
+
+        written = self._stream("return get(url)\n", "#8a8a8a")
+        assert "return get(url)" in re.sub(r"\x1b\[[0-9;]*m", "", written)
+
+    def test_an_unstyled_line_carries_no_escapes_at_all(self):
+        assert "\x1b[" not in self._stream("plain words here\n", "")
+
+    def test_it_does_not_grow_with_the_line(self):
+        """The count is per line, not per character."""
+        short = self._stream("ab\n", "#8a8a8a").count("\x1b[")
+        long = self._stream("a" * 60 + "\n", "#8a8a8a").count("\x1b[")
+        assert short == long
+
+
 class TestPinnedBar:
     def test_bar_is_exactly_one_line(self):
         ui = UI()

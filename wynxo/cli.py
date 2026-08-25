@@ -409,6 +409,15 @@ class TerminalCallbacks(Callbacks):
         self.ui.tool_start(name, summary)
 
     async def on_tool_result(self, name: str, ok: bool, display: str, output: str) -> None:
+        # Normally on_tool_start has already closed whatever was streaming.
+        # Not always: an unknown tool, one blocked by the mode, or one the
+        # user declined never starts, and the result went out while the
+        # sentence before it was still held in the streamer -- so "Let me
+        # check that for you." appeared *after* the error it preceded, run
+        # into the next turn's first words. In plan mode, where every write
+        # is refused, that was every single tool call.
+        self._end_code()
+        self._end_stream()
         if self.journal is not None:
             self.journal.tool_result(name, ok, output)
         # The pinned plan already shows every step and its state, so a result

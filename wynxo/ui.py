@@ -572,7 +572,7 @@ class CodeStreamer:
         """The half-written code line, while inside a fence."""
         self.word = ""
         """The word being typed, so a wrap can carry it down whole."""
-        self.line = Text()
+        self.line = self._blank()
         """The line being written. While the activity bar is up this is the
         bar's lead line rather than terminal output, so a partial line and a
         repainting bar can share the screen."""
@@ -764,7 +764,7 @@ class CodeStreamer:
         """Move the half-written word to the next line, taking it with us."""
         keep = self.line.plain[: len(self.line.plain) - len(self.word)]
         carried = self.word
-        self.line = Text(keep, style=self.style or None)
+        self.line = self._blank(keep)
         self.column = cell_len(keep)
         self._newline()
         self.word = ""
@@ -773,6 +773,10 @@ class CodeStreamer:
         self.word = carried
 
     # -- output ------------------------------------------------------------
+
+    def _blank(self, text: str = "") -> Text:
+        """A fresh line, styled once for all of it."""
+        return Text(text, style=self.style or "")
 
     def _write(self, text: str) -> None:
         """Add to the line in progress.
@@ -790,7 +794,12 @@ class CodeStreamer:
         live region like any other output.
         """
         self._ensure_started()
-        self.line.append(text, style=self.style or None)
+        # Plain: the line carries the style, not each character. Appending
+        # with a style creates a span per call, and calls are per character
+        # now -- which turned every streamed line into one escape pair per
+        # letter, ten bytes of colour for each byte of text, all of it kept
+        # in the transcript and re-rendered on every repaint.
+        self.line.append(text)
         self.column += cell_len(text)
         if self.ui.bar is not None:
             self.ui.bar.set_lead(self.line)
@@ -807,7 +816,7 @@ class CodeStreamer:
             else:
                 self.ui.console.file.write("\n")
                 self.ui.console.file.flush()
-        self.line = Text()
+        self.line = self._blank()
         self.column = 0
 
     def _ensure_started(self) -> None:
