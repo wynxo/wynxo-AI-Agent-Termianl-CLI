@@ -585,6 +585,7 @@ class Repl:
         two layouts cannot drift apart the way a second renderer would.
         """
         chat = tui.ChatUI(
+            header=self._chat_header,
             status=self._chat_status,
             completer=CommandCompleter(lambda: self.workspace),
             on_interrupt=self.interrupt,
@@ -596,6 +597,17 @@ class Repl:
         self.ui.on_refresh = chat.invalidate
         self.callbacks.chat = chat
         return chat
+
+    def _chat_header(self) -> str:
+        """The pinned identity line: who you are talking to, and about what."""
+        width, _ = self.chat.size() if self.chat else (self.ui.width, 0)
+        dot = self.ui.g.dot
+        endpoint = self.config.endpoint().url.replace("http://", "")
+        parts = [f"[bold {ACCENT}]wynxo[/]", self.config.model,
+                 self.policy.name, self.ui.shorten_path(str(self.workspace)),
+                 endpoint]
+        line = f"  {f'  {dot}  '.join(parts)}"
+        return tui.render_to_ansi(Text.from_markup(line), width)
 
     def _chat_status(self) -> str:
         """The pinned row: the activity bar while a turn runs, else status."""
@@ -663,12 +675,16 @@ class Repl:
         status.close()
 
         self.ui.wake(self.pet, self.pet.name)
-        self.ui.banner(
-            self.config.model,
-            f"{self.client.base_url} (ollama {version})",
-            self.policy.name,
-            str(self.workspace),
-        )
+        if self.chat is None:
+            # In the chat layout the same line is pinned at the top, where it
+            # stays; printing it into the conversation as well would say it
+            # twice and then let one copy scroll away.
+            self.ui.banner(
+                self.config.model,
+                f"{self.client.base_url} (ollama {version})",
+                self.policy.name,
+                str(self.workspace),
+            )
         if self.pet.enabled:
             self.ui.console.print(
                 Text("  ") + Text(self.pet.face(advance=False),

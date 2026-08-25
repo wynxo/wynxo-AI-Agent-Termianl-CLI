@@ -131,13 +131,15 @@ class ChatUI:
     does the obvious thing instead of being swallowed.
     """
 
+    HEADER_ROWS = 2        # the identity line, and a rule under it
     COMPOSER_ROWS = 3      # top border, the line you type on, bottom border
     STATUS_ROWS = 1
 
     def __init__(self, status: Callable[[], str] | None = None,
                  completer=None, on_interrupt: Callable[[], None] | None = None,
                  unicode: bool = True, accent: str = "ansimagenta",
-                 width: int | None = None):
+                 width: int | None = None,
+                 header: Callable[[], str] | None = None):
         # Started at the real width rather than a default: the banner is
         # drawn before the application has rendered once, and a rule wrapped
         # at 80 in a 120-column terminal stays that way for the session --
@@ -148,6 +150,7 @@ class ChatUI:
         self.scroll = 0
         """Rows scrolled back from the bottom. Zero follows the newest."""
         self._status = status or (lambda: "")
+        self._header = header or (lambda: "")
         self._on_interrupt = on_interrupt
         self._unicode = unicode
         self._accent = accent
@@ -184,7 +187,8 @@ class ChatUI:
 
     def transcript_rows(self) -> int:
         _, rows = self.size()
-        return max(1, rows - self.COMPOSER_ROWS - self.STATUS_ROWS)
+        return max(1, rows - self.HEADER_ROWS - self.COMPOSER_ROWS
+                   - self.STATUS_ROWS)
 
     # -- rendering ---------------------------------------------------------
 
@@ -214,6 +218,21 @@ class ChatUI:
         if len(lines) < rows:
             lines = [""] * (rows - len(lines)) + lines
         return ANSI("\n".join(lines[-rows:]))
+
+    def _header_fragments(self):
+        """The identity line, kept on screen.
+
+        It used to be the first thing printed into the conversation, which
+        meant it scrolled away after a page and the one line saying which
+        model and which project you are talking to was gone for the rest of
+        the session.
+        """
+        return ANSI(self._header())
+
+    def _rule_fragments(self):
+        width, _ = self.size()
+        bar = "─" if self._unicode else "-"
+        return [("class:edge", bar * max(0, width))]
 
     def _status_fragments(self):
         text = self._status()
@@ -251,6 +270,10 @@ class ChatUI:
             get_line_prefix=lambda *_: [("class:prompt", self._composer_prefix())],
         )
         layout = Layout(HSplit([
+            Window(content=FormattedTextControl(self._header_fragments),
+                   height=1),
+            Window(content=FormattedTextControl(self._rule_fragments),
+                   height=1),
             transcript,
             status,
             Window(content=FormattedTextControl(self._edge(True)), height=1),

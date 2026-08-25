@@ -121,11 +121,25 @@ class TestTheLayout:
     def chat(self):
         return ChatUI(status=lambda: "status row")
 
-    def test_the_transcript_sits_above_the_composer(self, chat):
-        """Rows are shared out: whatever is left after the pinned furniture
-        belongs to the conversation."""
+    @pytest.fixture
+    def chat_with_header(self):
+        return ChatUI(status=lambda: "", header=lambda: "wynxo · qwen3 · medium")
+
+    def test_the_transcript_gets_the_rows_the_furniture_does_not(self, chat):
+        """Header, status row and composer are pinned; the conversation gets
+        whatever is left."""
         width, rows = chat.size()
-        assert chat.transcript_rows() == rows - chat.COMPOSER_ROWS - chat.STATUS_ROWS
+        furniture = (chat.HEADER_ROWS + chat.COMPOSER_ROWS + chat.STATUS_ROWS)
+        assert chat.transcript_rows() == rows - furniture
+
+    def test_the_header_stays_on_screen(self, chat_with_header):
+        """It used to be printed into the conversation, so after a page the
+        one line saying which model and which project you are talking to had
+        scrolled away for the rest of the session."""
+        for i in range(500):
+            chat_with_header.transcript.console.print(f"line {i}")
+        chat_with_header.flush()
+        assert "qwen3" in str(chat_with_header._header_fragments().value)
 
     def test_a_short_conversation_hugs_the_bottom(self, chat):
         """A chat window puts three lines just above the composer, not
