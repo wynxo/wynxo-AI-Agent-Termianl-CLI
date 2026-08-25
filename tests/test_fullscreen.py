@@ -294,3 +294,136 @@ class TestTheSettingItself:
         from wynxo.cli import COMMANDS
 
         assert "/fullscreen" in COMMANDS
+
+
+class TestTheChatLayoutOwnsTheScreen:
+    """The bug this class exists for: two owners of the same escape.
+
+    prompt_toolkit builds the chat layout's Application with full_screen=True,
+    so it enters and leaves the alternate screen itself. wynxo used to wrap
+    that in a Screen of its own, which made /fullscreen off write the leave
+    sequence while the application was still running -- switching the
+    terminal back to the primary screen with a full-screen interface still
+    painting on it. The result was wynxo drawn over the user's shell, and
+    left there after it exited.
+    """
+
+    def test_nothing_asks_for_a_screen_that_is_always_on(self):
+        """Checked as code: the wrapper is gone from every call site.
+
+        A behavioural test cannot reach this -- the call is inside the
+        function that runs the whole session.
+        """
+        import ast
+        import inspect
+
+        from wynxo import cli as cli_module
+
+        tree = ast.parse(inspect.getsource(cli_module))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if ast.unparse(node.func) != "fullscreen.Screen":
+                continue
+            for argument in list(node.args) + [k.value for k in node.keywords]:
+                assert ast.unparse(argument) != "True", (
+                    "the chat layout's Application already owns the alternate "
+                    "screen; a second owner is what broke /fullscreen")
+
+    def _repl(self):
+        """A Repl with just enough on it for cmd_fullscreen."""
+        from wynxo.cli import Repl
+
+        repl = Repl.__new__(Repl)
+        repl.chat = object()          # any chat layout at all
+        repl.screen = Screen(enabled=True, stream=FakeTTY())
+        repl.screen.active = True     # as it would be, mid-session
+        repl.config = _StubConfig()
+        repl.ui = _StubUI()
+        return repl
+
+    def test_turning_it_off_does_not_switch_the_screen_underneath(self):
+        import asyncio
+
+        repl = self._repl()
+        asyncio.run(repl.cmd_fullscreen(["off"]))
+        assert repl.screen.active is True, (
+            "the running application is still drawing on that screen")
+        assert LEAVE not in repl.screen.stream.getvalue()
+
+    def test_turning_it_off_changes_something_real(self):
+        """A setting that says it changed while nothing did is worse than
+        no setting: it is the layout that has to go."""
+        import asyncio
+
+        repl = self._repl()
+        asyncio.run(repl.cmd_fullscreen(["off"]))
+        assert repl.config.chat_layout is False
+        assert repl.config.saved is True
+
+    def test_changing_your_mind_puts_the_layout_back(self):
+        import asyncio
+
+        repl = self._repl()
+        asyncio.run(repl.cmd_fullscreen(["off"]))
+        asyncio.run(repl.cmd_fullscreen(["on"]))
+        assert repl.config.chat_layout is True
+
+    def test_turning_it_on_never_writes_the_enter_sequence_twice(self):
+        import asyncio
+
+        repl = self._repl()
+        asyncio.run(repl.cmd_fullscreen(["on"]))
+        assert ENTER not in repl.screen.stream.getvalue()
+
+
+class TestTheFlagsAgree:
+    def _config(self, *argv):
+        from wynxo.cli import apply_flags, build_parser
+        from wynxo.config import Config
+
+        config = Config()
+        apply_flags(config, build_parser().parse_args(list(argv)))
+        return config
+
+    def test_no_fullscreen_gives_the_scrolling_terminal(self):
+        """Under the chat layout the flag had nothing to turn off, so it
+        silently did nothing -- and the terminal was taken over anyway."""
+        config = self._config("--no-fullscreen")
+        assert config.fullscreen is False
+        assert config.chat_layout is False
+
+    def test_asking_for_both_keeps_the_chat_layout(self):
+        """--chat is the specific request; it wins."""
+        assert self._config("--no-fullscreen", "--chat").chat_layout is True
+
+    def test_plain_start_is_unchanged(self):
+        config = self._config()
+        assert config.chat_layout is True
+        assert config.fullscreen is False
+
+
+class _StubConfig:
+    chat_layout = True
+    fullscreen = True
+    saved = False
+
+    def save(self):
+        self.saved = True
+
+
+class _StubUI:
+    class _G:
+        dot = "-"
+        unicode = False
+
+    g = _G()
+
+    def info(self, *_a, **_k):
+        pass
+
+    def success(self, *_a, **_k):
+        pass
+
+    def warn(self, *_a, **_k):
+        pass
