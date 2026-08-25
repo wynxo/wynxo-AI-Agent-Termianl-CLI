@@ -1175,7 +1175,8 @@ class Repl:
 
         if not find(text):
             return text
-        expanded, problems = expand(text, self.workspace, self.boundary)
+        expanded, problems = expand(text, self.workspace, self.boundary,
+                                    self.agent.shield)
         for problem in problems:
             self.ui.warn(problem)
         if expanded != text:

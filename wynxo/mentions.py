@@ -85,7 +85,8 @@ def _within(path: Path, root: Path) -> bool:
         return False
 
 
-def expand(text: str, workspace: Path, boundary=None) -> tuple[str, list[str]]:
+def expand(text: str, workspace: Path, boundary=None,
+           shield=None) -> tuple[str, list[str]]:
     """Return ``(message, problems)`` with mentioned files inlined.
 
     The original sentence is kept verbatim at the top -- the mention is part
@@ -93,6 +94,12 @@ def expand(text: str, workspace: Path, boundary=None) -> tuple[str, list[str]]:
     file with no idea why. Anything unreadable comes back in ``problems``
     rather than being silently dropped, because a mention that quietly did
     nothing is worse than one that says it could not.
+
+    The shield applies here for the same reason it applies to read_file: a
+    mention puts the file on the wire to a model that is often on another
+    machine. Without it the same file behaved two different ways depending
+    on how it was named -- read_file refused a .env and masked the key in a
+    settings module, while "@.env" sent the lot.
     """
     paths = find(text)
     if not paths:
@@ -132,6 +139,17 @@ def expand(text: str, workspace: Path, boundary=None) -> tuple[str, list[str]]:
         except OSError as exc:
             problems.append(f"@{raw}: {exc}")
             continue
+
+        if shield is not None:
+            if shield.blocks(full):
+                problems.append(
+                    f"@{raw} holds credentials, so it was not read. "
+                    "/secrets allow it if that is wrong.")
+                continue
+            body, masked = shield.clean(body)
+            if masked:
+                problems.append(
+                    f"@{raw}: {masked} value(s) masked before sending")
 
         if len(body) > budget:
             problems.append(f"@{raw} skipped: no room left in this message")

@@ -121,3 +121,55 @@ class TestExpand:
         message, problems = expand("@src/auth.py and @README.md", project, boundary)
         assert "check_token" in message and "# hi" in message
         assert problems == []
+
+
+class TestAMentionGoesThroughTheShieldToo:
+    """The same file behaved two ways depending on how it was named.
+
+    read_file refuses a .env and masks the key in a settings module. "@.env"
+    inlined the whole thing, unmasked, into a message bound for a model that
+    is often on another machine -- which is the exact thing the shield
+    exists to stop.
+    """
+
+    def _project(self, tmp_path):
+        (tmp_path / "app.py").write_text("x = 1\n")
+        (tmp_path / ".env").write_text("API_KEY=sk-live-abcdefghijklmnop\n")
+        (tmp_path / "settings.py").write_text(
+            'API_KEY = "sk-proj-abcdefghij1234567890"\n')
+        return tmp_path
+
+    def _expand(self, tmp_path, mention):
+        from wynxo.mentions import expand
+        from wynxo.scope import Scope, resolve
+        from wynxo.secrets import Shield
+
+        return expand(f"look at {mention}", tmp_path,
+                      resolve(tmp_path, Scope.FOLDER), Shield(tmp_path))
+
+    def test_a_credentials_file_is_not_inlined(self, tmp_path):
+        self._project(tmp_path)
+        text, problems = self._expand(tmp_path, "@.env")
+        assert "sk-live" not in text
+        assert any("credentials" in p for p in problems)
+
+    def test_a_key_inside_an_ordinary_file_is_masked(self, tmp_path):
+        self._project(tmp_path)
+        text, problems = self._expand(tmp_path, "@settings.py")
+        assert "sk-proj-abcdefghij1234567890" not in text
+        assert "API_KEY" in text
+        assert any("masked" in p for p in problems)
+
+    def test_an_ordinary_file_is_untouched(self, tmp_path):
+        self._project(tmp_path)
+        text, problems = self._expand(tmp_path, "@app.py")
+        assert "x = 1" in text
+        assert problems == []
+
+    def test_the_repl_passes_the_shield_in(self):
+        import inspect
+
+        from wynxo.cli import Repl
+
+        source = inspect.getsource(Repl._expand_mentions)
+        assert "shield" in source
