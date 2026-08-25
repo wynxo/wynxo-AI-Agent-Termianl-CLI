@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import shlex
 import signal
 import subprocess
 from collections import deque
@@ -70,12 +72,84 @@ def _clean(raw: bytes) -> str:
 # unrecoverable when they are wrong. These are refused outright rather than
 # merely prompted for, because a yes/no prompt is exactly the thing a user
 # clicks through on autopilot.
-HARD_BLOCKED = (
-    "rm -rf /", "rm -rf /*", "rm -rf ~", "rm -rf ~/", ":(){:|:&};:",
-    "mkfs", "dd if=/dev/zero of=/dev", "> /dev/sda",
-    "format c:", "del /f /s /q c:\\", "rd /s /q c:\\",
-    "shutdown", "reboot", "halt",
-)
+#
+# Matched against the command being run rather than as a substring of the
+# line. Substrings refused far too much: "rm -rf /tmp/build" starts with
+# "rm -rf /", and "git commit -m 'handle shutdown cleanly'" contains the
+# word shutdown, as does "grep -rn reboot src". All three were refused
+# outright, with no way past it.
+
+_EVERYTHING = {"/", "/*", "/.", "~", "~/", "~/*", "*", "/usr", "/etc",
+               "/home", "/var", "/bin", "/lib", "/boot", "/sys", "/proc"}
+"""Targets that mean "the machine" rather than "this project"."""
+
+_FORMATTERS = ("mkfs", "mke2fs", "mkdosfs", "newfs", "diskpart")
+_TURNS_IT_OFF = {"shutdown", "reboot", "halt", "poweroff"}
+_FORK_BOMB = ":(){:|:&};:"
+_RAW_DISK = re.compile(r">\s*/dev/(sd|nvme|hd|disk|vd)", re.IGNORECASE)
+_WINDOWS_ROOT = re.compile(r"^[a-z]:[\\/]?$", re.IGNORECASE)
+
+_SEPARATORS = re.compile(r"&&|\|\||[;|&\n\r]")
+
+
+def _commands_in(line: str) -> list[list[str]]:
+    """The separate commands a line would run, each as its tokens."""
+    out = []
+    for segment in _SEPARATORS.split(line):
+        if not segment.strip():
+            continue
+        try:
+            tokens = shlex.split(segment, posix=os.name != "nt")
+        except ValueError:
+            tokens = segment.split()      # unbalanced quotes; do the crude thing
+        if tokens:
+            out.append(tokens)
+    return out
+
+
+_WRAPPERS = {"sudo", "doas", "env", "nice", "ionice", "nohup", "time",
+             "command", "exec", "stdbuf"}
+"""Things that run something else. "sudo rm -rf /" is still "rm -rf /"."""
+
+
+def _unwrap(tokens: list[str]) -> list[str]:
+    """Strip the wrappers off the front to find the command being run."""
+    while tokens and tokens[0].lower().rsplit("/", 1)[-1] in _WRAPPERS:
+        tokens = tokens[1:]
+        while tokens and (tokens[0].startswith("-") or "=" in tokens[0]):
+            tokens = tokens[1:]
+    return tokens
+
+
+def hard_refusal(line: str) -> str:
+    """Why this must not run at all, or "" if it may be asked about."""
+    if _FORK_BOMB in "".join(line.split()):
+        return "a fork bomb"
+    if _RAW_DISK.search(line):
+        return "a write straight to a raw disk device"
+
+    for tokens in _commands_in(line):
+        tokens = _unwrap(tokens)
+        if not tokens:
+            continue
+        head = tokens[0].lower().rsplit("/", 1)[-1]
+        arguments = [t for t in tokens[1:] if not t.startswith("-")]
+        if head == "rm" and any(a.rstrip("/") in
+                                {e.rstrip("/") for e in _EVERYTHING} or
+                                a in _EVERYTHING for a in arguments):
+            return "a recursive delete of the whole filesystem"
+        if head.startswith(_FORMATTERS):
+            return "formatting a filesystem"
+        if head == "format" and any(_WINDOWS_ROOT.match(a) for a in arguments):
+            return "formatting a drive"
+        if head in ("del", "rd", "rmdir") and any(_WINDOWS_ROOT.match(a)
+                                                  for a in arguments):
+            return "deleting a whole drive"
+        if head in _TURNS_IT_OFF:
+            return "shutting the machine down"
+        if head == "dd" and any(a.startswith("of=/dev/") for a in tokens[1:]):
+            return "writing straight to a device"
+    return ""
 
 
 class ShellInput(Schema):
@@ -102,14 +176,12 @@ class Shell(Tool):
         if not command:
             return ToolResult.failure("Empty command.")
 
-        lowered = " ".join(command.lower().split())
-        for blocked in HARD_BLOCKED:
-            if blocked in lowered:
-                return ToolResult.failure(
-                    f"Refusing to run this: it contains {blocked!r}, which is "
-                    "destructive and not reversible. If you genuinely need it, "
-                    "run it yourself outside the agent."
-                )
+        if reason := hard_refusal(command):
+            return ToolResult.failure(
+                f"Refusing to run this: it is {reason}, which is destructive "
+                "and not reversible. If you genuinely need it, run it "
+                "yourself outside the agent."
+            )
 
         cwd = self.resolve_path(args.cwd) if args.cwd else self.workspace
         if not cwd.is_dir():

@@ -380,6 +380,68 @@ class TestShell:
         assert "marker.txt" in result.output
 
 
+class TestWhatIsRefusedOutright:
+    """A handful of commands are refused rather than prompted for, because a
+    yes/no question is the thing a person clicks through on autopilot.
+
+    They were matched as substrings of the whole line, which refused far too
+    much: "rm -rf /tmp/build" starts with "rm -rf /", and a commit message
+    with the word "shutdown" in it contains "shutdown". All refused
+    outright, with nothing the model could do about it.
+    """
+
+    @pytest.mark.parametrize("command", [
+        "rm -rf /tmp/build",
+        "rm -rf ./build",
+        "rm -rf build",
+        "rm -rf node_modules",
+        "git commit -m 'handle shutdown cleanly'",
+        "grep -rn reboot src",
+        "echo 'format c: was a joke'",
+        "find . -name '*.pyc' -delete",
+        "time npm test",
+        "env FOO=1 pytest",
+    ])
+    async def test_ordinary_work_is_not_refused(self, tmp_path, command):
+        from wynxo.tools.shell import hard_refusal
+
+        assert hard_refusal(command) == "", command
+
+    @pytest.mark.parametrize("command", [
+        "rm -rf /",
+        "rm -rf /*",
+        "rm -rf ~",
+        "rm -rf ~/",
+        "rm -rf /usr",
+        "sudo rm -rf /",
+        "env rm -rf /",
+        "nohup rm -rf ~",
+        "shutdown -h now",
+        "sudo shutdown now",
+        "reboot",
+        "halt",
+        "mkfs.ext4 /dev/sda1",
+        "dd if=/dev/zero of=/dev/sda",
+        "echo hi > /dev/sda",
+        ":(){:|:&};:",
+        # A separator does not launder it.
+        "ls && rm -rf /",
+        "ls\nrm -rf /",
+        "format c:",
+        "rd /s /q c:\\",
+    ])
+    async def test_these_never_run(self, command):
+        from wynxo.tools.shell import hard_refusal
+
+        assert hard_refusal(command), command
+
+    async def test_the_refusal_reaches_the_model(self, tmp_path):
+        result = await Shell(tmp_path).invoke({"command": "rm -rf /"})
+        assert result.ok is False
+        assert "Refusing to run" in result.output
+        assert "run it yourself" in result.output
+
+
 class TestTodo:
     async def test_renders_and_counts(self, tmp_path):
         tool = TodoWrite(tmp_path)
