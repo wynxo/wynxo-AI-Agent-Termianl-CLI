@@ -155,10 +155,19 @@ def normalise_url(raw: str) -> str:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
+    """One config layer, or nothing.
+
+    Anything that is not a JSON object is nothing: `dict.update` accepts a
+    list of pairs, so a file containing `[[1, 2]]` would otherwise merge a
+    key of `1` into the config, and one containing `5` or `"text"` would
+    raise out of load() before the fallback that exists to stop exactly
+    that.
+    """
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def load(project_dir: Path | None = None) -> Config:

@@ -236,3 +236,53 @@ class TestConfig:
         assert loaded.model == "qwen3:32b"
         assert loaded.effort == "xhigh"
         assert loaded.num_ctx == 65536
+
+
+class TestACorruptConfigNeverStopsWynxoStarting:
+    """load() has always had a fallback for a corrupt config. The guard was
+    just in the wrong place: the crash happened in `data.update()`, before
+    the try that exists to prevent exactly this.
+    """
+
+    @pytest.fixture
+    def where(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("wynxo.config.config_dir", lambda: tmp_path)
+        (tmp_path / "config.json").parent.mkdir(parents=True, exist_ok=True)
+        return tmp_path
+
+    @pytest.mark.parametrize("body", [
+        '"a string"', "5", "null", "true", "[]", "[1,2,3]",
+        '{"model": "truncated', "", "   ", "[[1,2]]",
+    ])
+    def test_it_falls_back_to_defaults_instead_of_raising(self, where, body,
+                                                          tmp_path):
+        from wynxo.config import DEFAULT_MODEL, load
+
+        (where / "config.json").write_text(body, encoding="utf-8")
+        assert load(tmp_path).model == DEFAULT_MODEL
+
+    def test_a_list_of_pairs_does_not_smuggle_in_keys(self, where, tmp_path):
+        """dict.update accepts pairs, so [[\"model\", \"evil\"]] would
+        otherwise be merged in as real config."""
+        from wynxo.config import DEFAULT_MODEL, load
+
+        (where / "config.json").write_text('[["model", "evil:1b"]]',
+                                           encoding="utf-8")
+        assert load(tmp_path).model == DEFAULT_MODEL
+
+    def test_a_corrupt_project_file_does_not_stop_the_user_file(self, where,
+                                                                tmp_path):
+        from wynxo.config import load
+
+        (where / "config.json").write_text('{"model": "mine:7b"}',
+                                           encoding="utf-8")
+        (tmp_path / ".wynxo.json").write_text("not json at all",
+                                              encoding="utf-8")
+        assert load(tmp_path).model == "mine:7b"
+
+    def test_a_good_config_is_still_read(self, where, tmp_path):
+        from wynxo.config import load
+
+        (where / "config.json").write_text('{"model": "custom:7b"}',
+                                           encoding="utf-8")
+        assert load(tmp_path).model == "custom:7b"
