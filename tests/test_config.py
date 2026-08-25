@@ -286,3 +286,101 @@ class TestACorruptConfigNeverStopsWynxoStarting:
         (where / "config.json").write_text('{"model": "custom:7b"}',
                                            encoding="utf-8")
         assert load(tmp_path).model == "custom:7b"
+
+
+class TestASettingsFileIsNeverHalfWritten:
+    """write_text truncates first and writes second.
+
+    Anything that stops the process in between -- Ctrl-C, a full disk, a
+    container going away -- left a half-written settings file, and the next
+    start silently used the defaults: endpoint list, model, theme, all gone
+    with no explanation. Verified by truncating one: the model came back as
+    the default and nothing said why.
+    """
+
+    def test_the_replacement_is_all_or_nothing(self, tmp_path):
+        from wynxo.config import atomic_write
+
+        target = tmp_path / "config.json"
+        atomic_write(target, '{"model": "first"}')
+        atomic_write(target, '{"model": "second"}')
+        assert target.read_text(encoding="utf-8") == '{"model": "second"}'
+
+    def test_it_leaves_no_temporary_behind(self, tmp_path):
+        from wynxo.config import atomic_write
+
+        atomic_write(tmp_path / "config.json", "{}")
+        assert [p.name for p in tmp_path.iterdir()] == ["config.json"]
+
+    def test_a_failed_write_keeps_the_old_file(self, tmp_path, monkeypatch):
+        import os
+
+        from wynxo import config as config_module
+
+        target = tmp_path / "config.json"
+        config_module.atomic_write(target, '{"model": "good"}')
+
+        def refuse(*_args):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(os, "replace", refuse)
+        with pytest.raises(OSError):
+            config_module.atomic_write(target, '{"model": "new"}')
+        assert target.read_text(encoding="utf-8") == '{"model": "good"}'
+        assert [p.name for p in tmp_path.iterdir()] == ["config.json"]
+
+    def test_save_uses_it(self, tmp_path):
+        import inspect
+
+        from wynxo.config import Config
+
+        assert "atomic_write" in inspect.getsource(Config.save)
+
+
+class TestAnUnreadableSettingsFileSaysSo:
+    """Falling back to the defaults is right. Doing it in silence is how a
+    file with one bad character costs somebody their endpoint list without
+    ever telling them."""
+
+    def _load(self, tmp_path, monkeypatch, text):
+        from wynxo import config as config_module
+
+        target = tmp_path / "config.json"
+        target.write_text(text, encoding="utf-8")
+        monkeypatch.setattr(config_module, "config_path", lambda: target)
+        return config_module.load(project_dir=tmp_path)
+
+    def test_broken_json_is_reported(self, tmp_path, monkeypatch):
+        from wynxo import config as config_module
+
+        self._load(tmp_path, monkeypatch, '{"model": "x"')
+        assert any("not valid JSON" in p for p in config_module.LOAD_PROBLEMS)
+
+    def test_something_that_is_not_settings_is_reported(self, tmp_path,
+                                                        monkeypatch):
+        from wynxo import config as config_module
+
+        self._load(tmp_path, monkeypatch, "[1, 2, 3]")
+        assert config_module.LOAD_PROBLEMS
+
+    def test_a_good_file_reports_nothing(self, tmp_path, monkeypatch):
+        from wynxo import config as config_module
+
+        config = self._load(tmp_path, monkeypatch, '{"model": "kept:7b"}')
+        assert config.model == "kept:7b"
+        assert config_module.LOAD_PROBLEMS == []
+
+    def test_a_missing_file_is_not_a_problem(self, tmp_path, monkeypatch):
+        from wynxo import config as config_module
+
+        monkeypatch.setattr(config_module, "config_path",
+                            lambda: tmp_path / "nothing.json")
+        config_module.load(project_dir=tmp_path)
+        assert config_module.LOAD_PROBLEMS == []
+
+    def test_the_startup_check_reports_them(self):
+        import inspect
+
+        from wynxo.cli import Repl
+
+        assert "LOAD_PROBLEMS" in inspect.getsource(Repl._connect)

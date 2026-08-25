@@ -22,6 +22,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from . import __version__
+from . import config as config_module
 from . import fullscreen
 from . import logo
 from . import tui
@@ -789,6 +790,12 @@ class Repl:
 
         if reason := suspicious_workspace(self.workspace):
             note(WARN, f"scope {self.boundary.scope.value}", reason)
+
+        # A settings file that could not be read is the reason the endpoint
+        # list, the model and the theme are suddenly back to their defaults.
+        # Falling back is right; doing it in silence is not.
+        for problem in config_module.LOAD_PROBLEMS:
+            note(WARN, "settings", problem)
 
         if problems:
             print("", file=status.stream)

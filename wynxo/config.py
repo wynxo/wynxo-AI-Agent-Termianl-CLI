@@ -10,6 +10,7 @@ Config is resolved from, in increasing order of priority:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -134,9 +135,8 @@ class Config(Schema):
 
     def save(self, path: Path | None = None) -> Path:
         path = path or config_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
         payload = self.to_dict()
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        atomic_write(path, json.dumps(payload, indent=2) + "\n")
         try:
             path.chmod(0o600)  # may hold an api key; no-op on Windows
         except OSError:
@@ -169,6 +169,40 @@ def normalise_url(raw: str) -> str:
     return v.rstrip("/")
 
 
+LOAD_PROBLEMS: list[str] = []
+"""Config files that exist but could not be read, for the caller to report.
+
+Falling back to defaults silently is how a settings file with one bad
+character costs somebody their endpoint list without ever saying so.
+"""
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Write a file that is either the old contents or the new, never half.
+
+    write_text truncates first and writes second, so anything that stops the
+    process in between -- Ctrl-C, a full disk, a container going away --
+    leaves a half-written file. For a settings file that means the endpoint
+    list, the model, the theme and the rest silently back to defaults on the
+    next start, which is exactly what happened when this was tested.
+
+    The temporary file is in the same directory so the replace is a rename
+    within one filesystem, which is atomic on both platforms this targets.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.new")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     """One config layer, or nothing.
 
@@ -179,14 +213,27 @@ def _read_json(path: Path) -> dict[str, Any]:
     that.
     """
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return {}
-    return data if isinstance(data, dict) else {}
+    except OSError as exc:
+        LOAD_PROBLEMS.append(f"{path} could not be read ({exc.strerror or exc})")
+        return {}
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        LOAD_PROBLEMS.append(
+            f"{path} is not valid JSON ({exc}); this run uses the defaults")
+        return {}
+    if not isinstance(data, dict):
+        LOAD_PROBLEMS.append(f"{path} does not hold settings; using the defaults")
+        return {}
+    return data
 
 
 def load(project_dir: Path | None = None) -> Config:
     """Assemble config from every layer."""
+    LOAD_PROBLEMS.clear()
     data: dict[str, Any] = {}
     data.update(_read_json(config_path()))
 

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .coerce import as_float, as_int, as_list, as_text
-from .config import data_dir
+from .config import atomic_write, data_dir
 
 
 def estimate_tokens(text: str) -> int:
@@ -145,8 +145,8 @@ class Session:
     def save(self) -> Path | None:
         try:
             path = self.path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
+            atomic_write(
+                path,
                 json.dumps(
                     {
                         "session_id": self.session_id,
@@ -165,7 +165,6 @@ class Session:
                     indent=2,
                     default=str,
                 ),
-                encoding="utf-8",
             )
             return path
         except OSError:

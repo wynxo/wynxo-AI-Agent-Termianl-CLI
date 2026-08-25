@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import config_dir
+from .config import atomic_write, config_dir
 
 PROJECT_DIR = ".wynxo"
 PROJECT_FILE = "memory.md"
@@ -99,7 +99,7 @@ class MemoryFile:
 
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(text, encoding="utf-8")
+            atomic_write(self.path, text)
         except OSError as exc:
             return False, f"Could not write {self.path}: {exc}"
         return True, note
@@ -119,7 +119,7 @@ class MemoryFile:
         if not dropped:
             return 0, f"Nothing matching {pattern!r}."
         try:
-            self.path.write_text("\n".join(kept).rstrip() + "\n", encoding="utf-8")
+            atomic_write(self.path, "\n".join(kept).rstrip() + "\n")
         except OSError as exc:
             return 0, f"Could not write {self.path}: {exc}"
         return dropped, f"Forgot {dropped} entr{'y' if dropped == 1 else 'ies'}."
