@@ -100,6 +100,81 @@ class TestWriteAndEdit:
         assert not result.ok and "outside the project directory" in result.output
 
 
+class TestAFileIsSavedTheWayItWasStored:
+    """An edit changes what was asked for and nothing else.
+
+    Reading was forgiving -- UTF-16, cp1252, a byte-order mark -- and
+    writing was not: everything went back as plain UTF-8. So a one-line
+    change rewrote every other byte in the file. A UTF-16 PowerShell script
+    came back as UTF-8 with no BOM, a cp1252 file's accented characters were
+    re-encoded end to end, and a BOM that mattered simply disappeared.
+    """
+
+    CASES = {
+        "utf16.ps1": ("Write-Host 'hello'\nWrite-Host 'second'\n", "utf-16"),
+        "cp1252.txt": ("café résumé\nsecond line\n", "cp1252"),
+        "bom.py": ("# héllo\nsecond = 1\n", "utf-8-sig"),
+        "plain.py": ("x = 1\nsecond = 2\n", "utf-8"),
+        "crlf.txt": ("one\r\nsecond\r\n", "utf-8"),
+    }
+
+    def _write(self, tmp_path, name):
+        text, encoding = self.CASES[name]
+        (tmp_path / name).write_text(text, encoding=encoding, newline="")
+        return text, encoding
+
+    @pytest.mark.parametrize("name", list(CASES))
+    async def test_only_the_edited_span_changes(self, tmp_path, name):
+        text, encoding = self._write(tmp_path, name)
+        result = await EditFile(tmp_path).invoke(
+            {"path": name, "old_text": "second", "new_text": "SECOND"})
+        assert result.ok, result.output
+        assert (tmp_path / name).read_bytes() == \
+            text.replace("second", "SECOND", 1).encode(encoding)
+
+    @pytest.mark.parametrize("name", list(CASES))
+    async def test_reading_it_back_works_too(self, tmp_path, name):
+        """UTF-16 is half NUL bytes, so the binary sniff called every
+        PowerShell script binary and refused to open it."""
+        self._write(tmp_path, name)
+        result = await ReadFile(tmp_path).invoke({"path": name})
+        assert result.ok, result.output
+        assert "second" in result.output
+
+    async def test_replacing_the_whole_file_keeps_its_encoding(self, tmp_path):
+        self._write(tmp_path, "utf16.ps1")
+        await WriteFile(tmp_path).invoke(
+            {"path": "utf16.ps1", "content": "Write-Host 'new'\n"})
+        assert (tmp_path / "utf16.ps1").read_bytes() == \
+            "Write-Host 'new'\n".encode("utf-16")
+
+    async def test_a_new_file_is_plain_utf8(self, tmp_path):
+        await WriteFile(tmp_path).invoke({"path": "new.py", "content": "x = 1\n"})
+        assert (tmp_path / "new.py").read_bytes() == b"x = 1\n"
+
+    async def test_an_encoding_that_cannot_hold_the_new_text_says_so(
+            self, tmp_path):
+        """Better than a file full of question marks nobody was warned about."""
+        (tmp_path / "old.txt").write_text("café\nsecond\n", encoding="cp1252",
+                                          newline="")
+        result = await EditFile(tmp_path).invoke(
+            {"path": "old.txt", "old_text": "second", "new_text": "→ arrow"})
+        assert result.ok
+        assert "UTF-8" in result.output
+        assert (tmp_path / "old.txt").read_bytes().decode("utf-8") == \
+            "café\n→ arrow\n"
+
+    async def test_a_real_binary_file_is_still_refused(self, tmp_path):
+        (tmp_path / "blob.bin").write_bytes(bytes(range(256)) * 40)
+        for tool, args in (
+            (EditFile, {"path": "blob.bin", "old_text": "a", "new_text": "b"}),
+            (ReadFile, {"path": "blob.bin"}),
+        ):
+            result = await tool(tmp_path).invoke(args)
+            assert result.ok is False
+            assert "binary" in result.output
+
+
 class TestSearch:
     async def test_glob_finds_by_pattern(self, tmp_path):
         (tmp_path / "src").mkdir()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 from pathlib import Path
+from typing import NamedTuple
 
 from ..schema import Field, Schema
 from ..session import estimate_tokens
@@ -20,31 +21,90 @@ reading does not work, and it will try something worse."""
 BINARY_SNIFF = 8_000
 
 
+_BOMS = (
+    (b"\xef\xbb\xbf", "utf-8"),
+    (b"\xff\xfe", "utf-16-le"),
+    (b"\xfe\xff", "utf-16-be"),
+)
+
+
 def _looks_binary(path: Path) -> bool:
+    """Whether this is a file that would be ruined by being treated as text.
+
+    A byte-order mark settles it before the NUL test gets a say. UTF-16 is
+    half NUL bytes by construction, so without this every UTF-16 file --
+    which on Windows means most things PowerShell wrote -- was called binary
+    and refused, and the UTF-16 branch of the decoder could never run.
+    """
     try:
         with path.open("rb") as fh:
-            return b"\0" in fh.read(BINARY_SNIFF)
+            head = fh.read(BINARY_SNIFF)
     except OSError:
         return False
+    if any(head.startswith(bom) for bom, _ in _BOMS):
+        return False
+    return b"\0" in head
 
 
-def _read_text(path: Path) -> str:
-    """Read with a forgiving encoding ladder.
+class Decoded(NamedTuple):
+    """A file's text, and what it takes to write it back unchanged."""
+
+    text: str
+    encoding: str
+    bom: bytes
+
+
+def _decode(path: Path) -> Decoded:
+    """Read with a forgiving encoding ladder, remembering which rung.
 
     Files written on Windows are routinely cp1252 or UTF-16, and a decode
     error here would look to the model like the file does not exist.
+
+    The encoding comes back because writing is not symmetric with reading.
+    An edit that changed one line but saved the whole file as UTF-8 rewrote
+    every other byte in it: a UTF-16 PowerShell script became UTF-8 without
+    its byte-order mark, a cp1252 file's accented characters were re-encoded
+    from end to end, and a BOM the file was relying on simply vanished.
     """
     raw = path.read_bytes()
-    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return raw.decode("utf-16")
-    if raw.startswith(b"\xef\xbb\xbf"):
-        return raw[3:].decode("utf-8", "replace")
+    for bom, encoding in _BOMS:
+        if raw.startswith(bom):
+            return Decoded(raw[len(bom):].decode(encoding, "replace"),
+                           encoding, bom)
     for encoding in ("utf-8", "cp1252"):
         try:
-            return raw.decode(encoding)
+            return Decoded(raw.decode(encoding), encoding, b"")
         except UnicodeDecodeError:
             continue
-    return raw.decode("utf-8", "replace")
+    return Decoded(raw.decode("utf-8", "replace"), "utf-8", b"")
+
+
+def _read_text(path: Path) -> str:
+    return _decode(path).text
+
+
+def _write_back(path: Path, text: str, source: "Decoded | None" = None) -> str:
+    """Save text the way the file it came from was stored.
+
+    Bytes rather than a text handle, so nothing translates the line endings:
+    a repo full of CRLF files must not quietly become LF (or the reverse) as
+    a side effect of one edit.
+
+    Returns a note for the model when the encoding had to change, which
+    happens when the new text needs characters the old encoding cannot
+    store -- a fact worth telling it about rather than a "?" to discover.
+    """
+    encoding = source.encoding if source else "utf-8"
+    bom = source.bom if source else b""
+    try:
+        path.write_bytes(bom + text.encode(encoding))
+        return ""
+    except UnicodeEncodeError:
+        path.write_bytes(text.encode("utf-8"))
+        if encoding == "utf-8":
+            return ""
+        return (f" (saved as UTF-8: the new text needs characters "
+                f"{encoding} cannot store)")
 
 
 def make_diff(before: str, after: str, path: str) -> str:
@@ -216,18 +276,19 @@ class WriteFile(Tool):
                 f"{rel} is a directory, not a file. Give the path of a file "
                 "inside it, for example {rel}/notes.md.".replace("{rel}", rel))
         existed = path.exists()
-        before = _read_text(path) if existed and not _looks_binary(path) else ""
+        # Replacing the contents is not a reason to change how the file is
+        # stored: a UTF-16 script rewritten as UTF-8 is a different file to
+        # everything that reads it.
+        source = _decode(path) if existed and not _looks_binary(path) else None
+        before = source.text if source else ""
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        # newline="" keeps the content byte-exact instead of translating \n
-        # to \r\n on Windows, which would corrupt files in a git repo.
-        with path.open("w", encoding="utf-8", newline="") as fh:
-            fh.write(args.content)
+        note = _write_back(path, args.content, source)
 
         n = len(args.content.splitlines())
         verb = "updated" if existed else "created"
         return ToolResult.success(
-            f"{verb} {rel} ({n} lines)",
+            f"{verb} {rel} ({n} lines){note}",
             display=make_diff(before, args.content, rel) if existed else "",
             path=rel,
             created=not existed,
@@ -271,7 +332,12 @@ class EditFile(Tool):
                 "old_text is empty. Give the exact text to replace, or use "
                 "write_file if you mean to create or replace the whole file.")
 
-        before = _read_text(path)
+        if _looks_binary(path):
+            return ToolResult.failure(
+                f"{rel} is a binary file. Editing it as text would corrupt it.")
+
+        source = _decode(path)
+        before = source.text
         count = before.count(args.old_text)
 
         if count == 0:
@@ -289,11 +355,11 @@ class EditFile(Tool):
             if args.replace_all
             else before.replace(args.old_text, args.new_text, 1)
         )
-        with path.open("w", encoding="utf-8", newline="") as fh:
-            fh.write(after)
+        note = _write_back(path, after, source)
 
         return ToolResult.success(
-            f"edited {rel} ({count if args.replace_all else 1} replacement(s))",
+            f"edited {rel} "
+            f"({count if args.replace_all else 1} replacement(s)){note}",
             display=make_diff(before, after, rel),
             path=rel,
         )
@@ -399,7 +465,12 @@ class MultiEdit(Tool):
         if not args.edits:
             return ToolResult.failure("No edits given.")
 
-        before = _read_text(path)
+        if _looks_binary(path):
+            return ToolResult.failure(
+                f"{rel} is a binary file. Editing it as text would corrupt it.")
+
+        source = _decode(path)
+        before = source.text
         text = before
 
         # Validate every edit against the running text first. All-or-nothing:
@@ -428,11 +499,10 @@ class MultiEdit(Tool):
                     if edit.replace_all
                     else text.replace(edit.old_text, edit.new_text, 1))
 
-        with path.open("w", encoding="utf-8", newline="") as fh:
-            fh.write(text)
+        note = _write_back(path, text, source)
 
         return ToolResult.success(
-            f"applied {len(args.edits)} edit(s) to {rel}",
+            f"applied {len(args.edits)} edit(s) to {rel}{note}",
             display=make_diff(before, text, rel),
             path=rel,
             edits=len(args.edits),
