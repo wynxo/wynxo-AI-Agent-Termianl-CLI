@@ -83,6 +83,10 @@ class Config(Schema):
     theme = Field(str, "Colour palette: purple, sakura, midnight, ember or plain.",
                   default="purple")
     clear_on_start = Field(bool, "Clear the terminal when wynxo opens.", default=True)
+    chat_layout = Field(bool, "Pin the composer to the bottom of the screen "
+                              "with the conversation above it, the way a chat "
+                              "application does, instead of a prompt that "
+                              "scrolls away.", default=True)
     fullscreen = Field(bool, "Draw on the terminal's alternate screen, the way "
                              "vim and less do. Your shell is restored exactly on "
                              "exit, at the cost of no scrollback during the "

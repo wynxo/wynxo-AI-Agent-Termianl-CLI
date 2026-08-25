@@ -23,6 +23,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from . import __version__
 from . import fullscreen
+from . import tui
 from .agent import Agent, Callbacks, Interrupted
 from .config import Config, Endpoint, data_dir, is_configured, load, normalise_url
 from .doctor import run_doctor
@@ -41,6 +42,7 @@ from .select import (
 from .scope import Mode, Scope, resolve as resolve_scope
 from .status import Status, WARN
 from .tools import build_registry
+from rich.markup import escape
 from rich.text import Text
 
 from .ui import (ACCENT, BAR_ACCENT, MUTED, ActivityBar, CodeStreamer,
@@ -551,6 +553,37 @@ class Repl:
         # session. Left as an inert Screen so /fullscreen works the same in
         # tests and in an embedded Repl that nobody wrapped.
         self.screen = fullscreen.Screen(enabled=False)
+        self.chat: "tui.ChatUI | None" = None
+        """The pinned-composer layout, when this session is using it."""
+
+    def use_chat_layout(self) -> "tui.ChatUI":
+        """Switch rendering into the chat layout.
+
+        Everything wynxo draws keeps drawing exactly as it did; rich is
+        pointed at the transcript buffer instead of at the terminal, so the
+        two layouts cannot drift apart the way a second renderer would.
+        """
+        chat = tui.ChatUI(
+            status=self._chat_status,
+            completer=CommandCompleter(lambda: self.workspace),
+            on_interrupt=self.interrupt,
+            unicode=self.ui.g.unicode,
+        )
+        self.chat = chat
+        self.ui.console = chat.transcript.console
+        self.ui.live_ok = False        # the bar goes in the pinned row
+        self.ui.on_refresh = chat.invalidate
+        self.callbacks.chat = chat
+        return chat
+
+    def _chat_status(self) -> str:
+        """The pinned row: the activity bar while a turn runs, else status."""
+        width, _ = self.chat.size() if self.chat else (self.ui.width, 0)
+        bar = self.ui.bar
+        if bar is not None:
+            if rendered := tui.render_to_ansi(bar, width):
+                return rendered
+        return "  " + self._status_line()
 
     def agent_session_id(self) -> str:
         import uuid
@@ -627,7 +660,60 @@ class Repl:
     async def start(self) -> int:
         if not await self._connect():
             return 1
+        if self.chat is not None:
+            return await self._chat_loop()
         return await self._loop()
+
+    async def _chat_loop(self) -> int:
+        """The chat layout: composer pinned, conversation above it.
+
+        The application runs for the whole session rather than once per
+        prompt, which is the difference that keeps the composer on screen
+        while an answer is being written. Turns are handled by a worker
+        reading submissions off a queue, so typing the next thing while the
+        current one is still running does the obvious thing.
+        """
+        chat = self.chat
+        stop = asyncio.Event()
+
+        async def worker() -> None:
+            try:
+                while not stop.is_set():
+                    text = (await chat.next_message()).strip()
+                    if not text:
+                        continue
+                    chat.transcript.console.print(
+                        f"  [{ACCENT}]>[/] {escape(text)}")
+                    chat.flush()
+                    if text.startswith("/"):
+                        if await self._guarded(self.command(text)) is False:
+                            break
+                        chat.flush()
+                        continue
+                    await self._guarded(self.turn(text))
+                    chat.flush()
+                    if await self._guarded(self._drain_queue()) is False:
+                        break
+                    chat.flush()
+            except (asyncio.CancelledError, Interrupted):
+                pass
+            finally:
+                stop.set()
+                chat.exit()
+
+        task = asyncio.create_task(worker())
+        painter = asyncio.create_task(chat.repaint_loop())
+        try:
+            await chat.app.run_async()
+        finally:
+            stop.set()
+            task.cancel()
+            painter.cancel()
+            for pending in (task, painter):
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await pending
+            await self.client.aclose()
+        return 0
 
     async def _loop(self) -> int:
         while True:
@@ -2515,6 +2601,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--setup", action="store_true", help="re-run first-time setup")
     parser.add_argument("--doctor", action="store_true",
                         help="check the server and model, and report what will not work")
+    parser.add_argument("--classic", action="store_true",
+                        help="the scrolling prompt instead of the chat layout")
+    parser.add_argument("--chat", action="store_true",
+                        help="pin the composer to the bottom of the screen "
+                             "(the default where the terminal allows it)")
     parser.add_argument("--fullscreen", action="store_true",
                         help="draw on the alternate screen, like vim; your "
                              "terminal is restored exactly on exit")
@@ -2599,6 +2690,10 @@ async def amain(argv: list[str] | None = None) -> int:
         config.num_ctx = args.ctx
     if args.no_stream:
         config.stream = False
+    if args.classic:
+        config.chat_layout = False
+    if args.chat:
+        config.chat_layout = True
     if args.fullscreen:
         config.fullscreen = True
     if args.no_fullscreen:
@@ -2671,6 +2766,18 @@ async def amain(argv: list[str] | None = None) -> int:
     # everything, so the session is bracketed exactly. Screen() is a no-op
     # when fullscreen is off or the terminal cannot do it, so there is no
     # branch here.
+    # The chat layout owns the whole screen, so it brings its own alternate
+    # screen and must not be wrapped in patch_stdout -- that exists to keep
+    # printed output from colliding with a scrolling prompt, and there is no
+    # scrolling prompt here.
+    if config.chat_layout and tui.usable():
+        with fullscreen.Screen(True) as screen:
+            repl.screen = screen
+            repl.use_chat_layout()
+            if prompt:
+                return await repl.start_with(prompt)
+            return await repl.start()
+
     with fullscreen.Screen(config.fullscreen) as screen:
         repl.screen = screen
         with patch_stdout(raw=True):

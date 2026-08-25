@@ -164,6 +164,13 @@ class UI:
         self.narrow = is_narrow()
         """Phone-width terminals get a stacked layout instead of tables."""
         self.width = terminal_width()
+        self.live_ok = True
+        """Whether a rich Live may drive the screen. False under the chat
+        layout, where the activity bar is drawn into the pinned status row
+        instead -- a Live there would emit cursor moves into the transcript
+        buffer and shred it."""
+        self.on_refresh: "Callable[[], None] | None" = None
+        """Set by the chat layout so an in-place update repaints the pane."""
 
     # -- chrome ------------------------------------------------------------
 
@@ -219,6 +226,15 @@ class UI:
         you wait through rather than enjoy.
         """
         if not (pet and pet.enabled and pet.animate and self.console.is_terminal):
+            return
+        if not self.live_ok:
+            # The chat layout's transcript is a buffer of finished lines, and
+            # a Live writes cursor moves and carriage returns to redraw in
+            # place -- which land in that buffer as literal "?25l" and "^M"
+            # rather than as an animation. One still frame instead.
+            self.console.print()
+            self.console.print(f"  {pet.padded()}  {pet.name} is awake",
+                               style=pet.style())
             return
         from .pet import Mood
 
@@ -769,6 +785,10 @@ async def surge(ui: "UI", label: str, style: str, width: int = 34) -> None:
     """
     if not ui.console.is_terminal:
         return
+    if not ui.live_ok:
+        # Same reason: in-place redrawing has nowhere to happen here.
+        ui.console.print(f"  {label}", style=f"bold {style}")
+        return
     blocks = SURGE_FRAMES[0] if ui.g.unicode else "-=#"
     span = min(width, max(10, ui.width - 20))
     with Live("", console=ui.console, refresh_per_second=30,
@@ -959,6 +979,8 @@ class ActivityBar:
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
+        if not self.ui.live_ok:
+            return       # the chat layout paints this row itself
         if not self.ui.console.is_terminal:
             return
         self._live = Live(self, console=self.ui.console,
@@ -1055,6 +1077,10 @@ class ActivityBar:
         self.refresh()
 
     def refresh(self) -> None:
+        if self.ui.on_refresh is not None:
+            # Chat layout: the bar lives in the pinned status row, so a
+            # repaint is the pane's job rather than Live's.
+            self.ui.on_refresh()
         if self._live is not None:
             # Nudge Live to repaint now. The renderable is self, so the
             # content is recomputed either way -- this only skips the wait
