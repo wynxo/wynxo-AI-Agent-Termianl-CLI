@@ -141,6 +141,38 @@ class Glyphs:
             self.hbar, self.vbar, self.ellipsis = "-", "|", "..."
 
 
+class _SaidOnce:
+    """What a spinner becomes where nothing can repaint.
+
+    Carries the same shape as rich's Status -- a context manager with an
+    update() -- so no caller has to know which one it got.
+    """
+
+    def __init__(self, ui: "UI", message: str):
+        self.ui = ui
+        self._say(message)
+
+    def _say(self, message: str) -> None:
+        if message:
+            self.ui.console.print(Text(f"  {message}", style=MUTED))
+
+    def update(self, status=None, **_kwargs) -> None:
+        if status is not None:
+            self._say(status if isinstance(status, str) else str(status))
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def __enter__(self) -> "_SaidOnce":
+        return self
+
+    def __exit__(self, *_exc) -> bool:
+        return False
+
+
 class UI:
     def __init__(self, theme: str = "purple", show_thinking: bool = True):
         self.console = Console(
@@ -432,7 +464,21 @@ class UI:
 
     # -- transient ---------------------------------------------------------
 
-    def status(self, message: str) -> Status:
+    def status(self, message: str):
+        """A spinner while something slow happens.
+
+        rich's Status is a Live: it hides the cursor, redraws in place and
+        carriage-returns over itself. Sent to a buffer of finished lines --
+        which is what the console is under the chat layout -- those arrive as
+        literal "?25l", "?25h" and "^M" in the middle of the conversation.
+        That is what /model looked like: two spinners' worth of escape codes
+        printed into the transcript before the picker even opened.
+
+        So where a Live cannot go, the message is simply said once. It is the
+        same information, minus the animation.
+        """
+        if not self.live_ok:
+            return _SaidOnce(self, message)
         return self.console.status(Text(message, style=MUTED), spinner="dots")
 
     def stream_chunk(self, text: str) -> None:

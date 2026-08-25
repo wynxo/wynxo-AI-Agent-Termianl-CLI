@@ -1575,11 +1575,9 @@ class Repl:
                    hint=(r["preview"] or "(no messages)"))
             for r in rows
         ]
-        if arrows_supported():
-            chosen = await choose(
-                options, title="resume which conversation?", default=0,
-                footer=HINT if self.ui.g.unicode else HINT_ASCII,
-                width=self.ui.width, unicode=self.ui.g.unicode)
+        chosen = await self._pick("resume which conversation?", options,
+                                  options[0].value if options else "")
+        if chosen is not NO_PICKER:
             if not chosen:
                 return True
             return self._load_session(chosen)
@@ -1728,17 +1726,10 @@ class Repl:
         with self.ui.status(f"checking what {len(models)} model(s) can do..."):
             models = await inspect_all(self.client, models)
         models.sort(key=lambda m: (not m.supports_tools, m.name))
-        current = next((i for i, m in enumerate(models)
-                        if m.name == self.config.model), 0)
 
-        if arrows_supported():
-            chosen = await choose(
-                [_model_choice(m) for m in models],
-                default=current,
-                footer=HINT if self.ui.g.unicode else HINT_ASCII,
-                width=self.ui.width,
-                unicode=self.ui.g.unicode,
-            )
+        chosen = await self._pick("model", [_model_choice(m) for m in models],
+                                  self.config.model)
+        if chosen is not NO_PICKER:
             if chosen and chosen != self.config.model:
                 return await self._switch_model(chosen, [m.name for m in models])
             if chosen:
@@ -2266,28 +2257,44 @@ class Repl:
         unable to offer a choice are different things: escape means "never
         mind", and printing the table anyway ignores that.
         """
+        choices = [
+            option if isinstance(option, Choice) else
+            Choice(value=option[0],
+                   label=option[0],
+                   badge="current" if option[0] == current else "",
+                   badge_style="badge",
+                   hint=option[1])
+            for option in options
+        ]
         if self.chat is not None:
             # Drawn inside the running application. The standalone picker is
             # its own prompt_toolkit app, and one cannot run inside another
             # -- without this every settings command would fall back to
-            # printing a table, which is the thing this was built to replace.
-            return await self.chat.choose(title, options, current)
+            # printing a table, which is the thing this was built to replace,
+            # and /model did worse than that: it drew its rows over the
+            # composer and left the header shredded behind it.
+            return await self.chat.choose(
+                title,
+                # (what is shown, the detail beside it, what comes back).
+                # They differ for /resume, where the row reads "2h ago" and
+                # the answer is a session id.
+                [(c.label or str(c.value),
+                  "  ".join(f for f in (c.badge, c.hint) if f),
+                  c.value)
+                 for c in choices],
+                next((c.label for c in choices if c.value == current), ""),
+            )
         if not arrows_supported():
             return NO_PICKER
-        chosen = await choose(
-            [Choice(value=name,
-                    label=name,
-                    badge="current" if name == current else "",
-                    badge_style="badge",
-                    hint=summary)
-             for name, summary in options],
+        return await choose(
+            choices,
             title=title,
-            default=next((i for i, (n, _) in enumerate(options) if n == current), 0),
+            default=next((i for i, c in enumerate(choices)
+                          if c.value == current), 0),
             footer=HINT if self.ui.g.unicode else HINT_ASCII,
             width=self.ui.width,
             unicode=self.ui.g.unicode,
         )
-        return chosen
 
     async def cmd_fullscreen(self, args: list[str]) -> bool:
         """Switch screens now, and remember the choice.

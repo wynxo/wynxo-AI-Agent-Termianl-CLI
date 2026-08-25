@@ -270,6 +270,56 @@ class TestWhereItIsUsed:
         assert parser.parse_args(["--chat"]).chat is True
 
 
+class TestTheSpinnerWhereNothingCanRepaint:
+    """rich's Status is a Live, and it was the one that got away.
+
+    Fifteen commands wrap slow work in ui.status(), and under this layout
+    every one of them wrote its cursor-hide, its redraw and its carriage
+    return into a buffer of finished lines. /model printed two spinners'
+    worth of "?25l" and "^M" into the conversation before its picker even
+    opened.
+    """
+
+    def _ui(self, live_ok: bool):
+        import io
+
+        from rich.console import Console
+
+        from wynxo.ui import UI
+
+        ui = UI()
+        ui.console = Console(file=io.StringIO(), force_terminal=True,
+                             width=80)
+        ui.live_ok = live_ok
+        return ui
+
+    def test_no_cursor_control_reaches_the_transcript(self):
+        ui = self._ui(live_ok=False)
+        with ui.status("asking the server what it has..."):
+            pass
+        written = ui.console.file.getvalue()
+        assert "\x1b[?25l" not in written
+        assert "\r" not in written
+
+    def test_the_message_is_still_said(self):
+        """Silence during a slow call reads as a hang."""
+        ui = self._ui(live_ok=False)
+        with ui.status("asking the server what it has..."):
+            pass
+        assert "asking the server" in ui.console.file.getvalue()
+
+    def test_an_update_is_said_too(self):
+        ui = self._ui(live_ok=False)
+        with ui.status("checking this machine...") as status:
+            status.update("checking 192.168.1.0/24...")
+        assert "192.168.1.0/24" in ui.console.file.getvalue()
+
+    def test_a_normal_terminal_still_gets_the_spinner(self):
+        from rich.status import Status
+
+        assert isinstance(self._ui(live_ok=True).status("working..."), Status)
+
+
 class TestNoLiveWidgetWritesIntoTheBuffer:
     """A rich Live redraws in place with cursor moves and carriage returns.
     Sent to a buffer of finished lines those arrive as literal "?25l" and
@@ -548,6 +598,94 @@ class TestThePickerInsideTheApp:
         source = inspect.getsource(Repl._pick)
         assert "self.chat.choose" in source
         assert source.index("self.chat") < source.index("arrows_supported")
+
+    def test_every_picker_goes_through_the_one_door(self):
+        """/model and /resume each opened a standalone picker of their own.
+
+        A prompt_toolkit application cannot run inside another one, so in
+        this layout /model drew its rows over the composer, took the bottom
+        border with it and left the pinned header shredded behind it -- with
+        the model list still on screen after it had gone. _pick is the only
+        place allowed to reach for the standalone picker.
+        """
+        import ast
+        import inspect
+
+        from wynxo import cli as cli_module
+
+        tree = ast.parse(inspect.getsource(cli_module))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name == "_pick":
+                continue
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Call) and \
+                        ast.unparse(inner.func) == "choose":
+                    raise AssertionError(
+                        f"{node.name} opens its own picker; go through _pick, "
+                        "or it will draw over the chat layout")
+
+    def test_a_row_can_show_one_thing_and_return_another(self, chat):
+        """/resume shows "2h ago" and has to hand back a session id."""
+        async def go():
+            pending = asyncio.ensure_future(chat.choose(
+                "resume", [("just now", "2 msgs", "8c1bc3c0"),
+                           ("2h ago", "9 msgs", "deadbeef")], "just now"))
+            await asyncio.sleep(0)
+            self._press(chat, "down")
+            self._press(chat, "enter")
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) == "deadbeef"
+
+    def test_those_rows_show_the_label_not_the_value(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(chat.choose(
+                "resume", [("just now", "2 msgs", "8c1bc3c0")], "just now"))
+            await asyncio.sleep(0)
+            body = str(chat._transcript_fragments().value)
+            self._press(chat, "escape")
+            await asyncio.wait_for(pending, 1)
+            return body
+
+        import re
+
+        # The highlighted row is coloured a character at a time, so the text
+        # only reads back once the escapes are out of the way.
+        body = re.sub(r"\x1b\[[0-9;]*m", "", asyncio.run(go()))
+        assert "just now" in body and "2 msgs" in body
+        assert "8c1bc3c0" not in body
+
+    def test_a_rich_choice_survives_the_trip(self):
+        """_pick takes the same rows the standalone picker does, so a command
+        does not have to flatten its list to reach this layout."""
+        import asyncio as _asyncio
+
+        from wynxo.cli import Repl
+        from wynxo.select import Choice
+
+        seen = {}
+
+        class _Chat:
+            async def choose(self, title, options, current):
+                seen["options"] = options
+                seen["current"] = current
+                return options[0][2]
+
+        repl = Repl.__new__(Repl)
+        repl.chat = _Chat()
+        chosen = _asyncio.run(repl._pick(
+            "model",
+            [Choice(value="qwen:30b", label="qwen:30b", badge="tools",
+                    hint="30B  256k ctx"),
+             Choice(value="gemma:2b", label="gemma:2b", badge="no tools",
+                    hint="2B")],
+            "gemma:2b"))
+        assert chosen == "qwen:30b"
+        assert seen["options"][0] == ("qwen:30b", "tools  30B  256k ctx",
+                                      "qwen:30b")
+        assert seen["current"] == "gemma:2b"
 
 
 class TestWithNoConsoleAtAll:

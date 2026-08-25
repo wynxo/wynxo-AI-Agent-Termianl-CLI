@@ -395,7 +395,12 @@ class ChatUI:
         def _(event):
             if self.picked is not None and not self.picked.done():
                 index = self.picker["index"]
-                self.picked.set_result(self.picker["options"][index][0])
+                option = self.picker["options"][index]
+                # A row may carry a third element: what the caller gets back,
+                # when that is not the text on screen. /resume shows "2h ago"
+                # and needs a session id.
+                self.picked.set_result(option[2] if len(option) > 2
+                                       else option[0])
 
         @keys.add("escape", filter=picking, eager=True)
         def _(event):
@@ -440,7 +445,7 @@ class ChatUI:
 
     # -- choosing, with arrows, without a second application ---------------
 
-    async def choose(self, title: str, options: list[tuple[str, str]],
+    async def choose(self, title: str, options: list[tuple],
                      current: str = "") -> str | None:
         """An arrow-key picker drawn at the foot of the conversation.
 
@@ -455,8 +460,8 @@ class ChatUI:
         self.picker = {
             "title": title,
             "options": options,
-            "index": max(0, next((i for i, (name, _) in enumerate(options)
-                                  if name == current), 0)),
+            "index": max(0, next((i for i, option in enumerate(options)
+                                  if option[0] == current), 0)),
         }
         self.picked = asyncio.get_event_loop().create_future()
         self.invalidate()
@@ -488,7 +493,8 @@ class ChatUI:
 
         title = _rgb(_SWEEP[phase % len(_SWEEP)])
         lines = [f"{title}  {picker['title']}{reset}"]
-        for i, (name, hint) in enumerate(picker["options"]):
+        for i, option in enumerate(picker["options"]):
+            name, hint = option[0], option[1]
             if i == picker["index"]:
                 # Offset per character so the colour runs along the word.
                 lit = "".join(
