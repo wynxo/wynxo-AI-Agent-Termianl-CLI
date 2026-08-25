@@ -23,6 +23,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from . import __version__
 from . import fullscreen
+from . import logo
 from . import tui
 from .agent import Agent, Callbacks, Interrupted
 from .config import Config, Endpoint, data_dir, is_configured, load, normalise_url
@@ -169,6 +170,7 @@ COMMANDS = {
     "/theme": "colour palette: purple | sakura | midnight | ember | plain",
     "/fullscreen": "draw on the alternate screen, like vim: on | off",
     "/secrets": "credential protection: on | off | allow <path>",
+    "/logo": "the start-up logo: pick one, or off",
     "/speak": "read answers out loud: on | off | test | engine <name>",
     "/talker": "small model that does the talking: <model> | off",
     "/log": "where this session is being recorded",
@@ -674,7 +676,10 @@ class Repl:
                 status.line(state, message, detail)
         status.close()
 
-        self.ui.wake(self.pet, self.pet.name)
+        if self.config.logo and self.config.logo != "off":
+            await logo.play(self.ui, self.config.logo, self.config.animations)
+        else:
+            self.ui.wake(self.pet, self.pet.name)
         if self.chat is None:
             # In the chat layout the same line is pinned at the top, where it
             # stays; printing it into the conversation as well would say it
@@ -1319,6 +1324,9 @@ class Repl:
 
         if name == "/secrets":
             return await self.cmd_secrets(args)
+
+        if name == "/logo":
+            return await self.cmd_logo(args)
 
         if name == "/speak":
             return await self.cmd_speak(args)
@@ -2245,6 +2253,37 @@ class Repl:
                          "screen, and comes back when wynxo exits")
         else:
             self.ui.success("back to the scrolling terminal")
+        return True
+
+    async def cmd_logo(self, args: list[str]) -> bool:
+        """Choose the start-up logo, and show it straight away.
+
+        Shown on choosing rather than described: the whole point of a logo
+        is what it looks like, and "logo: wordmark" tells you nothing.
+        """
+        names = logo.available()
+        want = args[0].lower() if args else ""
+        if want not in names and want != "off":
+            chosen = await self._pick(
+                "logo",
+                [(n, "the start-up picture" if n != "off" else "")
+                 for n in names] + [("off", "no logo at all")],
+                self.config.logo,
+            )
+            if chosen is NO_PICKER:
+                self.ui.info(f"logo: {self.config.logo}  {self.ui.g.dot}  "
+                             f"/logo {' | '.join(names)} | off")
+                return True
+            if chosen is None:
+                return True
+            want = chosen
+
+        self.config.logo = want
+        self.config.save()
+        if want == "off":
+            self.ui.success("no logo at start-up")
+            return True
+        await logo.play(self.ui, want, self.config.animations)
         return True
 
     async def cmd_secrets(self, args: list[str]) -> bool:
