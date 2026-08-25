@@ -368,17 +368,46 @@ class TestAskingInsideTheRunningApp:
 
         assert asyncio.run(go()) == "y"
 
-    def test_an_unrelated_key_is_ignored_not_typed(self, chat):
-        """A question is a question, not a text field."""
+    def test_an_unrelated_key_starts_a_typed_answer(self, chat):
         async def go():
             pending = asyncio.ensure_future(chat.ask("?", {"y": "yes"}))
             await asyncio.sleep(0)
             self._press(chat, "<any>", "z")
             assert not pending.done()
-            self._press(chat, "<any>", "y")
+            assert chat.buffer.text == "z"
+            chat.buffer.text = "y"
+            chat.buffer.validate_and_handle()
             return await asyncio.wait_for(pending, 1)
 
         assert asyncio.run(go()) == "y"
+
+    def test_typing_a_sentence_cannot_grant_a_permission(self, chat):
+        """The bug this rule exists for: with a composer that already has
+        text in it, the "a" in "hello again" answered [a]lways and silently
+        granted a permission nobody meant to grant."""
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.ask("[y] yes [a] always [n] no [q] stop:",
+                         {"y": "yes", "a": "always", "n": "no", "q": "stop"}))
+            await asyncio.sleep(0)
+            for letter in "hello again":
+                self._press(chat, "<any>", letter)
+            assert not pending.done(), "a stray keystroke answered it"
+            assert chat.buffer.text == "hello again"
+            self._press(chat, "c-c")
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) == "q"
+
+    def test_a_single_key_still_answers_from_an_empty_composer(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.ask("?", {"y": "yes", "a": "always"}))
+            await asyncio.sleep(0)
+            self._press(chat, "<any>", "a")
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) == "a"
 
     def test_a_question_does_not_reach_the_turn_queue(self, chat):
         """Answering must not be mistaken for the next thing you said."""

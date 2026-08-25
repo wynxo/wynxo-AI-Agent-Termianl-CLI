@@ -290,12 +290,19 @@ class ChatUI:
                   eager=True)
         def _(event):
             key = str(event.data).lower()
+            # A single key answers only from an empty composer. Once there
+            # is text in it you are writing a sentence, not answering: a
+            # question offering [a]lways would otherwise be granted by the
+            # "a" in "hello again", and silently granting a permission is
+            # the worst thing this could get wrong.
+            if self.buffer.text:
+                self.buffer.insert_text(event.data)
+                return
             if key in self.answers:
                 self._resolve(key)
-            elif key in ("\r", "\n"):
-                self._resolve(next(iter(self.answers), "n"))
-            # Anything else is ignored rather than typed into the composer:
-            # a question is a question, not a text field.
+            else:
+                # Not an answer, so it is the beginning of a typed one.
+                self.buffer.insert_text(event.data)
 
         picking = Condition(lambda: self.picking)
 
