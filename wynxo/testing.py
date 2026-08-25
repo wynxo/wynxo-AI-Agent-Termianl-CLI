@@ -19,6 +19,9 @@ than no test run at all, since it reports confidence nobody earned.
 from __future__ import annotations
 
 import json
+import os
+import shlex
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -116,30 +119,70 @@ def _node_agent(root: Path) -> str:
     return "npm"
 
 
+VENV_DIRS = (".venv", "venv", ".env", "env")
+"""Where a Python project keeps its interpreter, in the order people mean."""
+
+
+def python_command(root: Path) -> str:
+    """The interpreter this project's tests should actually run under.
+
+    Two ways "python -m pytest" goes wrong, and both report a failure the
+    user did not cause -- which is worse than not running the tests at all,
+    because the model then sets about fixing code that was fine.
+
+    A project with a virtualenv keeps its pytest and its dependencies in
+    there. Run by whatever `python` happens to be on PATH, the suite fails
+    on imports that are installed three directories away.
+
+    And on Debian and Ubuntu `python` is not a command at all unless
+    somebody installed python-is-python3, so the whole run fails with "not
+    found".
+    """
+    for directory in VENV_DIRS:
+        for relative in ("bin/python", "bin/python3", "Scripts/python.exe"):
+            candidate = root / directory / relative
+            if candidate.is_file():
+                return _runnable(candidate)
+    for name in ("python3", "python"):
+        if shutil.which(name):
+            return name
+    return "python3"
+
+
+def _runnable(path: Path) -> str:
+    """A path the shell will execute, quoted if it has to be."""
+    text = str(path)
+    if " " not in text:
+        return text
+    if os.name == "nt":
+        # PowerShell treats a quoted string as a string unless the call
+        # operator is in front of it.
+        return f'& "{text}"'
+    return shlex.quote(text)
+
+
 def _python(root: Path) -> Runner | None:
+    run = f"{python_command(root)} -m pytest"
     if (root / "pytest.ini").is_file():
-        return Runner("pytest", "python -m pytest", "there is a pytest.ini")
+        return Runner("pytest", run, "there is a pytest.ini")
     if (root / "tox.ini").is_file() and "[pytest]" in _read(root / "tox.ini"):
-        return Runner("pytest", "python -m pytest",
-                      "tox.ini configures pytest")
+        return Runner("pytest", run, "tox.ini configures pytest")
 
     pyproject = _read(root / "pyproject.toml")
     if "[tool.pytest" in pyproject:
-        return Runner("pytest", "python -m pytest",
-                      "pyproject.toml configures pytest")
+        return Runner("pytest", run, "pyproject.toml configures pytest")
 
     if (root / "setup.cfg").is_file() and \
             "[tool:pytest]" in _read(root / "setup.cfg"):
-        return Runner("pytest", "python -m pytest",
-                      "setup.cfg configures pytest")
+        return Runner("pytest", run, "setup.cfg configures pytest")
 
     # No configuration, but an unmistakable layout.
     tests = root / "tests"
     if tests.is_dir() and any(tests.glob("test_*.py")):
-        return Runner("pytest", "python -m pytest",
+        return Runner("pytest", run,
                       "there is a tests/ directory of test_*.py files")
     if any(root.glob("test_*.py")):
-        return Runner("pytest", "python -m pytest",
+        return Runner("pytest", run,
                       "there are test_*.py files in the project root")
     return None
 

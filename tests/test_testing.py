@@ -29,7 +29,7 @@ def project(tmp_path: Path, files: dict[str, str]) -> Path:
 class TestFindingTheRunner:
     def test_pytest_from_a_config_file(self, tmp_path):
         root = project(tmp_path, {"pytest.ini": "[pytest]\n"})
-        assert detect(root).command == "python -m pytest"
+        assert detect(root).command.endswith(" -m pytest")
 
     def test_pytest_from_pyproject(self, tmp_path):
         root = project(tmp_path, {
@@ -195,3 +195,66 @@ class TestWhenItRuns:
     def test_it_does_not_run_without_a_detectable_runner(self, tmp_path):
         project(tmp_path, {"README.md": "# nothing to run\n"})
         assert self._ran(self._agent(tmp_path)) is False
+
+
+class TestWhichInterpreterTheTestsRunUnder:
+    """"python -m pytest" goes wrong two ways, and both report a failure the
+    user did not cause -- which is worse than not running the tests at all,
+    because the model then sets about fixing code that was fine."""
+
+    def test_a_projects_virtualenv_wins(self, tmp_path):
+        """That is where its pytest and its dependencies live. Run by
+        whatever python is on PATH, the suite fails on imports installed
+        three directories away."""
+        from wynxo.testing import python_command
+
+        venv = tmp_path / ".venv" / "bin"
+        venv.mkdir(parents=True)
+        (venv / "python").write_text("#!/bin/sh\n")
+        assert python_command(tmp_path) == str(venv / "python")
+
+    def test_the_windows_layout_counts_too(self, tmp_path):
+        from wynxo.testing import python_command
+
+        scripts = tmp_path / ".venv" / "Scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "python.exe").write_text("")
+        assert python_command(tmp_path) == str(scripts / "python.exe")
+
+    def test_a_path_with_a_space_is_quoted(self, tmp_path):
+        from wynxo.testing import python_command
+
+        root = tmp_path / "my project"
+        venv = root / ".venv" / "bin"
+        venv.mkdir(parents=True)
+        (venv / "python").write_text("")
+        command = python_command(root)
+        assert "my project" in command
+        assert command != str(venv / "python")      # quoted somehow
+
+    def test_no_virtualenv_falls_back_to_the_platform(self, tmp_path):
+        """On Debian and Ubuntu `python` is not a command at all unless
+        somebody installed python-is-python3."""
+        from wynxo.testing import python_command
+
+        assert python_command(tmp_path) in ("python3", "python")
+
+    def test_it_never_names_a_command_that_is_not_there(self, tmp_path,
+                                                        monkeypatch):
+        import shutil
+
+        from wynxo import testing
+
+        monkeypatch.setattr(shutil, "which",
+                            lambda name: "/usr/bin/python3"
+                            if name == "python3" else None)
+        assert testing.python_command(tmp_path) == "python3"
+
+    def test_the_runner_uses_it(self, tmp_path):
+        from wynxo.testing import detect
+
+        venv = tmp_path / ".venv" / "bin"
+        venv.mkdir(parents=True)
+        (venv / "python").write_text("")
+        (tmp_path / "pytest.ini").write_text("[pytest]\n")
+        assert detect(tmp_path).command == f"{venv / 'python'} -m pytest"
