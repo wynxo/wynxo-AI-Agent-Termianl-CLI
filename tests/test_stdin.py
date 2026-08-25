@@ -100,10 +100,9 @@ class TestReadPipedStdinUnit:
 class TestWindowsCanPipeToo:
     """`git diff | wynxo -p "review"` silently reviewed nothing on Windows.
 
-    The thread-based fallback was there, but the branch guarding it tested
-    `hasattr(select, "select")` -- and Windows *has* select.select, it just
-    cannot use it on a pipe. So Windows took the select path, the call
-    raised, and the piped input was dropped.
+    The branch guarding the fallback asked `hasattr(select, "select")` -- and
+    Windows *has* select.select, it just cannot use it on a pipe. So Windows
+    took the select path, the call raised, and the piped input was dropped.
     """
 
     def test_the_branch_is_chosen_by_platform_not_by_attribute(self):
@@ -115,17 +114,30 @@ class TestWindowsCanPipeToo:
         assert 'os.name != "nt"' in source
         assert 'hasattr(select, "select")' not in source
 
-    def test_the_thread_fallback_reads_a_pipe(self, monkeypatch):
-        """Exercise the Windows path directly, on any platform."""
-        import os
-        import sys
+    def test_windows_asks_the_pipe_rather_than_blocking_on_it(self):
+        """Reading in a thread and abandoning it leaves that thread blocked
+        on stdin for the life of the process, holding the handle. Peeking
+        answers immediately and leaves nothing behind."""
+        import inspect
 
         from wynxo import cli
 
-        monkeypatch.setattr(cli.os, "name", "nt")
-        read_fd, write_fd = os.pipe()
-        os.write(write_fd, b"piped on windows\n")
-        os.close(write_fd)
-        with os.fdopen(read_fd) as reader:
-            monkeypatch.setattr(sys, "stdin", reader)
-            assert cli.read_piped_stdin(grace=2.0) == "piped on windows"
+        source = inspect.getsource(cli._windows_pipe_text)
+        assert "PeekNamedPipe" in source
+        assert "Thread" not in inspect.getsource(cli.read_piped_stdin)
+
+    def test_no_thread_is_left_behind_anywhere(self):
+        """The whole module: a daemon thread parked in a blocking read is
+        the thing this replaced."""
+        import inspect
+
+        from wynxo import cli
+
+        assert "threading" not in inspect.getsource(cli)
+
+    def test_peeking_is_harmless_off_windows(self):
+        """It is only ever called on Windows, but it must not explode if it
+        is reached anywhere else."""
+        from wynxo import cli
+
+        assert cli._windows_pipe_text(0.0) == ""

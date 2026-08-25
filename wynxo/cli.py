@@ -10,7 +10,7 @@ import select
 import signal
 import stat
 import sys
-import threading
+import time
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
@@ -2563,21 +2563,62 @@ def read_piped_stdin(grace: float = 0.25) -> str:
         except (OSError, UnicodeDecodeError):
             return ""
 
-    # Windows: read in a thread we can abandon, since there is no way to ask
-    # whether a pipe has data first. A slow producer may miss the window;
-    # redirecting from a file takes the deterministic path above.
-    result: list[str] = []
+    # Windows: ask the pipe itself whether anything is waiting.
+    #
+    # The obvious alternative -- read in a thread and abandon it after the
+    # grace period -- leaves a thread blocked in a read on stdin for the rest
+    # of the process's life. That is not merely untidy: the handle stays
+    # busy, and anything that later waits on this process's pipes can wait
+    # for it forever.
+    return _windows_pipe_text(grace)
 
-    def _read() -> None:
+
+def _windows_pipe_text(grace: float) -> str:
+    """Whatever is already in the pipe, without blocking on it.
+
+    PeekNamedPipe reports how many bytes are available and returns
+    immediately either way, which is the thing select cannot do for a pipe
+    on Windows. Nothing waiting means nothing piped.
+    """
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+    except (ImportError, AttributeError):
+        return ""
+
+    try:
+        handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+    except (OSError, ValueError):
+        return ""
+
+    peek = ctypes.windll.kernel32.PeekNamedPipe
+    peek.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+                     ctypes.POINTER(wintypes.DWORD),
+                     ctypes.POINTER(wintypes.DWORD),
+                     ctypes.POINTER(wintypes.DWORD)]
+    available = wintypes.DWORD(0)
+
+    # Polled rather than asked once: a producer that is a fraction of a
+    # second behind would otherwise look like an empty pipe.
+    deadline = time.monotonic() + max(0.0, grace)
+    while True:
         try:
-            result.append(sys.stdin.read())
-        except (OSError, UnicodeDecodeError, ValueError):
-            pass
+            ok = peek(handle, None, 0, None, ctypes.byref(available), None)
+        except OSError:
+            return ""
+        if not ok:
+            return ""          # closed, or not a pipe at all
+        if available.value:
+            break
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(0.02)
 
-    thread = threading.Thread(target=_read, daemon=True)
-    thread.start()
-    thread.join(grace)
-    return result[0].strip() if result else ""
+    try:
+        return sys.stdin.read().strip()
+    except (OSError, UnicodeDecodeError, ValueError):
+        return ""
 
 
 async def run_once(config: Config, workspace: Path, ui: UI, prompt: str,
