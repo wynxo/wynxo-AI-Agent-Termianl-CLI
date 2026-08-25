@@ -8,6 +8,7 @@ running a 30B locally.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
@@ -69,6 +70,21 @@ class Chunk:
     completion_tokens: int = 0
     total_duration_ns: int = 0
     load_duration_ns: int = 0
+
+
+_TRANSIENT = (
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.RemoteProtocolError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+)
+"""Failures that are about the connection rather than the request, and so
+may well succeed on a second try."""
+
+CONNECT_ATTEMPTS = 3
+RETRY_BACKOFF = 0.75
 
 
 def _is_template_parse_error(low: str) -> bool:
@@ -250,17 +266,36 @@ class OllamaClient:
                 think = True
             payload["think"] = think
 
-        try:
-            async for chunk in self._stream_chat(payload):
-                yield chunk
-        except httpx.ReadTimeout as exc:
-            raise ProviderError(
-                f"The model did not respond within {self.config.request_timeout:.0f}s. "
-                "On CPU or a loaded GPU this can be normal for a 30B -- raise "
-                "`request_timeout` in your config, or use a smaller model."
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise ProviderError(f"Request to {self.base_url} failed: {exc}") from exc
+        emitted = False
+        for attempt in range(CONNECT_ATTEMPTS):
+            try:
+                async for chunk in self._stream_chat(payload):
+                    emitted = True
+                    yield chunk
+                return
+            except httpx.ReadTimeout as exc:
+                raise ProviderError(
+                    f"The model did not respond within "
+                    f"{self.config.request_timeout:.0f}s. On CPU or a loaded "
+                    "GPU this can be normal for a 30B -- raise "
+                    "`request_timeout` in your config, or use a smaller model."
+                ) from exc
+            except _TRANSIENT as exc:
+                # Ollama drops connections while it loads a model, and
+                # loading a 30B from cold takes long enough that the first
+                # request of a session is the one most likely to be hit.
+                #
+                # Retried only while nothing has been emitted. Once tokens
+                # have reached the user, a second attempt would replay the
+                # answer from the top and print it twice -- worse than the
+                # error it was trying to hide.
+                if emitted or attempt == CONNECT_ATTEMPTS - 1:
+                    raise ProviderError(
+                        self._explain_transient(exc, emitted)) from exc
+                await asyncio.sleep(RETRY_BACKOFF * (attempt + 1))
+            except httpx.HTTPError as exc:
+                raise ProviderError(
+                    f"Request to {self.base_url} failed: {exc}") from exc
 
     async def _stream_chat(self, payload: dict) -> AsyncIterator[Chunk]:
         """Issue the request, retrying once without a string think level.
@@ -349,6 +384,26 @@ class OllamaClient:
             completion_tokens=as_int(data.get("eval_count")),
             total_duration_ns=as_int(data.get("total_duration")),
             load_duration_ns=as_int(data.get("load_duration")),
+        )
+
+    def _explain_transient(self, exc: Exception, emitted: bool) -> str:
+        """Why a connection failed, once retrying has stopped helping."""
+        if emitted:
+            return (
+                f"The connection to {self.base_url} dropped while the model "
+                "was still answering, so the reply above is incomplete. "
+                "wynxo did not retry: it would have started the answer again "
+                "from the top rather than continuing it."
+            )
+        return (
+            f"Could not hold a connection to {self.base_url} after "
+            f"{CONNECT_ATTEMPTS} attempts ({type(exc).__name__}).\n"
+            "  - If Ollama is loading a large model, it can refuse "
+            "connections for a while; try again once it has settled.\n"
+            "  - Check `ollama serve` is still running and did not run out "
+            "of memory.\n"
+            "  - On a remote box, check the network and that it is started "
+            "with OLLAMA_HOST=0.0.0.0:11434."
         )
 
     def _explain_error(self, status: int, body: str, payload: dict) -> str:
