@@ -199,3 +199,132 @@ class TestSelfDeletion:
     def test_a_system_interpreter_is_not_inside_the_tree(self, tmp_path, monkeypatch):
         monkeypatch.setattr(uninstall.sys, "executable", "/usr/bin/python3")
         assert uninstall.running_from(tmp_path) is False
+
+
+class TestRemovingTheMarksLeftInProjects:
+    """wynxo writes .wynxo/ into every project it works in.
+
+    Those live in the user's own directories rather than under the config or
+    data directory the uninstaller otherwise clears, so removing wynxo used
+    to leave a folder behind in every repository the agent had ever opened
+    -- which is not the clean removal the installer promises.
+    """
+
+    @pytest.fixture
+    def home(self, tmp_path, monkeypatch):
+        import uninstall
+
+        sessions = tmp_path / "data" / "sessions"
+        sessions.mkdir(parents=True)
+        monkeypatch.setattr(uninstall, "data_dir", lambda: tmp_path / "data")
+        return tmp_path
+
+    def record(self, home, name, workspace) -> None:
+        import json
+
+        (home / "data" / "sessions" / f"{name}.json").write_text(
+            json.dumps({"session_id": name, "workspace": str(workspace)}),
+            encoding="utf-8")
+
+    def project(self, home, name, marked=True):
+        directory = home / name
+        directory.mkdir(parents=True, exist_ok=True)
+        if marked:
+            (directory / ".wynxo").mkdir()
+            (directory / ".wynxo" / "memory.md").write_text("# notes\n")
+        return directory
+
+    def test_it_finds_a_project_wynxo_worked_in(self, home):
+        import uninstall
+
+        work = self.project(home, "repo")
+        self.record(home, "s1", work)
+        assert uninstall.touched_projects() == [work / ".wynxo"]
+
+    def test_each_project_is_listed_once(self, home):
+        import uninstall
+
+        work = self.project(home, "repo")
+        for i in range(4):
+            self.record(home, f"s{i}", work)
+        assert len(uninstall.touched_projects()) == 1
+
+    def test_a_project_without_a_marker_is_not_listed(self, home):
+        import uninstall
+
+        work = self.project(home, "plain", marked=False)
+        self.record(home, "s1", work)
+        assert uninstall.touched_projects() == []
+
+    def test_a_project_that_no_longer_exists_is_skipped(self, home):
+        import uninstall
+
+        self.record(home, "s1", home / "deleted-long-ago")
+        assert uninstall.touched_projects() == []
+
+    def test_one_corrupt_record_does_not_hide_the_others(self, home):
+        """Same rule as everywhere else: a bad file costs you that file."""
+        import uninstall
+
+        work = self.project(home, "repo")
+        self.record(home, "good", work)
+        (home / "data" / "sessions" / "bad.json").write_text("{ truncated",
+                                                             encoding="utf-8")
+        (home / "data" / "sessions" / "list.json").write_text("[]",
+                                                              encoding="utf-8")
+        assert uninstall.touched_projects() == [work / ".wynxo"]
+
+    def test_no_sessions_at_all_is_fine(self, tmp_path, monkeypatch):
+        import uninstall
+
+        monkeypatch.setattr(uninstall, "data_dir", lambda: tmp_path / "nope")
+        assert uninstall.touched_projects() == []
+
+    def test_removing_the_marker_leaves_the_project_alone(self, home):
+        """It must reach into a repository for exactly one directory."""
+        import uninstall
+
+        work = self.project(home, "repo")
+        (work / "main.py").write_text("code = 1\n")
+        (work / "README.md").write_text("# repo\n")
+
+        assert uninstall.remove_tree(work / ".wynxo", dry_run=False)
+        assert not (work / ".wynxo").exists()
+        assert (work / "main.py").exists() and (work / "README.md").exists()
+
+    def test_a_dry_run_changes_nothing(self, home):
+        import uninstall
+
+        work = self.project(home, "repo")
+        uninstall.remove_tree(work / ".wynxo", dry_run=True)
+        assert (work / ".wynxo").exists()
+
+    def test_it_describes_what_is_inside(self, home):
+        """memory.md may have been edited by hand, so the user gets to see
+        what they are agreeing to delete."""
+        import uninstall
+
+        work = self.project(home, "repo")
+        (work / ".wynxo" / "map.md").write_text("# map\n")
+        described = uninstall.describe_marker(work / ".wynxo")
+        assert "memory.md" in described and "map.md" in described
+
+    def test_clearing_projects_is_asked_separately(self):
+        """'Remove wynxo' and 'reach into my repositories' are not the same
+        permission."""
+        import inspect
+
+        import uninstall
+
+        source = inspect.getsource(uninstall.main)
+        assert "clear_markers" in source
+        # It must be its own ask(), not folded into the main confirmation.
+        assert source.count("ask(") >= 2
+
+    def test_keep_data_leaves_projects_untouched(self):
+        import inspect
+
+        import uninstall
+
+        assert "args.keep_data else touched_projects()" in \
+            inspect.getsource(uninstall.main)

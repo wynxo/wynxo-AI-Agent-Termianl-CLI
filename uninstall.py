@@ -20,6 +20,7 @@ want one: a half-finished or broken install.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -269,6 +270,55 @@ def cloned_repos() -> list[Path]:
     return found
 
 
+def touched_projects() -> list[Path]:
+    """Every project directory wynxo left a `.wynxo/` folder in.
+
+    wynxo writes a project map and per-project memory into `.wynxo/` inside
+    whatever it is working on, so those sit out in the user's own
+    directories rather than under the config or data directory this script
+    otherwise clears. Removing wynxo without them is not a clean removal --
+    it leaves a folder behind in every repository the agent ever opened.
+
+    They are found from the session records, which already store the
+    workspace each session ran in. That is the only honest way to know: the
+    alternative is scanning the whole disk for `.wynxo` directories, which is
+    slow, and would happily delete one belonging to something else.
+    """
+    sessions = data_dir() / "sessions"
+    if not sessions.is_dir():
+        return []
+
+    seen: dict[str, Path] = {}
+    try:
+        files = sorted(sessions.glob("*.json"))
+    except OSError:
+        return []
+
+    for record in files:
+        try:
+            data = json.loads(record.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue          # one unreadable record must not hide the rest
+        if not isinstance(data, dict):
+            continue
+        raw = data.get("workspace")
+        if not isinstance(raw, str) or not raw:
+            continue
+        marker = Path(raw) / ".wynxo"
+        if marker.is_dir() and str(marker) not in seen:
+            seen[str(marker)] = marker
+    return list(seen.values())
+
+
+def describe_marker(marker: Path) -> str:
+    """What is inside a project's .wynxo, so the user can judge it."""
+    try:
+        names = sorted(p.name for p in marker.iterdir())
+    except OSError:
+        return ""
+    return ", ".join(names[:4]) + (f", +{len(names) - 4}" if len(names) > 4 else "")
+
+
 # -- removal ---------------------------------------------------------------
 
 def remove_tree(path: Path, dry_run: bool) -> bool:
@@ -455,6 +505,12 @@ def main() -> int:
         ok(f"PATH line     {rc}")
         found = True
 
+    markers = [] if args.keep_data else touched_projects()
+    for marker in markers:
+        inside = describe_marker(marker)
+        ok(f"in a project  {marker}" + (f"  {S.dim(inside)}" if inside else ""))
+        found = True
+
     windows_path_dirs: list[Path] = []
     if is_windows():
         for launcher in launcher_candidates():
@@ -502,8 +558,27 @@ def main() -> int:
             print()
             return 1
 
+    # These sit inside the user's own projects rather than in wynxo's
+    # directories, and memory.md is something they may have edited by hand.
+    # So they are confirmed separately: "remove wynxo" and "reach into my
+    # repositories" are not the same permission.
+    clear_markers = bool(markers)
+    if markers and not args.dry_run:
+        print()
+        clear_markers = ask(
+            f"Also remove the .wynxo folder from {len(markers)} project"
+            f"{'s' if len(markers) != 1 else ''} above?", True, args.yes)
+        if not clear_markers:
+            info("Left in place. Each is a single .wynxo directory you can")
+            info("delete whenever you like.")
+
     # -- remove -------------------------------------------------------------
     step("Removing")
+
+    if clear_markers:
+        for marker in markers:
+            if remove_tree(marker, args.dry_run):
+                ok(f"removed {marker}")
 
     for launcher in launchers:
         if remove_file(launcher, args.dry_run):
