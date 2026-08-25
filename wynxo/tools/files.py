@@ -6,9 +6,17 @@ import difflib
 from pathlib import Path
 
 from ..schema import Field, Schema
+from ..session import estimate_tokens
 from .base import Tool, ToolResult
 
 MAX_READ_BYTES = 400_000
+READ_SHARE = 0.33
+"""How much of the remaining context one read may take. The rest has to
+cover the reply, the next few tool results, and the turn's own history."""
+
+MIN_READ_TOKENS = 500
+"""Never trim below this. A read cut to nothing teaches the model only that
+reading does not work, and it will try something worse."""
 BINARY_SNIFF = 8_000
 
 
@@ -117,6 +125,7 @@ class ReadFile(Tool):
             if truncated or args.offset
             else ""
         )
+        body, note, window = self._fit_context(body, note, window, args, len(lines))
         body, masked = self.shield.clean(body)
         if masked:
             # Said out loud rather than done quietly: the model is about to
@@ -142,6 +151,46 @@ class ReadFile(Tool):
         close = difflib.get_close_matches(path.name, names, n=1, cutoff=0.7)
         return close[0] if close else None
 
+
+    def _fit_context(self, body: str, note: str, window: list, args,
+                     total: int) -> tuple[str, str, list]:
+        """Trim a read that would not fit in what is left of the context.
+
+        A 2000-line file is roughly 22k tokens, which is more than the whole
+        budget at low effort. Nothing used to notice: the read succeeded, the
+        oldest messages fell out of the window, and the model got quietly
+        stupid halfway through a task with no error anywhere.
+
+        Trimmed rather than refused, and told exactly how to get the rest --
+        a refusal leaves a weaker model with nowhere to go, and it will just
+        ask for the same file again.
+        """
+        if self.context_left <= 0 or not window:
+            return body, note, window
+
+        # A single read should not eat more than a third of what is left.
+        # The rest has to cover the reply, the next few tool results, and
+        # whatever else the turn still needs.
+        allowance = max(MIN_READ_TOKENS, int(self.context_left * READ_SHARE))
+        if estimate_tokens(body) <= allowance:
+            return body, note, window
+
+        per_line = max(1, estimate_tokens(body) // len(window))
+        keep = max(1, min(len(window), allowance // per_line))
+        window = window[:keep]
+        width = len(str(args.offset + keep))
+        body = "\n".join(
+            f"{str(i).rjust(width)}\t{line}"
+            for i, line in enumerate(window, start=args.offset + 1)
+        )
+        last = args.offset + keep
+        note = (
+            f"\n\n[showing lines {args.offset + 1}-{last} of {total}. "
+            f"The rest was left out because it would not fit in the context "
+            f"still free this turn. Read on with offset={last}, or use grep "
+            f"to jump to the part you need.]"
+        )
+        return body, note, window
 
 class WriteInput(Schema):
     path = Field(str, "File path, relative to the project root.")

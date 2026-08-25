@@ -73,6 +73,11 @@ class Tool(ABC):
         self.on_output = None
         """Optional async hook the agent sets so a long-running tool can show
         its output while it is still running, instead of only at the end."""
+        self.context_left = 0
+        """Tokens of context still free, set by the agent before each call.
+        Zero means unknown, and every check treats that as "do not
+        interfere" -- a guard that fires on missing information would be
+        worse than no guard."""
 
     @abstractmethod
     async def run(self, args: Schema) -> ToolResult: ...

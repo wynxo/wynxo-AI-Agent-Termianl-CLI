@@ -491,10 +491,12 @@ class Agent:
             # tool object reused for a later call cannot write into a line
             # that has already been closed.
             tool.on_output = lambda line, _n=call.name: self.cb.on_tool_output(_n, line)
+            tool.context_left = self._context_left()
             try:
                 result = await tool.invoke(call.arguments)
             finally:
                 tool.on_output = None
+                tool.context_left = 0
             self.session.usage.tool_calls += 1
 
             output = result.output
@@ -623,6 +625,17 @@ class Agent:
                 break
 
         return rounds
+
+    def _context_left(self) -> int:
+        """Tokens still free in the window, as best we can tell.
+
+        Deliberately measured against the effort policy's budget rather than
+        the model's full num_ctx: the budget is what the rest of the turn was
+        planned around, and filling the window to its brim is how a session
+        ends up compacting mid-task.
+        """
+        limit = self.policy.context_budget or self.config.num_ctx
+        return max(0, limit - self.session.token_estimate())
 
     async def _verify_with_tests(self) -> int:
         """Run the project's own tests and hand back any failures.
