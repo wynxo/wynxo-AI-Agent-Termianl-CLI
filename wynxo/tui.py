@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import string
 import time
 from typing import Callable
 
@@ -143,6 +144,11 @@ def _output():
         from prompt_toolkit.output import DummyOutput
 
         return DummyOutput()
+
+
+_ANSWER_KEYS = string.ascii_letters + string.digits
+"""The keys a one-press answer can be. Everything else a question might
+receive -- backspace, the arrows, Ctrl-C -- belongs to the composer."""
 
 
 class ChatUI:
@@ -361,10 +367,9 @@ class ChatUI:
         keys = KeyBindings()
         scrolling = Condition(lambda: True)
 
-        @keys.add("<any>", filter=Condition(lambda: self.asking),
-                  eager=True)
-        def _(event):
-            key = str(event.data).lower()
+        asking = Condition(lambda: self.asking)
+
+        def answer_or_type(event) -> None:
             # A single key answers only from an empty composer. Once there
             # is text in it you are writing a sentence, not answering: a
             # question offering [a]lways would otherwise be granted by the
@@ -373,11 +378,26 @@ class ChatUI:
             if self.buffer.text:
                 self.buffer.insert_text(event.data)
                 return
+            key = str(event.data).lower()
             if key in self.answers:
                 self._resolve(key)
             else:
                 # Not an answer, so it is the beginning of a typed one.
                 self.buffer.insert_text(event.data)
+
+        # Bound one letter at a time rather than as <any>. <any> matches
+        # every key press there is, and marked eager it won hands down over
+        # every other binding -- so with a question up, backspace inserted a
+        # literal "^?", Ctrl-C inserted "^C", the arrows did nothing, and a
+        # typo could not be corrected or the question escaped. The prompt
+        # read "[y] yes  [a] always  [n] no  [q] stop: hello^?^?^C" and the
+        # only way out was to kill the process.
+        #
+        # Naming the keys that can actually be answers leaves everything
+        # else to the composer's ordinary editing bindings, which is where
+        # it belonged.
+        for character in _ANSWER_KEYS:
+            keys.add(character, filter=asking, eager=True)(answer_or_type)
 
         picking = Condition(lambda: self.picking)
 
@@ -414,7 +434,10 @@ class ChatUI:
                     self.picked.set_result(None)
                 return
             if self.asking:
-                self._resolve("q")      # stop, the same as answering "stop"
+                # "stop" where the question offers it, and otherwise an
+                # answer no branch matches, which every caller reads as
+                # abort. Either way Ctrl-C gets you out.
+                self._resolve("q" if "q" in self.answers else "")
                 return
             # Interrupts the turn rather than killing the app: the whole
             # reason the composer stays on screen is that the session

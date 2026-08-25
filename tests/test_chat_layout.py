@@ -381,11 +381,38 @@ class TestAskingInsideTheRunningApp:
         return ChatUI(status=lambda: "")
 
     def _press(self, chat, key: str, data: str = ""):
+        """Press one key, matched exactly.
+
+        Exactly, because the answer keys are bound one character at a time
+        now -- a substring match would fire whichever binding happened to
+        contain the letter.
+        """
         import types
 
+        data = data or (key if len(key) == 1 else "")
         for binding in chat.app.key_bindings.bindings:
-            if key in str(binding.keys):
+            names = tuple(getattr(k, "value", str(k)) for k in binding.keys)
+            if names == (key,):
                 binding.handler(types.SimpleNamespace(data=data, app=chat.app))
+                return True
+        return False
+
+    def _type(self, chat, text: str) -> None:
+        """Type a sentence the way the terminal delivers it.
+
+        Only the answer keys are bound here; everything else -- the space in
+        "hello again" among them -- reaches the composer's own insert
+        binding, which is what this stands in for.
+        """
+        for character in text:
+            if not self._press(chat, character):
+                chat.buffer.insert_text(character)
+
+    def _binds(self, chat, key: str) -> bool:
+        """Whether the layout claims this key for itself."""
+        for binding in chat.app.key_bindings.bindings:
+            names = tuple(getattr(k, "value", str(k)) for k in binding.keys)
+            if names == (key,):
                 return True
         return False
 
@@ -394,7 +421,7 @@ class TestAskingInsideTheRunningApp:
             pending = asyncio.ensure_future(
                 chat.ask("[y] yes [n] no:", {"y": "yes", "n": "no"}))
             await asyncio.sleep(0)
-            self._press(chat, "<any>", "y")
+            self._press(chat, "y")
             return await asyncio.wait_for(pending, 1)
 
         assert asyncio.run(go()) == "y"
@@ -405,7 +432,7 @@ class TestAskingInsideTheRunningApp:
                 chat.ask("[y] yes [n] no:", {"y": "yes", "n": "no"}))
             await asyncio.sleep(0)
             prefix = chat._composer_prefix()
-            self._press(chat, "<any>", "n")
+            self._press(chat, "n")
             await asyncio.wait_for(pending, 1)
             return prefix
 
@@ -415,7 +442,7 @@ class TestAskingInsideTheRunningApp:
         async def go():
             pending = asyncio.ensure_future(chat.ask("?", {"y": "yes"}))
             await asyncio.sleep(0)
-            self._press(chat, "<any>", "y")
+            self._press(chat, "y")
             await asyncio.wait_for(pending, 1)
 
         asyncio.run(go())
@@ -436,7 +463,7 @@ class TestAskingInsideTheRunningApp:
         async def go():
             pending = asyncio.ensure_future(chat.ask("?", {"y": "yes"}))
             await asyncio.sleep(0)
-            self._press(chat, "<any>", "z")
+            self._press(chat, "z")
             assert not pending.done()
             assert chat.buffer.text == "z"
             chat.buffer.text = "y"
@@ -454,8 +481,7 @@ class TestAskingInsideTheRunningApp:
                 chat.ask("[y] yes [a] always [n] no [q] stop:",
                          {"y": "yes", "a": "always", "n": "no", "q": "stop"}))
             await asyncio.sleep(0)
-            for letter in "hello again":
-                self._press(chat, "<any>", letter)
+            self._type(chat, "hello again")
             assert not pending.done(), "a stray keystroke answered it"
             assert chat.buffer.text == "hello again"
             self._press(chat, "c-c")
@@ -463,12 +489,70 @@ class TestAskingInsideTheRunningApp:
 
         assert asyncio.run(go()) == "q"
 
+    # "end" is missing on purpose: it is the layout's own key for following
+    # the transcript again after scrolling back, and the status row says so.
+    @pytest.mark.parametrize("key", [
+        "backspace", "c-h", "delete", "left", "right",
+        "home", "c-a", "c-e", "c-w", "c-u",
+    ])
+    def test_the_editing_keys_are_left_to_the_composer(self, chat, key):
+        """The bug: the answer keys were bound as <any>, marked eager.
+
+        <any> matches every key press there is, and eager made it win over
+        everything else -- so with a question up, backspace inserted a
+        literal "^?" instead of deleting, the arrows did nothing, and the
+        prompt read "[y] yes  [a] always  [n] no  [q] stop: hello^?^?^C".
+        A typo could not be corrected. Nothing here may claim these.
+        """
+        assert not self._binds(chat, key), (
+            f"{key} is claimed by the layout; it belongs to the composer")
+
+    def test_nothing_is_bound_to_every_key_at_once(self, chat):
+        for binding in chat.app.key_bindings.bindings:
+            names = [getattr(k, "value", str(k)) for k in binding.keys]
+            assert "<any>" not in names, (
+                "an <any> binding swallows backspace and Ctrl-C with it")
+
+    def test_ctrl_c_gets_you_out_of_the_question(self, chat):
+        """With the question swallowing Ctrl-C there was no way out of a
+        permission prompt at all -- not the answer, not the key, not /quit.
+        The process had to be killed."""
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.ask("[y] yes [n] no [q] stop:",
+                         {"y": "yes", "n": "no", "q": "stop"}))
+            await asyncio.sleep(0)
+            self._press(chat, "c-c")
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) == "q"
+
+    def test_ctrl_c_gets_you_out_of_a_question_with_no_stop(self, chat):
+        """An answer no branch matches, which every caller reads as abort."""
+        async def go():
+            pending = asyncio.ensure_future(chat.ask("?", {"y": "yes"}))
+            await asyncio.sleep(0)
+            self._press(chat, "c-c")
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) not in ("y",)
+
+    def test_ctrl_c_does_not_end_the_session(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(chat.ask("?", {"y": "yes"}))
+            await asyncio.sleep(0)
+            self._press(chat, "c-c")
+            await asyncio.wait_for(pending, 1)
+
+        asyncio.run(go())
+        assert not chat.app.is_done
+
     def test_a_single_key_still_answers_from_an_empty_composer(self, chat):
         async def go():
             pending = asyncio.ensure_future(
                 chat.ask("?", {"y": "yes", "a": "always"}))
             await asyncio.sleep(0)
-            self._press(chat, "<any>", "a")
+            self._press(chat, "a")
             return await asyncio.wait_for(pending, 1)
 
         assert asyncio.run(go()) == "a"
