@@ -702,7 +702,13 @@ class Repl:
         """Reach the server, report what is loaded, adapt to the model."""
         if self.config.clear_on_start:
             self.ui.clear()
-        status = Status()
+        # Into the transcript under the chat layout. Status writes straight
+        # to stdout, and the application takes the alternate screen the
+        # moment it starts -- so the warnings this collects (no native tool
+        # calling, a scope with nothing in it) were printed to the screen
+        # being left behind, and gone before anyone could read them.
+        status = Status(stream=self.chat.transcript.console.file
+                        if self.chat is not None else None)
         problems: list[tuple[str, str, str]] = []
 
         def note(state: str, message: str, detail: str = "") -> None:
@@ -744,7 +750,7 @@ class Repl:
             note(WARN, f"scope {self.boundary.scope.value}", reason)
 
         if problems:
-            print()
+            print("", file=status.stream)
             for state, message, detail in problems:
                 status.line(state, message, detail)
         status.close()
@@ -862,6 +868,16 @@ class Repl:
         """Run one prompt, then drop into the REPL. `wynxo "fix the tests"`."""
         if not await self._connect():
             return 1
+        if self.chat is not None:
+            # Queued rather than run here. use_chat_layout() has already
+            # pointed the console at the transcript, so a turn taken before
+            # the application starts writes its whole answer into a buffer
+            # nobody is showing -- `wynxo "add retries"` edited the file and
+            # showed nothing at all, then left a half-drawn prompt behind.
+            # On the queue it is answered inside the layout, and echoed the
+            # way anything else you type is.
+            self.chat.submissions.put_nowait(prompt)
+            return await self._chat_loop()
         await self.turn(prompt)
         return await self._loop()
 
@@ -1040,14 +1056,17 @@ class Repl:
             self.ui.diff(diff)
 
         self.ui.console.print()
-        answer = (await self.prompt_session.prompt_async(
-            HTML('<ansicyan>  [k] keep  [r] revert all  [s] step through: </ansicyan>')
-        )).strip().lower()
+        answer = await self._question(
+            "[k] keep  [r] revert all  [s] step through:",
+            {"k": "keep", "r": "revert", "s": "step",
+             # The two words a hand types without reading the options.
+             "y": "yes", "n": "no"},
+            default="k")
 
-        if answer in ("", "k", "keep", "y", "yes"):
+        if answer in ("", "k", "y"):
             self.ui.success(f"kept {len(diffs)} file(s)")
             return
-        if answer in ("r", "revert", "n", "no"):
+        if answer in ("r", "n"):
             reverted, problems = self.agent.checkpoints.revert_since(mark)
             for problem in problems:
                 self.ui.warn(problem)
@@ -1066,10 +1085,10 @@ class Repl:
         kept = reverted = 0
         for snapshot in changes:
             name = self.ui.shorten_path(str(snapshot.path))
-            answer = (await self.prompt_session.prompt_async(
-                HTML(f'<ansicyan>  {_escape(name)}  [k] keep  [r] revert: </ansicyan>')
-            )).strip().lower()
-            if answer in ("r", "revert", "n", "no"):
+            answer = await self._question(
+                f"{name}  [k] keep  [r] revert:",
+                {"k": "keep", "r": "revert", "n": "no"}, default="k")
+            if answer in ("r", "n"):
                 try:
                     if snapshot.existed:
                         snapshot.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1511,19 +1530,18 @@ class Repl:
             self.ui.console.print(Text("  " + line, style=MUTED))
         self.ui.console.print()
 
-        answer = (await self.prompt_session.prompt_async(
-            HTML('<ansicyan>  [y] commit  [e] edit  [n] no: </ansicyan>')
-        )).strip().lower()
+        answer = await self._question(
+            "[y] commit  [e] edit  [n] no:",
+            {"y": "commit", "e": "edit", "n": "no"}, default="y")
 
-        if answer in ("e", "edit"):
-            edited = (await self.prompt_session.prompt_async(
-                HTML('<ansicyan>  message: </ansicyan>'), default=message.splitlines()[0]
-            )).strip()
+        if answer == "e":
+            edited = await self._type_in("message:",
+                                         default=message.splitlines()[0])
             if not edited:
                 self.ui.info("cancelled")
                 return True
             message = edited
-        elif answer not in ("", "y", "yes"):
+        elif answer != "y":
             self.ui.info("not committed")
             return True
 
@@ -1967,13 +1985,10 @@ class Repl:
             self.ui.warn(
                 "Machine scope removes the path restriction entirely: the agent "
                 "can read and write anywhere your user account can.")
-            try:
-                answer = (await self.prompt_session.prompt_async(
-                    HTML('<ansicyan>  really widen to the whole machine? [y/N]: </ansicyan>')
-                )).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                answer = "n"
-            if answer not in ("y", "yes"):
+            answer = await self._question(
+                "really widen to the whole machine? [y/N]:",
+                {"y": "yes", "n": "no"}, default="n")
+            if answer != "y":
                 self.ui.info("left unchanged")
                 return True
 
@@ -2247,6 +2262,46 @@ class Repl:
         self.ui.success(f"theme: {choice}")
         self._preview_theme()
         return True
+
+    async def _question(self, question: str, answers: dict[str, str],
+                        default: str = "") -> str:
+        """Ask a short question wherever this session is being drawn.
+
+        The same rule as the permission prompt and the pickers: a second
+        prompt_toolkit application cannot run inside the chat layout's one,
+        and trying tears the layout apart -- the composer overwritten, the
+        bottom border gone, the header shredded behind it. Every question in
+        the session comes through here so that can only be got wrong once.
+
+        Returns the key that was answered, or "" for cancelled.
+        """
+        if self.chat is not None:
+            self.chat.flush()
+            return await self.chat.ask(question, answers, default)
+        try:
+            typed = (await self.prompt_session.prompt_async(
+                HTML(f'<ansicyan>  {_escape(question)} </ansicyan>')
+            )).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+        if not typed:
+            return default
+        for key, meaning in answers.items():
+            if typed in (key, meaning) or typed[0] == key:
+                return key
+        return ""
+
+    async def _type_in(self, question: str, default: str = "") -> str:
+        """Read a line of free text, wherever this session is being drawn."""
+        if self.chat is not None:
+            self.chat.flush()
+            return await self.chat.prompt(question, default)
+        try:
+            return (await self.prompt_session.prompt_async(
+                HTML(f'<ansicyan>  {_escape(question)} </ansicyan>'),
+                default=default)).strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
 
     async def _pick(self, title: str, options: list[tuple[str, str]],
                     current: str) -> str | None:

@@ -504,7 +504,10 @@ class TestCommitCommand:
         from wynxo import cli
 
         source = inspect.getsource(cli.Repl.cmd_commit)
-        assert "prompt_async" in source
+        # Through _question, which is the only thing allowed to open a
+        # prompt: asking directly starts a second prompt_toolkit
+        # application, which the chat layout cannot survive.
+        assert "_question" in source
         assert "not committed" in source
 
     def test_the_diff_sent_to_the_model_is_capped(self):

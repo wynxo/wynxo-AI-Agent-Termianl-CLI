@@ -193,6 +193,10 @@ class ChatUI:
         self.answer: "asyncio.Future[str] | None" = None
         self.picker: dict | None = None
         self.picked: "asyncio.Future[str | None] | None" = None
+        self.typed: "asyncio.Future[str] | None" = None
+        """Set while a line of free text is being read, by prompt()."""
+        self.default = ""
+        """The answer a bare enter takes, where the question names one."""
 
         self.buffer = Buffer(multiline=False, completer=completer,
                              complete_while_typing=True,
@@ -343,12 +347,15 @@ class ChatUI:
     def _composer_prefix(self) -> str:
         """What sits to the left of the cursor: the usual caret, or the
         question currently waiting for an answer."""
-        if self.asking:
+        if self.asking or self.typing:
             return f"│ {self.question} "
         return "│ > "
 
     def _accept(self, buff: Buffer) -> bool:
         text = buff.text
+        if self.typing:
+            self._resolve_typed(text.strip())
+            return False
         if self.asking:
             # Typed out in full and entered, rather than answered with one
             # key. Matched on the first letter so "yes" and "y" agree.
@@ -357,6 +364,12 @@ class ChatUI:
                 if chosen == key or (chosen and chosen[0] == key):
                     self._resolve(key)
                     return False
+            # Nothing typed, and the question named a safe answer for that:
+            # enter takes it. Questions that must not be answered by a
+            # reflex -- granting a permission above all -- name no default,
+            # and enter does nothing.
+            if not chosen and self.default:
+                self._resolve(self.default)
             return False
         self.submissions.put_nowait(text)
         # False: do not keep the text in the buffer. The transcript is where
@@ -432,6 +445,9 @@ class ChatUI:
             if self.picking:
                 if not self.picked.done():
                     self.picked.set_result(None)
+                return
+            if self.typing:
+                self._resolve_typed("")     # cancelled, so nothing typed
                 return
             if self.asking:
                 # "stop" where the question offers it, and otherwise an
@@ -550,6 +566,7 @@ class ChatUI:
         """
         self.question = question
         self.answers = answers
+        self.default = default
         self.answer = asyncio.get_event_loop().create_future()
         self.invalidate()
         try:
@@ -564,7 +581,33 @@ class ChatUI:
         finally:
             self.question = ""
             self.answers = {}
+            self.default = ""
             self.answer = None
+            self.invalidate()
+
+    async def prompt(self, question: str, default: str = "") -> str:
+        """Read a line of free text, in the composer that is already here.
+
+        Same reason as ask(): editing a commit message through a second
+        prompt_toolkit application tore the layout apart. The default is put
+        in the composer to be edited rather than described, which is what
+        makes it a starting point instead of a thing to retype.
+        """
+        self.question = question
+        self.typed = asyncio.get_event_loop().create_future()
+        self.buffer.text = default
+        self.buffer.cursor_position = len(default)
+        self.invalidate()
+        try:
+            return await self.typed
+        except asyncio.CancelledError:
+            if self.typed is not None and not self.typed.done():
+                self.typed.cancel()
+            raise
+        finally:
+            self.question = ""
+            self.typed = None
+            self.buffer.text = ""
             self.invalidate()
 
     def _resolve(self, key: str) -> None:
@@ -572,9 +615,19 @@ class ChatUI:
             return
         self.answer.set_result(key)
 
+    def _resolve_typed(self, text: str) -> None:
+        if self.typed is None or self.typed.done():
+            return
+        self.typed.set_result(text)
+
     @property
     def asking(self) -> bool:
         return self.answer is not None and not self.answer.done()
+
+    @property
+    def typing(self) -> bool:
+        """Waiting for a line of free text rather than for an answer."""
+        return self.typed is not None and not self.typed.done()
 
     # -- the api the repl uses ---------------------------------------------
 

@@ -270,6 +270,232 @@ class TestWhereItIsUsed:
         assert parser.parse_args(["--chat"]).chat is True
 
 
+class TestStartingWithAPrompt:
+    """`wynxo "add retries"` -- a prompt on the command line.
+
+    It ran the turn before the application started, and use_chat_layout()
+    has already pointed the console at the transcript by then. So the whole
+    answer was written into a buffer nobody was showing: the file was
+    edited, the screen stayed empty, and what came back was the classic
+    prompt drawn without its box.
+    """
+
+    def _repl(self):
+        import asyncio as _asyncio
+
+        from wynxo.cli import Repl
+
+        repl = Repl.__new__(Repl)
+        repl.chat = ChatUI(status=lambda: "")
+        repl.turn_calls = []
+
+        async def _connect():
+            return True
+
+        async def _chat_loop():
+            return 0
+
+        async def turn(text):
+            repl.turn_calls.append(text)
+
+        repl._connect = _connect
+        repl._chat_loop = _chat_loop
+        repl.turn = turn
+        return repl
+
+    def test_the_prompt_is_answered_inside_the_layout(self):
+        repl = self._repl()
+        assert asyncio.run(repl.start_with("add retries")) == 0
+        assert repl.chat.submissions.get_nowait() == "add retries"
+
+    def test_the_turn_is_not_taken_before_the_screen_exists(self):
+        repl = self._repl()
+        asyncio.run(repl.start_with("add retries"))
+        assert repl.turn_calls == [], (
+            "the answer would go into a buffer nobody is showing")
+
+    def test_the_classic_path_is_unchanged(self):
+        import asyncio as _asyncio
+
+        from wynxo.cli import Repl
+
+        repl = Repl.__new__(Repl)
+        repl.chat = None
+        repl.turn_calls = []
+
+        async def _connect():
+            return True
+
+        async def turn(text):
+            repl.turn_calls.append(text)
+
+        async def _loop():
+            return 0
+
+        repl._connect, repl.turn, repl._loop = _connect, turn, _loop
+        assert _asyncio.run(repl.start_with("add retries")) == 0
+        assert repl.turn_calls == ["add retries"]
+
+
+class TestTheStartupChecklist:
+    """Status writes straight to stdout, and the application takes the
+    alternate screen the moment it starts -- so the warnings collected on
+    the way up were printed to the screen being left behind."""
+
+    def test_it_is_written_where_the_conversation_is(self):
+        import inspect
+
+        from wynxo.cli import Repl
+
+        source = inspect.getsource(Repl._connect)
+        assert "transcript.console.file" in source
+
+    def test_nothing_in_it_prints_to_stdout_by_default(self):
+        import ast
+        import inspect
+
+        from wynxo.cli import Repl
+
+        tree = ast.parse(inspect.getsource(Repl._connect).strip())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == "print":
+                assert any(k.arg == "file" for k in node.keywords), (
+                    "a bare print() lands on the screen the layout replaces")
+
+
+class TestNothingOpensItsOwnPrompt:
+    """The bug this class exists for, in its fourth guise.
+
+    A second prompt_toolkit application cannot run inside the chat layout's
+    one. It was fixed for the permission prompt, then for the settings
+    pickers, then for /model and /resume -- and four more were still doing
+    it: the keep-or-revert question after every turn that changed a file,
+    the file-by-file walk behind it, /commit and its message editor, and the
+    confirmation for widening the scope to the whole machine.
+
+    The first of those runs by itself after any turn that edits anything,
+    so the default layout was being torn apart in ordinary use.
+    """
+
+    ALLOWED = {"_question", "_type_in", "_loop", "_ask"}
+    """_loop is the classic REPL's own prompt, which only runs when there is
+    no chat layout; _ask has its own branch for the same reason. Everything
+    else goes through the two helpers."""
+
+    def test_every_question_goes_through_the_one_door(self):
+        import ast
+        import inspect
+
+        from wynxo import cli as cli_module
+
+        tree = ast.parse(inspect.getsource(cli_module))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name in self.ALLOWED:
+                continue
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Call) and \
+                        "prompt_async" in ast.unparse(inner.func):
+                    raise AssertionError(
+                        f"{node.name} opens its own prompt; use _question or "
+                        "_type_in, or it will tear the chat layout apart")
+
+    def test_the_door_prefers_the_layout(self):
+        import inspect
+
+        from wynxo.cli import Repl
+
+        for helper in (Repl._question, Repl._type_in):
+            source = inspect.getsource(helper)
+            assert "self.chat" in source
+            assert source.index("self.chat") < source.index("prompt_async")
+
+
+class TestReadingALineInsideTheApp:
+    """Editing a commit message needs free text, not a single key."""
+
+    @pytest.fixture
+    def chat(self):
+        return ChatUI(status=lambda: "")
+
+    def test_the_default_is_there_to_be_edited(self, chat):
+        """Put in the composer rather than described, so it is a starting
+        point instead of something to retype."""
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.prompt("message:", "fix the parser"))
+            await asyncio.sleep(0)
+            text = chat.buffer.text
+            chat.buffer.validate_and_handle()
+            await asyncio.wait_for(pending, 1)
+            return text
+
+        assert asyncio.run(go()) == "fix the parser"
+
+    def test_what_is_entered_comes_back(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(chat.prompt("message:", "old"))
+            await asyncio.sleep(0)
+            chat.buffer.text = "a better message"
+            chat.buffer.validate_and_handle()
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) == "a better message"
+
+    def test_the_question_is_shown_where_the_caret_was(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(chat.prompt("message:", ""))
+            await asyncio.sleep(0)
+            prefix = chat._composer_prefix()
+            chat.buffer.validate_and_handle()
+            await asyncio.wait_for(pending, 1)
+            return prefix
+
+        assert "message:" in asyncio.run(go())
+
+    def test_the_caret_comes_back_afterwards(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(chat.prompt("message:", "x"))
+            await asyncio.sleep(0)
+            chat.buffer.validate_and_handle()
+            await asyncio.wait_for(pending, 1)
+
+        asyncio.run(go())
+        assert chat._composer_prefix() == "│ > "
+        assert chat.buffer.text == ""
+
+    def test_what_you_type_is_not_sent_as_a_message(self, chat):
+        """It is an answer to the question on screen, not the next thing
+        you said."""
+        async def go():
+            pending = asyncio.ensure_future(chat.prompt("message:", ""))
+            await asyncio.sleep(0)
+            chat.buffer.text = "a better message"
+            chat.buffer.validate_and_handle()
+            await asyncio.wait_for(pending, 1)
+
+        asyncio.run(go())
+        assert chat.submissions.empty()
+
+    def test_ctrl_c_cancels_it(self, chat):
+        import types
+
+        async def go():
+            pending = asyncio.ensure_future(chat.prompt("message:", "x"))
+            await asyncio.sleep(0)
+            for binding in chat.app.key_bindings.bindings:
+                names = tuple(getattr(k, "value", str(k))
+                              for k in binding.keys)
+                if names == ("c-c",):
+                    binding.handler(
+                        types.SimpleNamespace(data="", app=chat.app))
+                    break
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) == ""
+
+
 class TestTheSpinnerWhereNothingCanRepaint:
     """rich's Status is a Live, and it was the one that got away.
 
@@ -546,6 +772,45 @@ class TestAskingInsideTheRunningApp:
 
         asyncio.run(go())
         assert not chat.app.is_done
+
+    def test_enter_takes_the_default_where_there_is_one(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.ask("[k] keep [r] revert:", {"k": "keep", "r": "revert"},
+                         default="k"))
+            await asyncio.sleep(0)
+            chat.buffer.validate_and_handle()
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) == "k"
+
+    def test_enter_does_nothing_where_there_is_no_default(self, chat):
+        """A permission prompt names none on purpose: a reflex press of
+        enter must never be able to grant one."""
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.ask("[y] yes [n] no [q] stop:",
+                         {"y": "yes", "n": "no", "q": "stop"}))
+            await asyncio.sleep(0)
+            chat.buffer.validate_and_handle()
+            await asyncio.sleep(0)
+            done = pending.done()
+            self._press(chat, "n")
+            await asyncio.wait_for(pending, 1)
+            return done
+
+        assert asyncio.run(go()) is False
+
+    def test_the_permission_prompt_names_no_default(self):
+        """Checked at the call site, since that is where it would be added
+        by someone tidying up."""
+        import inspect
+
+        from wynxo import cli
+
+        source = inspect.getsource(cli.TerminalCallbacks._ask)
+        question = source[source.index("chat.ask"):]
+        assert "default" not in question[:400]
 
     def test_a_single_key_still_answers_from_an_empty_composer(self, chat):
         async def go():
