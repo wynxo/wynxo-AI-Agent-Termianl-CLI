@@ -22,6 +22,16 @@ from .config import data_dir
 
 SHORTHAND = re.compile(r"^([\w.-]+)/([\w.-]+?)(?:\.git)?$")
 
+# `..` and `.` are valid GitHub-shaped names as far as the pattern above is
+# concerned, and they are directory names as far as the cache is concerned:
+# `--repo ../x` put the checkout beside the cache instead of inside it.
+# Nothing legitimate is called either.
+_NOT_A_NAME = {"", ".", "..", ".git"}
+
+
+def _usable(owner: str, name: str) -> bool:
+    return not ({owner, name} & _NOT_A_NAME)
+
 
 @dataclass
 class Target:
@@ -49,13 +59,15 @@ def parse(raw: str) -> Target | None:
 
     if match := SHORTHAND.match(text):
         owner, name = match.group(1), match.group(2)
+        if not _usable(owner, name):
+            return None
         return Target(f"https://github.com/{owner}/{name}.git", owner, name)
 
     if text.startswith("git@"):
         # git@github.com:owner/name.git
         _, _, path = text.partition(":")
         parts = path.removesuffix(".git").split("/")
-        if len(parts) >= 2:
+        if len(parts) >= 2 and _usable(parts[-2], parts[-1]):
             return Target(text, parts[-2], parts[-1])
         return None
 
@@ -64,6 +76,8 @@ def parse(raw: str) -> Target | None:
         # host, owner, name, then possibly /tree/main/...
         if len(parts) >= 3:
             owner, name = parts[1], parts[2].removesuffix(".git")
+            if not _usable(owner, name):
+                return None
             base = "/".join(parts[:3]).removesuffix(".git")
             scheme = text.split("://", 1)[0]
             return Target(f"{scheme}://{base}.git", owner, name)

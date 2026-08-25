@@ -171,3 +171,44 @@ class TestKawaii:
         pet.react(Mood.HAPPY)
         assert pet.faces() is FACES_ASCII
         pet.face(advance=False).encode("ascii")
+
+
+class TestARepoNameIsNotAPath:
+    """The cache lives at repos/<owner>/<name>, and both halves come from
+    what was typed. `..` is a perfectly good GitHub-shaped name as far as
+    the pattern is concerned, and a directory name as far as the cache is
+    concerned -- so `--repo ../x` put the checkout beside the cache rather
+    than inside it."""
+
+    @pytest.mark.parametrize("raw", [
+        "../..", "x/..", "../x", "./x", "x/.",
+        "https://github.com/../..",
+        "git@github.com:../..",
+        ".git/..", "a/.git",
+    ])
+    def test_these_name_nothing(self, raw):
+        from wynxo.repo import parse
+
+        assert parse(raw) is None
+
+    @pytest.mark.parametrize("raw,slug", [
+        ("owner/name", "owner/name"),
+        ("owner/name.git", "owner/name"),
+        ("https://github.com/psf/requests", "psf/requests"),
+        ("https://github.com/psf/requests.git", "psf/requests"),
+        ("git@github.com:psf/requests.git", "psf/requests"),
+        ("my-org/my.project", "my-org/my.project"),
+    ])
+    def test_real_ones_still_parse(self, raw, slug):
+        from wynxo.repo import parse
+
+        target = parse(raw)
+        assert target is not None and target.slug == slug
+
+    def test_the_checkout_stays_in_the_cache(self, monkeypatch, tmp_path):
+        from wynxo import repo as repo_module
+
+        monkeypatch.setattr(repo_module, "data_dir", lambda: tmp_path)
+        target = repo_module.parse("owner/name")
+        directory = target.directory().resolve()
+        assert directory.is_relative_to((tmp_path / "repos").resolve())
