@@ -100,6 +100,90 @@ class TestWriteAndEdit:
         assert not result.ok and "outside the project directory" in result.output
 
 
+class TestATimeoutTheToolAskedFor:
+    """The shell accepts up to nine hundred seconds and invoke() capped
+    every call at a hundred and twenty. So "run the test suite" on a suite
+    that takes five minutes was killed at two, and what came back was
+    "shell timed out after 120s" -- without the output that would have said
+    which test it had reached."""
+
+    async def test_the_tools_own_timeout_wins(self, tmp_path):
+        tool = Shell(tmp_path)
+        assert tool.timeout_for(tool.validate({"command": "x", "timeout": 600})) \
+            > 120
+
+    async def test_invoke_actually_asks_the_tool(self, tmp_path):
+        """The bug was the call site, not the answer: invoke() knew how to
+        ask and used a constant instead."""
+        tool = Shell(tmp_path)
+        asked = []
+        answer = tool.timeout_for
+
+        def spy(args):
+            asked.append(answer(args))
+            return asked[-1]
+
+        tool.timeout_for = spy
+        await tool.invoke({"command": "echo hi", "timeout": 600})
+        assert asked and asked[0] > 120
+
+    async def test_a_tool_with_nothing_to_say_keeps_the_default(self, tmp_path):
+        tool = ReadFile(tmp_path)
+        assert tool.timeout_for(tool.validate({"path": "x"})) == \
+            tool.DEFAULT_TIMEOUT
+
+    async def test_the_grace_lets_the_tool_report_first(self, tmp_path):
+        """A tool that knows it timed out says what it saw; an outer cap
+        firing at the same moment replaces that with one bare line."""
+        tool = Shell(tmp_path)
+        result = await tool.invoke(
+            {"command": "echo starting; sleep 8", "timeout": 1})
+        assert result.ok is False
+        assert "Output before it was killed" in result.output
+        assert "starting" in result.output
+
+    async def test_an_explicit_timeout_still_overrides(self, tmp_path):
+        result = await Shell(tmp_path).invoke(
+            {"command": "sleep 5", "timeout": 30}, timeout=0.5)
+        assert result.ok is False
+        assert "timed out after 0s" in result.output
+
+    async def test_a_true_in_the_field_is_not_a_timeout(self, tmp_path):
+        """bool is an int in Python, and True would mean one second."""
+        tool = ReadFile(tmp_path)
+        args = tool.validate({"path": "x"})
+        args.timeout = True
+        assert tool.timeout_for(args) == tool.DEFAULT_TIMEOUT
+
+
+class TestWhatTheModelIsToldWhenAPathIsRefused:
+    """The boundary's message is written to be acted on -- it names the flag
+    that would widen the scope. Announcing it as "read_file raised
+    PermissionError" reads like wynxo broke and buries that sentence."""
+
+    async def test_the_refusal_speaks_for_itself(self, tmp_path):
+        work = tmp_path / "project"
+        work.mkdir()
+        (tmp_path / "secret.txt").write_text("no\n")
+        result = await ReadFile(work).invoke({"path": "../secret.txt"})
+        assert result.ok is False
+        assert "raised" not in result.output
+        assert "PermissionError" not in result.output
+        assert "outside the project directory" in result.output
+        assert "--scope" in result.output
+
+    async def test_a_tool_that_genuinely_crashes_still_says_so(self, tmp_path):
+        """The catch-all is still there for what it is for."""
+        tool = ReadFile(tmp_path)
+
+        async def boom(_args):
+            raise ZeroDivisionError("nope")
+
+        tool.run = boom
+        result = await tool.invoke({"path": "x"})
+        assert "raised ZeroDivisionError" in result.output
+
+
 class TestAFileIsSavedTheWayItWasStored:
     """An edit changes what was asked for and nothing else.
 

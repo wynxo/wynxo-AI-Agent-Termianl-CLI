@@ -61,6 +61,14 @@ class Tool(ABC):
     """Whether several calls to this tool may run at once. Read-only tools
     can; anything that writes must not."""
 
+    DEFAULT_TIMEOUT: ClassVar[float] = 120.0
+    """How long a tool that says nothing about it may take."""
+
+    TIMEOUT_GRACE: ClassVar[float] = 30.0
+    """Slack over a tool's own timeout, so its handling runs first: a tool
+    that knows it has timed out reports what it saw, and an outer cap firing
+    at the same moment would replace that with a bare "timed out"."""
+
     def __init__(self, workspace: Path, boundary: Boundary | None = None,
                  shield: "Shield | None" = None):
         self.workspace = workspace.resolve()
@@ -112,8 +120,26 @@ class Tool(ABC):
     def validate(self, raw: dict) -> Schema:
         return self.Input.validate(raw)
 
-    async def invoke(self, raw: dict, timeout: float = 120.0) -> ToolResult:
-        """Validate, run, and turn every failure into a result the model can act on."""
+    def timeout_for(self, args: Schema) -> float:
+        """How long this particular call may take.
+
+        A tool whose own input names a timeout is the authority on it. The
+        shell accepts up to nine hundred seconds, and a flat two-minute cap
+        out here made that a lie: a five-minute test suite was killed at two
+        minutes, and the model was told "shell timed out after 120s" without
+        the output that would have said how far it got.
+        """
+        own = getattr(args, "timeout", None)
+        if isinstance(own, (int, float)) and not isinstance(own, bool) and own > 0:
+            return float(own) + self.TIMEOUT_GRACE
+        return self.DEFAULT_TIMEOUT
+
+    async def invoke(self, raw: dict, timeout: float | None = None) -> ToolResult:
+        """Validate, run, and turn every failure into a result the model can act on.
+
+        ``timeout`` overrides what the tool would choose for itself; leaving
+        it out is the usual case and asks the tool.
+        """
         try:
             args = self.validate(raw)
         except ValidationError as exc:
@@ -121,10 +147,17 @@ class Tool(ABC):
                 f"Invalid arguments for {self.name}. {_explain_validation(exc)}\n"
                 f"Expected: {self.signature()}"
             )
+        limit = self.timeout_for(args) if timeout is None else timeout
         try:
-            return await asyncio.wait_for(self.run(args), timeout=timeout)
+            return await asyncio.wait_for(self.run(args), timeout=limit)
         except asyncio.TimeoutError:
-            return ToolResult.failure(f"{self.name} timed out after {timeout:.0f}s")
+            return ToolResult.failure(f"{self.name} timed out after {limit:.0f}s")
+        except PermissionError as exc:
+            # An expected answer, not a crash. The boundary's message already
+            # says what was refused and how to widen it; announcing it as
+            # "read_file raised PermissionError" reads like wynxo broke, and
+            # buries the sentence the model needs in order to do better.
+            return ToolResult.failure(str(exc))
         except Exception as exc:  # a crashing tool must not kill the session
             return ToolResult.failure(f"{self.name} raised {type(exc).__name__}: {exc}")
 
