@@ -124,6 +124,90 @@ class TestCodeStreaming:
         assert "in the docs" in out
 
 
+class TestSomebodyElsesTextCannotDriveTheTerminal:
+    """A terminal acts on escape sequences in what it is shown.
+
+    ESC[2J clears the screen and takes the scrollback with it; ESC]0;
+    renames the window. The model's answer, the contents of a file, the
+    output of a command -- all of it reaches the screen, and none of it is
+    text wynxo wrote. It does not take a hostile model: a log with colour
+    codes in it, or a terminal recording, echoed back, is enough.
+
+    rich neutralises this when handed a plain string and does not when
+    handed a Text, a Syntax or a Markdown, which is most of what ui.py
+    builds. Driving the real thing in a pty, the model's ESC[2J wiped the
+    session and its ESC]0; renamed the window.
+    """
+
+    PAYLOAD = ("before \x1b[2J\x1b[H middle \x1b]0;PWNED\x07 after "
+               "\x1b[31mred\x1b[0m end")
+
+    def _console(self):
+        import io
+
+        from rich.console import Console
+
+        ui = UI()
+        ui.console = Console(file=io.StringIO(), force_terminal=True, width=80)
+        return ui
+
+    def _shown(self, ui):
+        """What the terminal would receive, minus the colours rich itself
+        chose. Anything left is something wynxo did not put there."""
+        import re
+
+        written = ui.console.file.getvalue()
+        return re.sub(r"\x1b\[[0-9;]*m", "", written)
+
+    @pytest.mark.parametrize("call", [
+        lambda ui, text: ui.assistant_markdown(text),
+        lambda ui, text: ui.thinking(text),
+        lambda ui, text: ui.tool_result("shell", True, "", text),
+        lambda ui, text: ui.tool_output(text),
+        lambda ui, text: ui.code(text),
+        lambda ui, text: ui.diff("--- a/x\n+++ b/x\n+" + text),
+    ])
+    def test_no_escape_survives(self, call):
+        ui = self._console()
+        ui.show_thinking = True
+        call(ui, self.PAYLOAD)
+        assert "\x1b" not in self._shown(ui)
+
+    def test_streamed_text_is_cleaned_too(self):
+        from wynxo.ui import CodeStreamer
+
+        ui = self._console()
+        streamer = CodeStreamer(ui)
+        for character in self.PAYLOAD:
+            streamer.feed(character)
+        streamer.finish()
+        assert "\x1b" not in self._shown(ui)
+
+    def test_the_words_are_still_there(self):
+        """Stripping is not censoring: what the model actually said stays."""
+        from wynxo.ui import CodeStreamer
+
+        ui = self._console()
+        streamer = CodeStreamer(ui)
+        streamer.feed(self.PAYLOAD + "\n")
+        streamer.finish()
+        shown = self._shown(ui)
+        for word in ("before", "middle", "after", "end"):
+            assert word in shown
+
+    def test_newlines_and_tabs_are_not_control_characters(self):
+        from wynxo.ui import sanitise
+
+        assert sanitise("a\nb\tc") == "a\nb\tc"
+
+    @pytest.mark.parametrize("char", ["\x00", "\x07", "\x08", "\x1b",
+                                      "\r", "\x7f"])
+    def test_everything_else_in_the_range_goes(self, char):
+        from wynxo.ui import sanitise
+
+        assert sanitise(f"a{char}b") == "ab"
+
+
 class TestOneStylePerLineNotPerLetter:
     """Streaming a character at a time made the styling per character too.
 

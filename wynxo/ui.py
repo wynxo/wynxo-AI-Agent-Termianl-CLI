@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import sys
 import time
 from typing import Iterable
@@ -86,6 +87,31 @@ def apply_palette(palette: Palette) -> None:
         for name in names:
             if hasattr(module, name):
                 setattr(module, name, here[name])
+
+
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def sanitise(text: str) -> str:
+    """Strip control characters out of text wynxo did not write itself.
+
+    Model output, file contents and command output all end up on screen, and
+    a terminal *acts* on escape sequences in them: ESC[2J clears the screen
+    and takes the scrollback with it, ESC]0; renames the window. It does not
+    take a hostile model -- a log with colour codes in it, a terminal
+    recording, a test fixture, and the agent echoing any of them back is
+    enough.
+
+    rich neutralises this when it is handed a plain string, and does not
+    when it is handed a Text, a Syntax or a Markdown, which is most of what
+    this module builds. So it is done here, once, at the point where
+    somebody else's text becomes something to draw.
+
+    Newlines and tabs stay. Nothing else in the C0 range is meant literally,
+    carriage returns included: a line rewriting itself makes no sense in a
+    transcript that is a list of finished lines.
+    """
+    return _CONTROL.sub("", text)
 
 
 def _supports_unicode() -> bool:
@@ -321,6 +347,7 @@ class UI:
     def assistant_markdown(self, text: str) -> None:
         if not text.strip():
             return
+        text = sanitise(text)
         self.console.print()
         self.console.print(Markdown(text, code_theme=self.code_theme))
         self.console.print()
@@ -328,7 +355,7 @@ class UI:
     def thinking(self, text: str) -> None:
         if not (self.show_thinking and text.strip()):
             return
-        preview = text.strip()
+        preview = sanitise(text).strip()
         if len(preview) > 1600:
             preview = preview[:1600] + "\n[...]"
         self.console.print(
@@ -356,7 +383,7 @@ class UI:
         if display.startswith(("--- ", "diff --git")) or "\n+++ " in display[:200]:
             self.diff(display)
             return
-        text = (display or output).strip()
+        text = sanitise(display or output).strip()
         if not text:
             return
         first = text.splitlines()[0]
@@ -377,7 +404,7 @@ class UI:
         own words. Truncated per line: a stray 5000-column line from a
         minifier would otherwise wrap into a screenful.
         """
-        text = line.rstrip()
+        text = sanitise(line).rstrip()
         if not text.strip():
             return
         limit = max(24, self.width - 8)
@@ -386,6 +413,7 @@ class UI:
     def diff(self, text: str) -> None:
         if not text.strip():
             return
+        text = sanitise(text)
         limit = max(24, self.width - 6) if self.narrow else 10_000
         body = Text()
         for line in (l[:limit] for l in text.splitlines()[:120]):
@@ -416,7 +444,8 @@ class UI:
                   box=self.box, padding=(0, 1)))
 
     def code(self, text: str, language: str = "text") -> None:
-        self.console.print(Syntax(text, language, theme=self.code_theme, word_wrap=True))
+        self.console.print(Syntax(sanitise(text), language,
+                                  theme=self.code_theme, word_wrap=True))
 
     def highlight(self, line: str, language: str = "text") -> Text:
         """One line, syntax-highlighted, with no block chrome.
@@ -580,7 +609,9 @@ class CodeStreamer:
     # -- entry point -------------------------------------------------------
 
     def feed(self, text: str) -> None:
-        self.buffer += text.replace("\r", "")
+        # Everything streamed goes through here -- the answer, the reasoning,
+        # a file being written -- so it is the one place worth cleaning.
+        self.buffer += sanitise(text)
         while self.buffer:
             newline = self.buffer.find("\n")
             if newline != -1:
