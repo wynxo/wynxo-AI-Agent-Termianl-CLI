@@ -17,9 +17,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# Generous next to the ~30s the suite actually takes, and far below any CI
-# job limit. Overridable for a slow machine or a debugger.
-HANG_TIMEOUT = float(os.environ.get("WYNXO_TEST_TIMEOUT", "300"))
+# Generous next to the ~35s the suite actually takes, including on the
+# slower Windows runners, and short enough that the dump lands before
+# anything else ends the job -- the first attempt at this was set to 300s
+# and the run was superseded at 269, losing the diagnostic entirely.
+# Overridable for a slow machine or a debugger.
+HANG_TIMEOUT = float(os.environ.get("WYNXO_TEST_TIMEOUT", "150"))
 
 
 HANG_REPORT = Path(__file__).resolve().parents[1] / "hang-traceback.txt"
