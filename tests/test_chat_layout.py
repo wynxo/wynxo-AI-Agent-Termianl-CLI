@@ -548,3 +548,54 @@ class TestThePickerInsideTheApp:
         source = inspect.getsource(Repl._pick)
         assert "self.chat.choose" in source
         assert source.index("self.chat") < source.index("arrows_supported")
+
+
+class TestWithNoConsoleAtAll:
+    """Windows without a console handle.
+
+    Constructing an Application builds the platform's output object there
+    and then, and on Windows that means opening a console. Without one -- a
+    CI runner, a service, anything started by pythonw -- it raised
+    NoConsoleScreenBufferError from the constructor, so merely building the
+    layout was fatal. Twenty-eight of these took the Windows suite down.
+    """
+
+    @pytest.fixture
+    def no_console(self, monkeypatch):
+        import prompt_toolkit.output.defaults as defaults
+
+        class NoConsoleScreenBufferError(Exception):
+            pass
+
+        def refuse(*args, **kwargs):
+            raise NoConsoleScreenBufferError(
+                "No Windows console found. Are you running cmd.exe?")
+
+        monkeypatch.setattr(defaults, "create_output", refuse)
+        return refuse
+
+    def test_the_layout_can_still_be_built(self, no_console):
+        assert ChatUI(status=lambda: "") is not None
+
+    def test_it_falls_back_to_a_stand_in(self, no_console):
+        from prompt_toolkit.output import DummyOutput
+
+        assert isinstance(ChatUI().app.output, DummyOutput)
+
+    def test_the_transcript_still_works(self, no_console):
+        chat = ChatUI()
+        chat.transcript.console.print("still fine")
+        chat.flush()
+        assert "still fine" in str(chat._transcript_fragments().value)
+
+    def test_the_keys_still_resolve(self, no_console):
+        """The bindings are what the tests and the picker rely on."""
+        chat = ChatUI()
+        assert chat.app.key_bindings.bindings
+
+    def test_a_real_session_never_gets_here(self, monkeypatch):
+        """usable() sends a session with no terminal down the scrolling
+        path, so the stand-in is a safety net rather than a mode."""
+        import wynxo.tui as tui
+
+        assert tui.usable() is False       # pytest's stdout is not a tty

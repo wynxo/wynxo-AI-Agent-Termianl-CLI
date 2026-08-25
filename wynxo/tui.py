@@ -118,6 +118,30 @@ class Transcript:
             self.on_change()
 
 
+def _output():
+    """The screen to draw on, or a stand-in when there is no screen.
+
+    Constructing an Application builds the platform's output object there
+    and then, and on Windows that means opening a console handle. Without
+    one -- a CI runner, a service, anything started by pythonw -- it raises
+    NoConsoleScreenBufferError from the constructor, so merely *building*
+    the layout was fatal.
+
+    A stand-in keeps the object constructible everywhere. Nothing is drawn
+    through it, which is correct: with no console there is nothing to draw
+    on, and usable() has already sent a real session down the scrolling
+    path.
+    """
+    try:
+        from prompt_toolkit.output.defaults import create_output
+
+        return create_output()
+    except Exception:
+        from prompt_toolkit.output import DummyOutput
+
+        return DummyOutput()
+
+
 class ChatUI:
     """The full-screen layout: transcript, status strip, composer.
 
@@ -288,6 +312,7 @@ class ChatUI:
             mouse_support=False,
             color_depth=ColorDepth.TRUE_COLOR,
             erase_when_done=True,
+            output=_output(),
         )
 
     # -- input -------------------------------------------------------------
