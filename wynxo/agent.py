@@ -25,6 +25,8 @@ from .memory import Memory
 from .parsing import LiveContentFilter, ParsedTurn, parse_turn
 from .permissions import Decision, PermissionStore, summarise_call
 from .prompts import (
+    TESTS_FAILED_PROMPT,
+    TESTS_PASSED_NOTE,
     CONSENSUS_PROMPT,
     CRITIQUE_PROMPT,
     PLAN_PROMPT,
@@ -34,8 +36,9 @@ from .prompts import (
     build_system_prompt,
 )
 from .provider import OllamaClient, ProviderError
-from .scope import Boundary
+from .scope import Boundary, Mode
 from .session import Session
+from . import testing
 from .secrets import Shield
 from .tools import Registry, build_registry
 
@@ -197,6 +200,7 @@ class Agent:
         self.boundary = boundary
         self.memory = memory or Memory(workspace)
         self.checkpoints = Checkpoints()
+        self._turn_mark = 0
         self.shield = Shield(workspace, enabled=config.protect_secrets)
         self.tools = registry or build_registry(
             workspace, allow_shell=config.allow_shell,
@@ -573,9 +577,17 @@ class Agent:
         return None
 
     async def _verify(self, request: str) -> int:
-        """Self-review rounds. Returns how many ran."""
+        """Self-review rounds. Returns how many ran.
+
+        The test run comes first. Asking a model to review its own work is
+        asking the author whether the author was right, and a 7B answers yes;
+        a failing test is the one thing in this loop that does not come from
+        the model.
+        """
+        rounds = await self._verify_with_tests()
+
         if self.policy.verify_rounds == 0:
-            return 0
+            return rounds
 
         limit = (
             self.policy.max_verify_rounds
@@ -584,7 +596,6 @@ class Agent:
         )
         extra = VERIFY_EXTRA_TESTS if self.policy.name in ("max", "ultra") else ""
 
-        rounds = 0
         for i in range(limit):
             await self.cb.on_stage("verifying", f"round {i + 1}/{limit}")
             self.session.add_user(VERIFY_PROMPT.format(extra=extra))
@@ -612,6 +623,52 @@ class Agent:
                 break
 
         return rounds
+
+    async def _verify_with_tests(self) -> int:
+        """Run the project's own tests and hand back any failures.
+
+        Runs only when this turn actually changed a file. After a question,
+        or a turn that only read things, there is nothing new to break and a
+        test run would be a slow way to learn that.
+        """
+        if not self.config.verify_with_tests:
+            return 0
+        if self.permissions.mode is Mode.PLAN:
+            return 0        # read-only means read-only, tests included
+        if not self.checkpoints.changes_since(self._turn_mark):
+            return 0
+
+        runner = testing.detect(self.workspace)
+        if runner is None:
+            return 0
+
+        shell = self.tools.get("shell")
+        if shell is None:
+            return 0        # the user disabled it, so this is not ours to do
+
+        await self.cb.on_stage("testing", runner.command)
+        result = await shell.invoke(
+            {"command": runner.command, "timeout": testing.DEFAULT_TIMEOUT},
+            timeout=testing.DEFAULT_TIMEOUT + 30,
+        )
+        code = result.metadata.get("exit_code", 0 if result.ok else 1)
+
+        if result.ok:
+            await self.cb.on_tool_result(
+                "tests", True, TESTS_PASSED_NOTE.format(command=runner.command), "")
+            return 0
+
+        body = testing.summarise(result.output)
+        await self.cb.on_tool_result(
+            "tests", False, f"tests failed ({runner.command})", body)
+        self.session.add_user(TESTS_FAILED_PROMPT.format(
+            command=runner.command, code=code, output=body))
+
+        # One pass to fix what broke. Not a loop: a model that cannot fix it
+        # in one go is usually making it worse, and the user is better served
+        # by seeing the failure than by watching it thrash.
+        follow = await self._act(max_iterations=min(12, self.policy.max_iterations))
+        return 0 if follow.interrupted else 1
 
     async def _act(self, max_iterations: int | None = None) -> TurnResult:
         """The tool loop proper."""
@@ -710,6 +767,10 @@ class Agent:
 
     async def run(self, request: str) -> TurnResult:
         started = time.monotonic()
+        # Where this turn began, so the test pass can tell whether anything
+        # was actually changed. A turn that only answered a question has
+        # nothing new to break.
+        self._turn_mark = self.checkpoints.mark()
 
         # "hello" is not a task. Without this the planning scaffold at high
         # effort turns a greeting into invented work -- see is_small_talk().

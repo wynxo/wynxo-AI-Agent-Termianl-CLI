@@ -388,3 +388,19 @@ Wrap at 72 columns.
 
 Describe what the diff actually does. Do not invent motivation you cannot \
 see in it, and do not list every file -- the diff is already in the commit."""
+
+
+TESTS_FAILED_PROMPT = """The project's tests were run after your changes and they failed.
+
+    $ {command}
+    exit code {code}
+
+{output}
+
+This is not a review comment -- it is what actually happened when the code
+ran. Work out whether your change caused it, and if so fix it. If the
+failure was already there before you started, say so plainly and leave it
+alone rather than widening the change to chase it.
+"""
+
+TESTS_PASSED_NOTE = "tests passed ({command})"
