@@ -36,6 +36,7 @@ from .prompts import (
 from .provider import OllamaClient, ProviderError
 from .scope import Boundary
 from .session import Session
+from .secrets import Shield
 from .tools import Registry, build_registry
 
 VERIFIED = "VERIFIED"
@@ -195,9 +196,10 @@ class Agent:
         self.boundary = boundary
         self.memory = memory or Memory(workspace)
         self.checkpoints = Checkpoints()
+        self.shield = Shield(workspace, enabled=config.protect_secrets)
         self.tools = registry or build_registry(
             workspace, allow_shell=config.allow_shell,
-            boundary=boundary, memory=self.memory)
+            boundary=boundary, memory=self.memory, shield=self.shield)
         self.permissions = PermissionStore()
         self.permissions.preapprove(config.auto_approve)
 

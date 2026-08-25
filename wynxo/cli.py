@@ -166,6 +166,7 @@ COMMANDS = {
     "/pet": "the companion: on | off | name <x> | voice <x>",
     "/theme": "colour palette: purple | sakura | midnight | ember | plain",
     "/fullscreen": "draw on the alternate screen, like vim: on | off",
+    "/secrets": "credential protection: on | off | allow <path>",
     "/speak": "read answers out loud: on | off | test | engine <name>",
     "/talker": "small model that does the talking: <model> | off",
     "/log": "where this session is being recorded",
@@ -1175,6 +1176,9 @@ class Repl:
         if name == "/fullscreen":
             return await self.cmd_fullscreen(args)
 
+        if name == "/secrets":
+            return await self.cmd_secrets(args)
+
         if name == "/speak":
             return await self.cmd_speak(args)
 
@@ -2094,6 +2098,53 @@ class Repl:
                          "screen, and comes back when wynxo exits")
         else:
             self.ui.success("back to the scrolling terminal")
+        return True
+
+    async def cmd_secrets(self, args: list[str]) -> bool:
+        shield = self.agent.shield
+
+        if args and args[0].lower() == "allow":
+            if len(args) < 2:
+                self.ui.info("/secrets allow <path>  -- let the agent read "
+                             "one file it would otherwise refuse")
+                return True
+            target = " ".join(args[1:])
+            shield.allow(target)
+            self.ui.warn(f"{target} can now be read this session. It will be "
+                         "sent to the model like any other file.")
+            return True
+
+        want = args[0].lower() if args else ""
+        if want not in ("on", "off"):
+            chosen = await self._pick(
+                "secrets",
+                [("on", "refuse .env files and private keys; mask credentials "
+                        "found inside ordinary files, and in the session log"),
+                 ("off", "no filtering -- every file goes to the model as-is")],
+                "on" if self.config.protect_secrets else "off",
+            )
+            if chosen is NO_PICKER:
+                state = "on" if self.config.protect_secrets else "off"
+                self.ui.info(f"secret protection is {state}  {self.ui.g.dot}  "
+                             "/secrets on | off | allow <path>")
+                return True
+            if chosen is None:
+                return True
+            want = chosen
+
+        enabled = want == "on"
+        self.config.protect_secrets = enabled
+        self.config.save()
+        shield.enabled = enabled
+        if enabled:
+            self.ui.success("credentials will be kept out of the model and "
+                            "the log")
+        else:
+            # Warned rather than confirmed. The endpoint may well be another
+            # machine, so this is a decision about what leaves this one.
+            self.ui.warn("secret protection off -- .env files, keys and "
+                         "tokens will be sent to the model verbatim and "
+                         "written to the session log")
         return True
 
     def _preview_theme(self) -> None:

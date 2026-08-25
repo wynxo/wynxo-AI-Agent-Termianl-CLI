@@ -35,8 +35,8 @@ class TodoWrite(Tool):
     Input = TodoInput
     concurrency_safe = False
 
-    def __init__(self, workspace, boundary=None):
-        super().__init__(workspace, boundary)
+    def __init__(self, workspace, boundary=None, shield=None):
+        super().__init__(workspace, boundary, shield)
         self.items: list[TodoItem] = []
 
     async def run(self, args: TodoInput) -> ToolResult:

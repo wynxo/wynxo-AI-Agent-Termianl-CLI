@@ -93,10 +93,17 @@ class Grep(Tool):
             return ToolResult.success(
                 f"No matches for {args.pattern!r}{where} ({scanned} files searched)."
             )
-        body = "\n".join(hits[:MAX_MATCHES])
+        body, masked = self.shield.clean("\n".join(hits[:MAX_MATCHES]))
         if len(hits) > MAX_MATCHES:
             body += f"\n... and {len(hits) - MAX_MATCHES} more matches"
-        return ToolResult.success(body, display=f"grep {args.pattern} -> {len(hits)} matches")
+        if masked:
+            body += (f"\n\n[{masked} credential"
+                     f"{'s' if masked != 1 else ''} in these matches were "
+                     f"masked before they reached you.]")
+        return ToolResult.success(
+            body,
+            display=f"grep {args.pattern} -> {len(hits)} matches"
+                    + (f", {masked} masked" if masked else ""))
 
     def _scan(self, target: Path, regex: re.Pattern, glob: str, context: int):
         files = [target] if target.is_file() else self._candidates(target, glob)
@@ -106,6 +113,11 @@ class Grep(Tool):
             if len(hits) > MAX_MATCHES * 2 or scanned > MAX_FILES_SCANNED:
                 break
             if _looks_binary(path):
+                continue
+            if self.shield.blocks(path):
+                # A grep is a read with extra steps. Matching inside a
+                # credentials file would hand over the secret a line at a
+                # time, which is the same leak in a shape nobody checks.
                 continue
             try:
                 lines = _read_text(path).splitlines()

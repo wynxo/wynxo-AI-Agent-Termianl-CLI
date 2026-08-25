@@ -67,6 +67,11 @@ class ReadFile(Tool):
     async def run(self, args: ReadInput) -> ToolResult:
         path = self.resolve_path(args.path)
         rel = self.relative(path)
+        # Checked before the existence test on purpose: "that file holds
+        # credentials" and "that file is not there" are different answers,
+        # and confirming which secrets exist is itself worth withholding.
+        if refused := self.shield.blocks(path):
+            return ToolResult.failure(refused)
         if not path.exists():
             near = self._suggest(path)
             hint = f" Did you mean {near}?" if near else ""
@@ -112,11 +117,21 @@ class ReadFile(Tool):
             if truncated or args.offset
             else ""
         )
+        body, masked = self.shield.clean(body)
+        if masked:
+            # Said out loud rather than done quietly: the model is about to
+            # reason about a file, and it should know that what it is looking
+            # at is not exactly what is on disk.
+            note += (f"\n\n[{masked} credential{'s' if masked != 1 else ''} "
+                     f"in this file were masked before it reached you. The "
+                     f"code is unchanged on disk.]")
         return ToolResult.success(
             body + note,
-            display=f"read {rel} ({len(window)} lines)",
+            display=f"read {rel} ({len(window)} lines)"
+                    + (f", {masked} masked" if masked else ""),
             path=rel,
             lines=len(lines),
+            masked=masked,
         )
 
     def _suggest(self, path: Path) -> str | None:

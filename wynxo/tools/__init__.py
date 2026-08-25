@@ -8,6 +8,7 @@ from ..memory import Memory
 from ..scope import Boundary
 from .base import Tool, ToolResult
 from .files import EditFile, ListDir, MultiEdit, ReadFile, WriteFile
+from ..secrets import Shield
 from .memory_tool import Remember
 from .search import Glob, Grep
 from .shell import Shell
@@ -54,18 +55,19 @@ def build_registry(
     allow_shell: bool = True,
     boundary: Boundary | None = None,
     memory: Memory | None = None,
+    shield: Shield | None = None,
 ) -> Registry:
     tools: list[Tool] = [
-        ReadFile(workspace, boundary),
-        WriteFile(workspace, boundary),
-        EditFile(workspace, boundary),
-        MultiEdit(workspace, boundary),
-        ListDir(workspace, boundary),
-        Glob(workspace, boundary),
-        Grep(workspace, boundary),
-        TodoWrite(workspace, boundary),
-        Remember(workspace, boundary, memory),
+        ReadFile(workspace, boundary, shield),
+        WriteFile(workspace, boundary, shield),
+        EditFile(workspace, boundary, shield),
+        MultiEdit(workspace, boundary, shield),
+        ListDir(workspace, boundary, shield),
+        Glob(workspace, boundary, shield),
+        Grep(workspace, boundary, shield),
+        TodoWrite(workspace, boundary, shield),
+        Remember(workspace, boundary, memory, shield),
     ]
     if allow_shell:
-        tools.append(Shell(workspace, boundary))
+        tools.append(Shell(workspace, boundary, shield))
     return Registry(tools)

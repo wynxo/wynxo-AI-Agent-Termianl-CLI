@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import data_dir
+from .secrets import redact
 
 MAX_FIELD = 4_000
 """Per-field cap. A 200KB file dumped into a tool result would otherwise make
@@ -57,7 +58,7 @@ class Journal:
             return
         record = {"t": round(time.time(), 3), "kind": kind}
         for key, value in fields.items():
-            record[key] = _trim(value)
+            record[key] = _scrub(_trim(value))
         try:
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
@@ -148,3 +149,21 @@ def recent(limit: int = 10) -> list[Path]:
                       key=lambda p: -p.stat().st_mtime)[:limit]
     except OSError:
         return []
+
+
+def _scrub(value: Any) -> Any:
+    """Mask credentials on their way into the transcript.
+
+    The log is the quiet half of the same leak the tools guard against: it
+    keeps every tool result for twenty sessions, so one look at a config file
+    with a hardcoded key would leave that key in plaintext on disk long after
+    the session was forgotten -- and outlive any promise that wynxo can be
+    removed without leaving marks.
+    """
+    if isinstance(value, str):
+        return redact(value)[0]
+    if isinstance(value, dict):
+        return {k: _scrub(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub(v) for v in value]
+    return value

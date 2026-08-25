@@ -35,8 +35,9 @@ class Remember(Tool):
     internal = True
     concurrency_safe = False
 
-    def __init__(self, workspace: Path, boundary=None, memory: Memory | None = None):
-        super().__init__(workspace, boundary)
+    def __init__(self, workspace: Path, boundary=None, memory: Memory | None = None,
+                 shield=None):
+        super().__init__(workspace, boundary, shield)
         self.memory = memory or Memory(workspace)
 
     async def run(self, args: RememberInput) -> ToolResult:

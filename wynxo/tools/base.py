@@ -17,6 +17,7 @@ from typing import Any, ClassVar, Type
 
 from ..schema import Schema, ValidationError
 from ..scope import Boundary, Scope
+from ..secrets import Shield
 
 
 @dataclass
@@ -60,11 +61,15 @@ class Tool(ABC):
     """Whether several calls to this tool may run at once. Read-only tools
     can; anything that writes must not."""
 
-    def __init__(self, workspace: Path, boundary: Boundary | None = None):
+    def __init__(self, workspace: Path, boundary: Boundary | None = None,
+                 shield: "Shield | None" = None):
         self.workspace = workspace.resolve()
         # Without an explicit boundary, confine to the workspace -- the safe
         # reading of "no scope was chosen".
         self.boundary = boundary or Boundary(scope=Scope.FOLDER, root=self.workspace)
+        # Likewise: no shield given means the protective one, not none. A
+        # tool built in a test or by future code should not leak by default.
+        self.shield = shield if shield is not None else Shield(self.workspace)
 
     @abstractmethod
     async def run(self, args: Schema) -> ToolResult: ...
