@@ -94,12 +94,18 @@ class TestTurnScopedChanges:
         started, not three overlapping ones."""
         from wynxo.checkpoints import Checkpoints
 
+        # newline="" because a snapshot is now what is on disk, byte for
+        # byte. write_text() without it turns "\n" into "\r\n" on Windows,
+        # and the assertion below would be about Python's newline
+        # translation rather than about checkpoints.
         target = tmp_path / "a.py"
-        target.write_text("one\n")
+        target.write_text("one\n", newline="")
         points = Checkpoints()
         mark = points.mark()
-        points.capture(target, "write_file"); target.write_text("two\n")
-        points.capture(target, "edit_file"); target.write_text("three\n")
+        points.capture(target, "write_file")
+        target.write_text("two\n", newline="")
+        points.capture(target, "edit_file")
+        target.write_text("three\n", newline="")
 
         changes = points.changes_since(mark)
         assert len(changes) == 1
