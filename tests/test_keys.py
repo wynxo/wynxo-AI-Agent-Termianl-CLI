@@ -6,12 +6,16 @@ double stops, and a watcher that never started.
 """
 
 import os
-import pty
 import sys
-import termios
 import time
 
 import pytest
+
+# pty and termios do not exist on Windows, and importing them at module
+# level would fail collection for this whole file -- hiding every other
+# result on that platform rather than reporting one skip.
+pty = pytest.importorskip("pty", reason="POSIX terminals only")
+termios = pytest.importorskip("termios", reason="POSIX terminals only")
 
 from wynxo.keys import CTRL, KeyWatcher, describe_bindings, key_name
 

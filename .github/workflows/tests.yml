@@ -1,0 +1,82 @@
+# wynxo claims to run on Linux, macOS, Windows and Termux. Three of those
+# can be checked here, and until now none of them were: every cross-platform
+# claim in this project rested on reading the code.
+#
+# Windows earns its place twice over. It is the platform where the paths,
+# the console and the process handling all differ, and the one a Linux
+# developer is least likely to notice breaking.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A newer push makes the previous run's answer irrelevant.
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the others -- knowing whether a
+      # break is Windows-only or everywhere is most of the diagnosis.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.13"]
+        include:
+          # The oldest and newest supported Python on every OS is more
+          # matrix than this project needs; the ends are where breakage
+          # lives, and Linux carries the middle.
+          - os: ubuntu-latest
+            python: "3.11"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Import on a clean interpreter
+        # Catches a missing dependency that the test run would mask by
+        # importing something else first.
+        run: python -c "import wynxo, wynxo.cli, wynxo.agent, wynxo.provider"
+
+      - name: Tests
+        run: python -m pytest -q
+
+      - name: The CLI actually starts
+        # --version goes through argparse and every module-level import,
+        # which is where a platform difference tends to surface first.
+        run: wynxo --version
+
+  no-compiled-dependencies:
+    # wynxo has to install on Termux, where anything needing a Rust or C
+    # toolchain has no wheel and will not build. This is the check that
+    # keeps a casual `pip install pydantic` from quietly ending that.
+    name: pure python only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install with binary wheels forbidden for our own tree
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "."
+      - name: Every installed distribution must be a pure-python wheel
+        run: python .github/check_pure_python.py
