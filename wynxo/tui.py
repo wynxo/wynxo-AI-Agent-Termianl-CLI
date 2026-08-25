@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import time
 from typing import Callable
 
 from prompt_toolkit.application import Application
@@ -32,7 +33,9 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.layout import (Float, FloatContainer, HSplit,
+                                   Layout, Window)
+from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.output import ColorDepth
@@ -293,7 +296,7 @@ class ChatUI:
             height=1,
             get_line_prefix=lambda *_: [("class:prompt", self._composer_prefix())],
         )
-        layout = Layout(HSplit([
+        body = HSplit([
             Window(content=FormattedTextControl(self._header_fragments),
                    height=1),
             Window(content=FormattedTextControl(self._rule_fragments),
@@ -303,7 +306,21 @@ class ChatUI:
             Window(content=FormattedTextControl(self._edge(True)), height=1),
             composer,
             Window(content=FormattedTextControl(self._edge(False)), height=1),
-        ]), focused_element=composer)
+        ])
+
+        # The completer had nowhere to draw. A Buffer with a completer set
+        # will happily compute suggestions and show none of them unless the
+        # layout contains a menu to float over it -- which is why /mo… stopped
+        # offering /model the moment the composer moved into this layout.
+        layout = Layout(
+            FloatContainer(
+                content=body,
+                floats=[Float(xcursor=True, ycursor=True,
+                              content=CompletionsMenu(max_height=8,
+                                                      scroll_offset=1))],
+            ),
+            focused_element=composer,
+        )
 
         return Application(
             layout=layout,
@@ -455,17 +472,37 @@ class ChatUI:
         return self.picked is not None and not self.picked.done()
 
     def _picker_lines(self, width: int) -> list[str]:
+        """The open picker, with the highlighted row alive.
+
+        The selected row cycles through the sweep while it sits there, so
+        moving down the list is something you watch rather than something
+        you infer from a moved caret. Everything else stays dim, which is
+        what makes the moving one read as selected.
+        """
         picker = self.picker
         if not picker:
             return []
-        accent, dim, reset = "\x1b[35m", "\x1b[38;5;247m", "\x1b[0m"
+        dim, reset = "\x1b[38;5;247m", "\x1b[0m"
         mark = "❯" if self._unicode else ">"
-        lines = [f"{accent}  {picker['title']}{reset}"]
+        phase = int(time.monotonic() * 12)
+
+        title = _rgb(_SWEEP[phase % len(_SWEEP)])
+        lines = [f"{title}  {picker['title']}{reset}"]
         for i, (name, hint) in enumerate(picker["options"]):
-            chosen = i == picker["index"]
-            head = f"{accent}{mark} {name}{reset}" if chosen else f"  {dim}{name}{reset}"
-            body = f"{head}  {dim}{hint}{reset}" if hint else head
-            lines.append("  " + body[:width * 6])
+            if i == picker["index"]:
+                # Offset per character so the colour runs along the word.
+                lit = "".join(
+                    f"{_rgb(_SWEEP[(phase + n) % len(_SWEEP)])}{ch}"
+                    for n, ch in enumerate(f"{mark} {name}")
+                )
+                body = f"{lit}{reset}"
+                if hint:
+                    body += f"  {dim}{hint}{reset}"
+            else:
+                body = f"  {dim}{name}{reset}"
+                if hint:
+                    body += f"  {dim}{hint}{reset}"
+            lines.append("  " + body)
         lines.append(f"{dim}  arrows move  ·  enter chooses  ·  esc cancels{reset}")
         return lines
 
@@ -572,6 +609,21 @@ def render_to_ansi(renderable, width: int) -> str:
     except Exception:
         return ""
     return sink.getvalue().split("\n")[0]
+
+
+# The same pink-through-violet sweep the logo uses. Imported lazily to keep
+# tui.py independent of the logo module, which imports asciiart in turn.
+_SWEEP = [
+    (255, 120, 200), (255,  96, 190), (246,  74, 186), (228,  64, 190),
+    (204,  62, 200), (176,  70, 214), (150,  84, 226), (132, 104, 236),
+    (150,  84, 226), (176,  70, 214), (204,  62, 200), (228,  64, 190),
+    (246,  74, 186), (255,  96, 190), (255, 120, 200), (255, 150, 205),
+]
+
+
+def _rgb(colour: tuple[int, int, int]) -> str:
+    r, g, b = colour
+    return f"\x1b[38;2;{r};{g};{b}m"
 
 
 def _terminal_width(default: int = 80) -> int:

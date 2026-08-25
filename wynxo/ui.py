@@ -776,6 +776,28 @@ SURGE_FRAMES = (
 )
 
 
+def celebrate(ui: "UI", label: str, level: int, steps: int) -> None:
+    """A band of colour for stepping up, drawn once.
+
+    The animated surge needs a repainting widget, which the chat layout does
+    not have -- its transcript is a list of finished lines. This is the same
+    idea in one line: the band is longer and brighter the further up you
+    went, so the top of the scale still reads as an event.
+    """
+    from rich.text import Text as _T
+
+    sweep = [(255, 120, 200), (255, 96, 190), (246, 74, 186), (228, 64, 190),
+             (204, 62, 200), (176, 70, 214), (150, 84, 226), (132, 104, 236)]
+    span = max(8, min(46, 8 + level * 7))
+    block = "█" if ui.g.unicode else "#"
+    row = _T("  ")
+    for i in range(span):
+        r, g, b = sweep[(i + level * 2) % len(sweep)]
+        row.append(block, style=f"#{r:02x}{g:02x}{b:02x}")
+    row.append(f"  {label}", style="bold #ff78c8")
+    ui.console.print(row)
+
+
 async def surge(ui: "UI", label: str, style: str, width: int = 34) -> None:
     """A short wave across the line, for stepping up to max or ultra.
 

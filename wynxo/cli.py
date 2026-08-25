@@ -271,16 +271,58 @@ class TerminalCallbacks(Callbacks):
         self.verbose_tools = False
         """Ctrl-T: show full tool output instead of a one-line summary."""
         self.tokens = 0
+        self._thinking_buffer: list[str] = []
+        """Every thought of the current turn, shown or not."""
 
     # -- live toggles, called from the key watcher thread -------------------
 
     def toggle_thinking(self) -> None:
         self.ui.show_thinking = not self.ui.show_thinking
-        if not self.ui.show_thinking:
+        # Announced before the panel opens, not after: the note is a line of
+        # its own, and printing it once the backlog is streaming drops it
+        # into the middle of a sentence.
+        self._note(f"thinking {'shown' if self.ui.show_thinking else 'hidden'}")
+        if self.ui.show_thinking:
+            self._open_thinking()
+        else:
             # Collapse what is already on screen's worth of buffer, so hiding
             # takes effect now rather than after the current block finishes.
             self._end_thinking()
-        self._note(f"thinking {'shown' if self.ui.show_thinking else 'hidden'}")
+
+    def _open_thinking(self) -> None:
+        """Show the reasoning so far, then let the rest stream in.
+
+        Opening part-way through has to show the whole thought, not the tail
+        of it. What has already arrived is printed in one go and the live
+        stream picks up from there, so the panel reads the same whether it
+        was opened at the start of the turn or in the middle of it.
+        """
+        # Only the leading space is trimmed. Stripping the tail would glue
+        # the backlog to whichever word streams in next.
+        backlog = "".join(self._thinking_buffer).lstrip()
+        if not backlog:
+            return
+        if self._streaming:
+            self._end_stream()
+        self.ui.console.print()
+        self.ui.console.print(Text("  thinking", style=f"bold {MUTED}"))
+        if self._thinker is None:
+            self._thinker = ThoughtStreamer(self.ui)
+        self._thinker.feed(backlog)
+
+    def _thinking_note(self) -> str:
+        """The collapsed form: how much thinking there is, and how to read it.
+
+        Collapsed does not mean invisible. Something has to say the model is
+        reasoning and that there is something to open, or the panel is a
+        feature nobody discovers.
+        """
+        words = sum(chunk.count(" ") for chunk in self._thinking_buffer)
+        if words < 3:
+            return ""
+        if self.ui.show_thinking:
+            return ""
+        return f"{words} words thought  ^O to read"
 
     def toggle_verbose(self) -> None:
         self.verbose_tools = not self.verbose_tools
@@ -305,8 +347,15 @@ class TerminalCallbacks(Callbacks):
     async def on_thinking(self, text: str) -> None:
         self._thinking_chars += len(text)
         self.tokens += 1
+        # Kept whether or not it is being shown. Collapsed is a display
+        # state, not a decision to throw the reasoning away -- without this
+        # buffer, opening the panel part-way through could only ever show
+        # what came after the keypress, and the thought you wanted to read
+        # was the one that had already gone by.
+        self._thinking_buffer.append(text)
         if self.bar is not None:
-            self.bar.update(activity="thinking", tokens=self.tokens)
+            self.bar.update(activity="thinking", tokens=self.tokens,
+                            detail=self._thinking_note())
 
         if not self.ui.show_thinking:
             return
@@ -832,6 +881,9 @@ class Repl:
         text = self._expand_mentions(text)
         self.callbacks.tokens = 0
         self.callbacks._thinking_chars = 0
+        # Cleared per turn: opening the panel should show this answer's
+        # reasoning, not everything the model has thought this session.
+        self.callbacks._thinking_buffer.clear()
 
         bar = ActivityBar(self.ui, self.policy.name, describe_bindings(LIVE_KEYS),
                           model=self.config.model, pet=self.pet)
@@ -1606,18 +1658,29 @@ class Repl:
         played on every change would be noise, and one that played on the way
         down would be celebrating the wrong direction.
         """
-        from .ui import surge
+        from .ui import celebrate, surge
 
-        heavy = {"max": (BAR_ACCENT, "MAX EFFORT"),
-                 "ultra": (ACCENT, "ULTRA")}
-        if current not in heavy or current == previous:
+        if current == previous or not self.config.animations:
             return
-        if ORDER.index(current) <= ORDER.index(previous):
+        step_up = ORDER.index(current) - ORDER.index(previous)
+        if step_up <= 0:
+            return          # celebrating the way down would be the wrong mood
+
+        level = ORDER.index(current)
+        label = {"max": "MAX EFFORT", "ultra": "ULTRA"}.get(
+            current, current.upper())
+
+        if not self.ui.live_ok:
+            # Chat layout: no repainting widget, so the band is drawn once.
+            celebrate(self.ui, label, level, step_up)
             return
-        if not self.config.animations:
-            return
-        style, label = heavy[current]
-        await surge(self.ui, label, style)
+
+        # The top two still get the moving version, which is worth the extra
+        # half second precisely because it does not happen often.
+        if current in ("max", "ultra"):
+            await surge(self.ui, label, ACCENT if current == "ultra" else BAR_ACCENT)
+        else:
+            celebrate(self.ui, label, level, step_up)
 
     async def cmd_model(self, args: list[str]) -> bool:
         """Switch model. With no argument this is the same capability-aware

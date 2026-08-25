@@ -913,3 +913,35 @@ class TestProviderErrorsNeverEscape:
         assert "malformed output" in blob
         assert "not a problem with your setup" in blob
         await agent.client.aclose()
+
+
+class TestGreetingsAreNotTasks:
+    """Alternation takes the first branch that matches, and h[ei]y? claimed
+    the "he" of "hello" before hello+ was ever tried -- leaving "llo there",
+    which is not small talk. So "hello there" was run as a task: at max
+    effort that means a plan, a document hunt and a verify round, for a
+    greeting.
+    """
+
+    @pytest.mark.parametrize("text", [
+        "hello", "hi", "hey", "yo", "sup", "hiya", "howdy",
+        "hello there", "hi there", "hey there", "hello again",
+        "hello!", "hey whats up", "good morning", "thanks", "cheers",
+    ])
+    def test_these_are_chatter(self, text):
+        from wynxo.agent import is_small_talk
+
+        assert is_small_talk(text) is True, f"{text!r} would start work"
+
+    @pytest.mark.parametrize("text", [
+        "hello world program",
+        "write hello world in python",
+        "hey can you refactor upload.py",
+        "hi, add a test for the parser",
+        "fix the retry helper",
+        "hello.py is broken",
+    ])
+    def test_these_are_work(self, text):
+        from wynxo.agent import is_small_talk
+
+        assert is_small_talk(text) is False, f"{text!r} would be brushed off"

@@ -599,3 +599,68 @@ class TestWithNoConsoleAtAll:
         import wynxo.tui as tui
 
         assert tui.usable() is False       # pytest's stdout is not a tty
+
+
+class TestCommandSuggestions:
+    """A Buffer with a completer will happily compute suggestions and show
+    none of them unless the layout contains a menu to float over it, which
+    is why /mo… stopped offering /model when the composer moved here.
+    """
+
+    def test_the_layout_has_somewhere_to_show_them(self):
+        from prompt_toolkit.layout.menus import CompletionsMenu
+
+        chat = ChatUI()
+        floats = chat.app.layout.container.floats
+        assert any(isinstance(f.content, CompletionsMenu) for f in floats)
+
+    def test_the_menu_follows_the_cursor(self):
+        """Anchored to the caret rather than the corner, so it appears over
+        the word being typed."""
+        chat = ChatUI()
+        menu = chat.app.layout.container.floats[0]
+        assert menu.xcursor and menu.ycursor
+
+    def test_the_completer_is_actually_attached(self):
+        from wynxo.cli import CommandCompleter
+
+        chat = ChatUI(completer=CommandCompleter(lambda: "."))
+        assert chat.buffer.completer is not None
+
+    def test_typing_a_prefix_offers_the_commands(self):
+        from prompt_toolkit.document import Document
+
+        from wynxo.cli import CommandCompleter
+
+        completer = CommandCompleter(lambda: ".")
+        found = [c.text for c in completer.get_completions(
+            Document("/mo", len("/mo")), None)]
+        assert "/model" in found and "/mode" in found
+
+
+class TestThePickerIsAlive:
+    def test_the_selected_row_is_coloured(self):
+        chat = ChatUI()
+        chat.picker = {"title": "effort",
+                       "options": [("low", "quick"), ("max", "everything")],
+                       "index": 1}
+        rows = chat._picker_lines(80)
+        assert "\x1b[38;2;" in rows[2], "the selection is not lit"
+
+    def test_the_others_stay_dim(self):
+        chat = ChatUI()
+        chat.picker = {"title": "effort",
+                       "options": [("low", "quick"), ("max", "everything")],
+                       "index": 1}
+        rows = chat._picker_lines(80)
+        assert "\x1b[38;2;" not in rows[1]
+
+    def test_the_colour_moves_over_time(self, monkeypatch):
+        import time as _time
+
+        chat = ChatUI()
+        chat.picker = {"title": "t", "options": [("a", "")], "index": 0}
+        monkeypatch.setattr(_time, "monotonic", lambda: 0.0)
+        first = chat._picker_lines(40)[1]
+        monkeypatch.setattr(_time, "monotonic", lambda: 5.0)
+        assert chat._picker_lines(40)[1] != first

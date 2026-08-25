@@ -59,7 +59,10 @@ _SMALL_TALK = re.compile(
     r"how\s+are\s+you(?:\s+(?:doing|today))?|how'?s\s+it\s+going|"
     r"what'?s?\s+up|wyd|how\s+are\s+things|"
     r"are\s+you\s+(?:there|awake|ready|alive)|test(?:ing)?"
-    r")"
+    # \b matters more than it looks: alternation takes the first branch that
+    # matches, so h[ei]y? claimed the "he" of "hello" and left "llo" behind,
+    # which is not small talk -- so "hello there" was treated as a task.
+    r")\b"
     r"[\s!.?~,:;)（）\-]*$",
     re.IGNORECASE,
 )
@@ -98,7 +101,7 @@ _PERSONAL = re.compile(
 # between them: "hey whats your name", "hi there".
 _GREETING_LEAD = re.compile(
     r"^\s*(?:h[ei]y?|hey+|hi+|hello+|yo|sup|hiya|howdy|heya|"
-    r"good\s*(?:morning|afternoon|evening|night))"
+    r"good\s*(?:morning|afternoon|evening|night))\b"
     r"(?:\s+(?:there|again|friend|buddy|mate))?\s*",
     re.IGNORECASE,
 )
