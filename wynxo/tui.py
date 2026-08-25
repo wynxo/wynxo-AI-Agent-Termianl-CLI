@@ -152,6 +152,11 @@ class ChatUI:
         self._unicode = unicode
         self._accent = accent
         self._closed = False
+        self.question = ""
+        self.answers: dict[str, str] = {}
+        self.answer: "asyncio.Future[str] | None" = None
+        self.picker: dict | None = None
+        self.picked: "asyncio.Future[str | None] | None" = None
 
         self.buffer = Buffer(multiline=False, completer=completer,
                              complete_while_typing=True,
@@ -191,9 +196,14 @@ class ChatUI:
         # composer rather than stranded at the top of an empty screen. That
         # is where a chat window puts it, and it keeps the newest line in the
         # same place on screen whether there are three lines or three hundred.
+        if picker := self._picker_lines(width):
+            # Sits at the foot of the conversation, which is where the eye
+            # already is and where the answer is about to be typed.
+            lines = lines[len(picker):] if len(lines) > len(picker) else []
+            lines = lines + picker
         if len(lines) < rows:
             lines = [""] * (rows - len(lines)) + lines
-        return ANSI("\n".join(lines))
+        return ANSI("\n".join(lines[-rows:]))
 
     def _status_fragments(self):
         text = self._status()
@@ -228,7 +238,7 @@ class ChatUI:
             content=BufferControl(buffer=self.buffer,
                                   input_processors=[]),
             height=1,
-            get_line_prefix=lambda *_: [("class:prompt", "│ > ")],
+            get_line_prefix=lambda *_: [("class:prompt", self._composer_prefix())],
         )
         layout = Layout(HSplit([
             transcript,
@@ -249,8 +259,24 @@ class ChatUI:
 
     # -- input -------------------------------------------------------------
 
+    def _composer_prefix(self) -> str:
+        """What sits to the left of the cursor: the usual caret, or the
+        question currently waiting for an answer."""
+        if self.asking:
+            return f"│ {self.question} "
+        return "│ > "
+
     def _accept(self, buff: Buffer) -> bool:
         text = buff.text
+        if self.asking:
+            # Typed out in full and entered, rather than answered with one
+            # key. Matched on the first letter so "yes" and "y" agree.
+            chosen = text.strip().lower()
+            for key in self.answers:
+                if chosen == key or (chosen and chosen[0] == key):
+                    self._resolve(key)
+                    return False
+            return False
         self.submissions.put_nowait(text)
         # False: do not keep the text in the buffer. The transcript is where
         # what you said belongs, and the composer should be empty and ready.
@@ -260,8 +286,49 @@ class ChatUI:
         keys = KeyBindings()
         scrolling = Condition(lambda: True)
 
+        @keys.add("<any>", filter=Condition(lambda: self.asking),
+                  eager=True)
+        def _(event):
+            key = str(event.data).lower()
+            if key in self.answers:
+                self._resolve(key)
+            elif key in ("\r", "\n"):
+                self._resolve(next(iter(self.answers), "n"))
+            # Anything else is ignored rather than typed into the composer:
+            # a question is a question, not a text field.
+
+        picking = Condition(lambda: self.picking)
+
+        @keys.add("up", filter=picking, eager=True)
+        def _(event):
+            count = len(self.picker["options"])
+            self.picker["index"] = (self.picker["index"] - 1) % count
+
+        @keys.add("down", filter=picking, eager=True)
+        def _(event):
+            count = len(self.picker["options"])
+            self.picker["index"] = (self.picker["index"] + 1) % count
+
+        @keys.add("enter", filter=picking, eager=True)
+        def _(event):
+            if self.picked is not None and not self.picked.done():
+                index = self.picker["index"]
+                self.picked.set_result(self.picker["options"][index][0])
+
+        @keys.add("escape", filter=picking, eager=True)
+        def _(event):
+            if self.picked is not None and not self.picked.done():
+                self.picked.set_result(None)
+
         @keys.add("c-c")
         def _(event):
+            if self.picking:
+                if not self.picked.done():
+                    self.picked.set_result(None)
+                return
+            if self.asking:
+                self._resolve("q")      # stop, the same as answering "stop"
+                return
             # Interrupts the turn rather than killing the app: the whole
             # reason the composer stays on screen is that the session
             # survives the answer being cut short.
@@ -288,6 +355,95 @@ class ChatUI:
             self.scroll = 0
 
         return keys
+
+    # -- choosing, with arrows, without a second application ---------------
+
+    async def choose(self, title: str, options: list[tuple[str, str]],
+                     current: str = "") -> str | None:
+        """An arrow-key picker drawn at the foot of the conversation.
+
+        The standalone picker is its own prompt_toolkit application, and one
+        cannot run inside another -- so in this layout every settings command
+        would have degraded to printing a table, which is the behaviour this
+        project has twice been asked to stop doing. Drawn here instead, with
+        the same keys.
+
+        Returns the chosen value, or None if the user pressed escape.
+        """
+        self.picker = {
+            "title": title,
+            "options": options,
+            "index": max(0, next((i for i, (name, _) in enumerate(options)
+                                  if name == current), 0)),
+        }
+        self.picked = asyncio.get_event_loop().create_future()
+        self.invalidate()
+        try:
+            return await self.picked
+        finally:
+            self.picker = None
+            self.picked = None
+            self.invalidate()
+
+    @property
+    def picking(self) -> bool:
+        return self.picked is not None and not self.picked.done()
+
+    def _picker_lines(self, width: int) -> list[str]:
+        picker = self.picker
+        if not picker:
+            return []
+        accent, dim, reset = "\x1b[35m", "\x1b[38;5;247m", "\x1b[0m"
+        mark = "❯" if self._unicode else ">"
+        lines = [f"{accent}  {picker['title']}{reset}"]
+        for i, (name, hint) in enumerate(picker["options"]):
+            chosen = i == picker["index"]
+            head = f"{accent}{mark} {name}{reset}" if chosen else f"  {dim}{name}{reset}"
+            body = f"{head}  {dim}{hint}{reset}" if hint else head
+            lines.append("  " + body[:width * 6])
+        lines.append(f"{dim}  arrows move  ·  enter chooses  ·  esc cancels{reset}")
+        return lines
+
+    # -- asking a question without a second application --------------------
+
+    async def ask(self, question: str, answers: dict[str, str],
+                  default: str = "") -> str:
+        """Put a question in the composer row and wait for the answer.
+
+        A second prompt_toolkit application cannot run inside this one --
+        attempting it leaves the layout half-drawn, the border gone and the
+        question typed over the composer, which is exactly what the first
+        version did. So the question is asked through the composer that is
+        already here: single keys answer immediately, and anything typed and
+        entered is matched too.
+        """
+        self.question = question
+        self.answers = answers
+        self.answer = asyncio.get_event_loop().create_future()
+        self.invalidate()
+        try:
+            return await self.answer
+        except asyncio.CancelledError:
+            # The session is going away, not the user declining. Answered as
+            # "stop" so the turn unwinds, then re-raised so shutdown carries
+            # on unwinding too.
+            if self.answer is not None and not self.answer.done():
+                self.answer.cancel()
+            raise
+        finally:
+            self.question = ""
+            self.answers = {}
+            self.answer = None
+            self.invalidate()
+
+    def _resolve(self, key: str) -> None:
+        if self.answer is None or self.answer.done():
+            return
+        self.answer.set_result(key)
+
+    @property
+    def asking(self) -> bool:
+        return self.answer is not None and not self.answer.done()
 
     # -- the api the repl uses ---------------------------------------------
 

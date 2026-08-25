@@ -247,6 +247,11 @@ class CommandCompleter(Completer):
 class TerminalCallbacks(Callbacks):
     """Wires the agent's events to the terminal."""
 
+    chat = None
+    """Set when the session is using the chat layout, so questions are asked
+    through the composer already on screen rather than by starting a second
+    application inside the running one."""
+
     def __init__(self, ui: UI, prompt_session: PromptSession | None = None):
         self.ui = ui
         # None in non-interactive mode, where nothing can be asked anyway.
@@ -402,7 +407,7 @@ class TerminalCallbacks(Callbacks):
 
     async def ask_permission(self, name: str, summary: str, preview: str) -> Decision:
         self._end_stream()
-        if self.prompt_session is None:
+        if self.prompt_session is None and self.chat is None:
             return Decision.ALLOW
         try:
             return await self._ask(name, summary, preview)
@@ -436,6 +441,18 @@ class TerminalCallbacks(Callbacks):
         if preview:
             self.ui.diff(preview) if preview.lstrip().startswith(("---", "+", "-")) else self.ui.code(preview)
 
+        if self.chat is not None:
+            # Asked through the composer that is already on screen. Starting
+            # a second prompt_toolkit application inside the running one
+            # leaves the layout half-drawn -- border gone, question typed
+            # over the input -- which is what it did before this branch.
+            self.chat.flush()
+            answer = await self.chat.ask(
+                "[y] yes  [a] always  [n] no  [q] stop:",
+                {"y": "yes", "a": "always", "n": "no", "q": "stop"})
+            return {"y": Decision.ALLOW, "a": Decision.ALLOW_ALWAYS,
+                    "n": Decision.DENY}.get(answer, Decision.ABORT)
+
         while True:
             try:
                 answer = (await self.prompt_session.prompt_async(
@@ -455,6 +472,11 @@ class TerminalCallbacks(Callbacks):
 
 
 class Repl:
+    chat: "tui.ChatUI | None" = None
+    """The pinned-composer layout, when this session uses it. A class-level
+    default so a Repl built without __init__ -- which tests do -- still
+    answers the question rather than raising."""
+
     def __init__(self, config: Config, workspace: Path, ui: UI,
                  scope: Scope = Scope.FOLDER, mode: Mode = Mode.MANUAL):
         self.config = config
@@ -553,8 +575,7 @@ class Repl:
         # session. Left as an inert Screen so /fullscreen works the same in
         # tests and in an embedded Repl that nobody wrapped.
         self.screen = fullscreen.Screen(enabled=False)
-        self.chat: "tui.ChatUI | None" = None
-        """The pinned-composer layout, when this session is using it."""
+        self.chat = None
 
     def use_chat_layout(self) -> "tui.ChatUI":
         """Switch rendering into the chat layout.
@@ -2134,6 +2155,12 @@ class Repl:
         unable to offer a choice are different things: escape means "never
         mind", and printing the table anyway ignores that.
         """
+        if self.chat is not None:
+            # Drawn inside the running application. The standalone picker is
+            # its own prompt_toolkit app, and one cannot run inside another
+            # -- without this every settings command would fall back to
+            # printing a table, which is the thing this was built to replace.
+            return await self.chat.choose(title, options, current)
         if not arrows_supported():
             return NO_PICKER
         chosen = await choose(

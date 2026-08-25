@@ -302,3 +302,206 @@ class TestNoLiveWidgetWritesIntoTheBuffer:
         page.drain()
         body = "\n".join(page.lines)
         assert "?25" not in body and "\r" not in body
+
+
+class TestAskingInsideTheRunningApp:
+    """A second prompt_toolkit application cannot run inside this one.
+
+    Trying left the layout half-drawn -- bottom border gone, the question
+    typed over the composer -- so both the permission prompt and the arrow
+    picker are drawn by the application that is already running.
+    """
+
+    @pytest.fixture
+    def chat(self):
+        return ChatUI(status=lambda: "")
+
+    def _press(self, chat, key: str, data: str = ""):
+        import types
+
+        for binding in chat.app.key_bindings.bindings:
+            if key in str(binding.keys):
+                binding.handler(types.SimpleNamespace(data=data, app=chat.app))
+                return True
+        return False
+
+    def test_a_single_key_answers(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.ask("[y] yes [n] no:", {"y": "yes", "n": "no"}))
+            await asyncio.sleep(0)
+            self._press(chat, "<any>", "y")
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) == "y"
+
+    def test_the_question_replaces_the_caret(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.ask("[y] yes [n] no:", {"y": "yes", "n": "no"}))
+            await asyncio.sleep(0)
+            prefix = chat._composer_prefix()
+            self._press(chat, "<any>", "n")
+            await asyncio.wait_for(pending, 1)
+            return prefix
+
+        assert "[y] yes" in asyncio.run(go())
+
+    def test_the_caret_comes_back_afterwards(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(chat.ask("?", {"y": "yes"}))
+            await asyncio.sleep(0)
+            self._press(chat, "<any>", "y")
+            await asyncio.wait_for(pending, 1)
+
+        asyncio.run(go())
+        assert chat._composer_prefix() == "│ > "
+
+    def test_a_typed_word_answers_too(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.ask("?", {"y": "yes", "n": "no"}))
+            await asyncio.sleep(0)
+            chat.buffer.text = "yes"
+            chat.buffer.validate_and_handle()
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) == "y"
+
+    def test_an_unrelated_key_is_ignored_not_typed(self, chat):
+        """A question is a question, not a text field."""
+        async def go():
+            pending = asyncio.ensure_future(chat.ask("?", {"y": "yes"}))
+            await asyncio.sleep(0)
+            self._press(chat, "<any>", "z")
+            assert not pending.done()
+            self._press(chat, "<any>", "y")
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) == "y"
+
+    def test_a_question_does_not_reach_the_turn_queue(self, chat):
+        """Answering must not be mistaken for the next thing you said."""
+        async def go():
+            pending = asyncio.ensure_future(chat.ask("?", {"y": "yes"}))
+            await asyncio.sleep(0)
+            chat.buffer.text = "y"
+            chat.buffer.validate_and_handle()
+            await asyncio.wait_for(pending, 1)
+
+        asyncio.run(go())
+        assert chat.submissions.empty()
+
+
+class TestThePickerInsideTheApp:
+    @pytest.fixture
+    def chat(self):
+        return ChatUI(status=lambda: "")
+
+    OPTIONS = [("purple", "deep violet"), ("sakura", "pink"),
+               ("midnight", "cool blue")]
+
+    # prompt_toolkit normalises "enter" to ControlM, so the binding does not
+    # answer to the name it was registered under.
+    ALIASES = {"enter": "c-m"}
+
+    def _press(self, chat, key: str):
+        import types
+
+        wanted = self.ALIASES.get(key, key)
+        for binding in chat.app.key_bindings.bindings:
+            if wanted in str(binding.keys):
+                binding.handler(types.SimpleNamespace(data="", app=chat.app))
+                return True
+        raise AssertionError(f"no binding for {key!r}")
+
+    def test_arrows_move_and_enter_chooses(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.choose("theme", self.OPTIONS, "purple"))
+            await asyncio.sleep(0)
+            self._press(chat, "down")
+            self._press(chat, "down")
+            self._press(chat, "enter")
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) == "midnight"
+
+    def test_it_starts_on_the_current_value(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.choose("theme", self.OPTIONS, "sakura"))
+            await asyncio.sleep(0)
+            self._press(chat, "enter")
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) == "sakura"
+
+    def test_the_selection_wraps(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.choose("theme", self.OPTIONS, "purple"))
+            await asyncio.sleep(0)
+            self._press(chat, "up")          # off the top, round to the end
+            self._press(chat, "enter")
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) == "midnight"
+
+    def test_escape_cancels_without_choosing(self, chat):
+        """Cancelling and being unable to offer a choice are different, and
+        printing the table anyway would ignore that."""
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.choose("theme", self.OPTIONS, "purple"))
+            await asyncio.sleep(0)
+            self._press(chat, "escape")
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) is None
+
+    def test_ctrl_c_cancels_the_picker_not_the_session(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.choose("theme", self.OPTIONS, "purple"))
+            await asyncio.sleep(0)
+            self._press(chat, "c-c")
+            return await asyncio.wait_for(pending, 1)
+
+        assert asyncio.run(go()) is None
+        assert not chat.app.is_done
+
+    def test_it_is_drawn_at_the_foot_of_the_conversation(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.choose("theme", self.OPTIONS, "purple"))
+            await asyncio.sleep(0)
+            body = str(chat._transcript_fragments().value)
+            self._press(chat, "escape")
+            await asyncio.wait_for(pending, 1)
+            return body
+
+        body = asyncio.run(go())
+        assert "theme" in body and "midnight" in body
+        assert "arrows move" in body
+
+    def test_it_leaves_no_trace_afterwards(self, chat):
+        async def go():
+            pending = asyncio.ensure_future(
+                chat.choose("theme", self.OPTIONS, "purple"))
+            await asyncio.sleep(0)
+            self._press(chat, "escape")
+            await asyncio.wait_for(pending, 1)
+
+        asyncio.run(go())
+        assert chat.picker is None
+        assert "arrows move" not in str(chat._transcript_fragments().value)
+
+    def test_the_repl_routes_pickers_here(self):
+        import inspect
+
+        from wynxo.cli import Repl
+
+        source = inspect.getsource(Repl._pick)
+        assert "self.chat.choose" in source
+        assert source.index("self.chat") < source.index("arrows_supported")
