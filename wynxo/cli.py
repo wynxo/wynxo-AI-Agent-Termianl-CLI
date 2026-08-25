@@ -2685,6 +2685,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--setup", action="store_true", help="re-run first-time setup")
     parser.add_argument("--doctor", action="store_true",
                         help="check the server and model, and report what will not work")
+    parser.add_argument("--ascii", metavar="IMAGE",
+                        help="turn a picture into ASCII art and print it")
+    parser.add_argument("--ascii-width", type=int, default=100,
+                        metavar="N", help="columns wide (default 100)")
+    parser.add_argument("--ascii-style", default="detail",
+                        choices=("detail", "simple", "blocks"),
+                        help="character ramp to draw with")
+    parser.add_argument("--ascii-invert", action="store_true",
+                        help="for a light terminal, where the ramp reads "
+                             "the other way round")
     parser.add_argument("--classic", action="store_true",
                         help="the scrolling prompt instead of the chat layout")
     parser.add_argument("--chat", action="store_true",
@@ -2715,6 +2725,12 @@ async def amain(argv: list[str] | None = None) -> int:
         return 1
 
     ui = UI(show_thinking=not args.no_thinking)
+
+    # Before the configuration gate on purpose: turning a local picture into
+    # text needs no model and no server, so being unconfigured is irrelevant
+    # to it and asking the user to run setup first would be nonsense.
+    if args.ascii:
+        return _print_ascii(args, ui)
 
     if args.repo:
         from . import repo as repo_module
@@ -2868,6 +2884,34 @@ async def amain(argv: list[str] | None = None) -> int:
             if prompt:
                 return await repl.start_with(prompt)
             return await repl.start()
+
+
+def _print_ascii(args, ui: UI) -> int:
+    """Print a picture as text.
+
+    Deliberately not part of a turn: it is a local conversion of a local
+    file, so it neither needs a model nor sends the image anywhere.
+    """
+    from . import asciiart
+
+    source = Path(args.ascii).expanduser()
+    if not source.is_file():
+        ui.error(f"{source} is not a file.")
+        return 1
+    width = max(20, min(400, args.ascii_width))
+    try:
+        art = asciiart.from_image(source, width=width, style=args.ascii_style,
+                                  invert=args.ascii_invert)
+    except asciiart.ImageSupportMissing as exc:
+        ui.error(str(exc))
+        return 1
+    except (OSError, ValueError) as exc:
+        ui.error(f"Could not read {source.name}: {exc}")
+        return 1
+    # Straight to stdout, unstyled: this is meant to be redirected into a
+    # file and pasted into a banner, and rich would wrap and colour it.
+    print(art)
+    return 0
 
 
 def _write_crash_report(exc: BaseException) -> "Path | None":
