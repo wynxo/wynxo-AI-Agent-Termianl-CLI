@@ -124,6 +124,87 @@ class TestCodeStreaming:
         assert "in the docs" in out
 
 
+class TestInlineCodeInTheModelsProse:
+    """`like this` reads as code in every chat window there is, and a local
+    model writes it constantly. It was arriving as literal backticks.
+
+    Toggled per character rather than matched per finished line, because a
+    line is not finished when it is drawn -- and by the time it is, its
+    characters have already gone to the terminal and cannot be restyled.
+    """
+
+    STRIP = r"\x1b\[[0-9;]*m"
+
+    def _stream(self, text, with_bar=True, **kwargs):
+        import io
+
+        from rich.console import Console
+
+        from wynxo.ui import ActivityBar, CodeStreamer
+
+        ui = UI()
+        ui.console = Console(file=io.StringIO(), force_terminal=True, width=70)
+        if with_bar:
+            ui.live_ok = False
+            ui.bar = ActivityBar(ui, "low")
+            ui.bar.set_lead = lambda line: None
+        streamer = CodeStreamer(ui, **kwargs)
+        for character in text:
+            streamer.feed(character)
+        streamer.finish()
+        return ui.console.file.getvalue()
+
+    def _plain(self, written):
+        import re
+
+        return re.sub(self.STRIP, "", written)
+
+    @pytest.mark.parametrize("with_bar", [True, False])
+    def test_the_backticks_are_not_shown(self, with_bar):
+        written = self._plain(
+            self._stream("call `fetch(url)` first\n", with_bar))
+        assert "fetch(url)" in written
+        assert "`" not in written
+
+    @pytest.mark.parametrize("with_bar", [True, False])
+    def test_the_span_is_coloured(self, with_bar):
+        from wynxo.ui import CODE_SPAN
+
+        written = self._stream("call `fetch(url)` first\n", with_bar)
+        assert "\x1b[" in written, "no styling at all"
+        # The colour is a real one, not whatever rich felt like.
+        assert CODE_SPAN.lstrip("#")
+
+    def test_it_costs_one_span_not_one_per_letter(self):
+        """A span per character is what made a coloured line cost an escape
+        pair per letter."""
+        short = self._stream("a `xy` b\n").count("\x1b[")
+        long = self._stream("a `xyxyxyxyxyxyxyxyxyxy` b\n").count("\x1b[")
+        assert short == long
+
+    def test_an_unpaired_backtick_stops_at_the_end_of_the_line(self):
+        """Otherwise one stray mark colours the rest of the answer."""
+        written = self._stream("a lone ` here\nand a plain line\n")
+        tail = written.split("and a plain line")[-1]
+        assert "\x1b[" not in tail.rstrip()[:-1] or tail.count("\x1b[") <= 1
+
+    def test_a_file_being_written_keeps_its_backticks(self):
+        """Inside a file's contents a backtick is just a character -- a
+        shell script full of them must arrive intact."""
+        written = self._plain(
+            self._stream("echo `date`\n", literal=True, code=False))
+        assert "`date`" in written
+
+    def test_a_fenced_block_is_untouched(self):
+        written = self._plain(
+            self._stream("```sh\necho `date`\n```\n"))
+        assert "`date`" in written
+
+    def test_the_words_either_side_are_unharmed(self):
+        written = self._plain(self._stream("use `x` and `y` now\n"))
+        assert "use x and y now" in written
+
+
 class TestSomebodyElsesTextCannotDriveTheTerminal:
     """A terminal acts on escape sequences in what it is shown.
 

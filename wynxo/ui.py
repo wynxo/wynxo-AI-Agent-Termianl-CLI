@@ -43,6 +43,20 @@ BAD = PALETTE.bad
 BAR_STYLE = f"on {PALETTE.bar_bg}"
 BAR_ACCENT = PALETTE.bar_accent
 BAR_DIM = PALETTE.bar_dim
+def _ansi_of(style: str) -> str:
+    """One rich style as the escape that turns it on."""
+    from rich.style import Style
+
+    try:
+        return Style.parse(style).render("\x00").split("\x00")[0]
+    except Exception:
+        return ""
+
+
+CODE_SPAN = "#e6c07b"
+"""`inline code` in the model's prose. Warm against the purple, so it reads
+as a name rather than as emphasis."""
+
 MIN_ACTIVITY_WIDTH = 16
 """Cells kept for the activity text before the stats start claiming space."""
 
@@ -601,6 +615,15 @@ class CodeStreamer:
         """The half-written code line, while inside a fence."""
         self.word = ""
         """The word being typed, so a wrap can carry it down whole."""
+        self.in_span = False
+        """Inside a `code span`. Reset at every newline, so an unpaired
+        backtick colours one line rather than the rest of the answer."""
+        self._pen_shown = ""
+        """The style the terminal is currently set to, when writing to it
+        directly. Only used where there is no bar to redraw through."""
+        self.marks_code = not literal
+        """Whether backticks mean anything here. Inside a file being written
+        they are just characters."""
         self.line = self._blank()
         """The line being written. While the activity bar is up this is the
         bar's lead line rather than terminal output, so a partial line and a
@@ -761,6 +784,15 @@ class CodeStreamer:
         and what the eye expects.
         """
         for char in text:
+            # `like this` reads as code in every chat window there is, and
+            # the model writes it constantly. Toggled per character rather
+            # than matched per line, because a line is not finished when it
+            # is drawn -- and by the time it is, its characters have already
+            # gone to the terminal and cannot be restyled.
+            if char == "`" and self.marks_code:
+                self.in_span = not self.in_span
+                continue
+
             if char.isspace():
                 self.word = ""
                 if self.column:
@@ -809,6 +841,39 @@ class CodeStreamer:
         """A fresh line, styled once for all of it."""
         return Text(text, style=self.style or "")
 
+    @property
+    def _pen(self) -> str:
+        """The style for what is being written right now."""
+        return CODE_SPAN if self.in_span else ""
+
+    def _stylize(self, style: str, start: int, end: int) -> None:
+        """Style a slice, growing the previous span where it can.
+
+        A code span arrives one character at a time like everything else,
+        and a span per character is what made a coloured line cost an escape
+        pair per letter. Adjacent characters in the same style are one span.
+        """
+        spans = self.line.spans
+        if spans:
+            last = spans[-1]
+            if last.end == start and last.style == style:
+                try:
+                    spans[-1] = last._replace(end=end)
+                    return
+                except AttributeError:
+                    pass          # a rich that does not use a NamedTuple
+        self.line.stylize(style, start, end)
+
+    def _pen_change(self) -> str:
+        """The escape needed to bring the terminal to the current pen."""
+        wanted = self._pen
+        if wanted == self._pen_shown:
+            return ""
+        self._pen_shown = wanted
+        if not wanted:
+            return "\x1b[0m"
+        return _ansi_of(wanted)
+
     def _write(self, text: str) -> None:
         """Add to the line in progress.
 
@@ -825,17 +890,24 @@ class CodeStreamer:
         live region like any other output.
         """
         self._ensure_started()
-        # Plain: the line carries the style, not each character. Appending
-        # with a style creates a span per call, and calls are per character
-        # now -- which turned every streamed line into one escape pair per
-        # letter, ten bytes of colour for each byte of text, all of it kept
-        # in the transcript and re-rendered on every repaint.
+        # Plain unless something is emphasised: the line carries the style,
+        # not each character. Appending with a style creates a span per
+        # call, and calls are per character now -- which turned every
+        # streamed line into one escape pair per letter, ten bytes of colour
+        # for each byte of text, all of it kept in the transcript and
+        # re-rendered on every repaint.
+        start = len(self.line.plain)
         self.line.append(text)
+        if pen := self._pen:
+            self._stylize(pen, start, start + len(text))
         self.column += cell_len(text)
         if self.ui.bar is not None:
             self.ui.bar.set_lead(self.line)
         else:
-            self.ui.console.file.write(text)
+            # Straight to the terminal, so the colour has to be written as
+            # well as chosen -- and only when it changes, or every character
+            # would carry its own escape pair.
+            self.ui.console.file.write(self._pen_change() + text)
             self.ui.console.file.flush()
 
     def _newline(self) -> None:
@@ -845,10 +917,13 @@ class CodeStreamer:
                 self.ui.console.print(self.line, markup=False, highlight=False,
                                       soft_wrap=True)
             else:
-                self.ui.console.file.write("\n")
+                self.ui.console.file.write(
+                    ("\x1b[0m" if self._pen_shown else "") + "\n")
                 self.ui.console.file.flush()
         self.line = self._blank()
         self.column = 0
+        self.in_span = False
+        self._pen_shown = ""
 
     def _ensure_started(self) -> None:
         if not self.started:
