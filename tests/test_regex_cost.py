@@ -27,8 +27,13 @@ import pytest
 
 import wynxo
 
-SMALL, LARGE = 5_000, 20_000
-"""Four times the text. Linear costs ~4x more; quadratic ~16x."""
+SMALL, LARGE = 10_000, 40_000
+"""Four times the text. Linear costs ~4x more; quadratic ~16x.
+
+Sized so a quadratic pattern is unmistakable rather than marginal. At
+20,000 characters the markdown-link rule came in at 0.226s against a
+0.25s floor: it passed here and failed on CI. The bug was real either
+way, and all the smaller sample decided was which machine found out."""
 
 FLOOR = 0.25
 """Seconds. Below this a pattern is fast enough that the ratio is only
@@ -59,6 +64,10 @@ def _probes(size: int) -> dict[str, str]:
         "lines": "ab\n" * (size // 3),
         "digits": "1234567890" * (size // 10),
         "identifiers": "Ab1_-." * (size // 6),
+        "unclosed": "[<({" * (size // 4),
+        "tagish": "<a b" * (size // 4),
+        "rules": "-=_ " * (size // 4),
+        "emphasis": "**a" * (size // 3),
     }
 
 

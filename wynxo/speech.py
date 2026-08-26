@@ -114,7 +114,16 @@ _FENCE = re.compile(r"```.*?```", re.DOTALL)
 _INLINE_CODE = re.compile(r"`([^`]*)`")
 _TOOL_CALL = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL | re.IGNORECASE)
 _THINK = re.compile(r"<(think|thinking|reasoning)>.*?</\1>", re.DOTALL | re.IGNORECASE)
-_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+# The link text cannot contain "[" either. Without that exclusion the
+# class eats to the end of the answer at every "[", fails to find the
+# closing bracket, and gives the characters back one at a time -- and
+# an answer full of unclosed brackets (a log dump, array indexing, raw
+# escape sequences) is not unusual. CPython 3.11 optimises the worst of
+# it away; on 3.10 an 80k answer took three and a half seconds.
+#
+# It also reads the way CommonMark does: in "[a [b](c)" the inner link
+# is the link.
+_LINK = re.compile(r"\[([^\][]+)\]\([^)]*\)")
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s*", re.MULTILINE)
 _BULLET = re.compile(r"^\s*[-*+]\s+", re.MULTILINE)
 _EMPHASIS = re.compile(r"(\*\*|__|\*|_)(.+?)\1", re.DOTALL)

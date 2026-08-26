@@ -400,6 +400,20 @@ class TestSpeakableStaysFastOnLongAnswers:
         speech.speakable("a.b-c_d" * 6_000, limit=10 ** 9)
         assert time.perf_counter() - start < self.BUDGET
 
+    def test_a_long_answer_full_of_unclosed_brackets(self):
+        # What the link rule chokes on: an opening bracket everywhere and a
+        # closing one nowhere. A log dump or raw escape sequences look like
+        # this. CPython 3.11 hides most of the cost; 3.10 does not.
+        import time
+
+        start = time.perf_counter()
+        speech.speakable("\x1b[31ma" * 27_000, limit=10 ** 9)
+        assert time.perf_counter() - start < self.BUDGET
+
+    def test_links_still_read_as_their_text(self):
+        assert speech.speakable("see [the readme](http://x/y) now") == (
+            "see the readme now")
+
     def test_paths_still_come_out_of_a_long_answer(self):
         text = "x" * 20_000 + " open src/main.py now " + "y" * 20_000
         spoken = speech.speakable(text, limit=10 ** 9)
