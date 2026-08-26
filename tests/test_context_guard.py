@@ -127,3 +127,77 @@ class TestTheAgentSuppliesTheNumber:
         asyncio.run(agent._run_one(
             ToolCall(name="read_file", arguments={"path": "x.py"}, call_id="1")))
         assert tool.context_left == 0
+
+
+class TestSayingSoWhenItNoLongerFits:
+    """Ollama does not refuse an over-long prompt. It drops the far end and
+    answers anyway, so the model stops being able to see the beginning of
+    the task and the only symptom is that it behaves as though it was never
+    told. Compaction handles the common case; this is for the one it
+    cannot -- a single message already larger than the window."""
+
+    def _agent(self, tmp_path, num_ctx):
+        from wynxo.agent import Agent, Callbacks
+        from wynxo.config import Config
+        from wynxo.effort import resolve
+        from wynxo.provider import OllamaClient
+
+        class Listening(Callbacks):
+            def __init__(self):
+                self.warnings = []
+
+            async def on_warning(self, message):
+                self.warnings.append(message)
+
+        config = Config()
+        config.num_ctx = num_ctx
+        callbacks = Listening()
+        agent = Agent(OllamaClient(config), config, resolve("low"), tmp_path,
+                      callbacks)
+        return agent, callbacks
+
+    def test_it_says_so(self, tmp_path):
+        import asyncio
+
+        agent, callbacks = self._agent(tmp_path, num_ctx=2_048)
+        agent.session.add_user("x" * 40_000)
+        asyncio.run(agent._warn_if_over_the_window())
+        assert callbacks.warnings
+        assert "2048" in callbacks.warnings[0]
+        assert "/compact" in callbacks.warnings[0] or "--ctx" in callbacks.warnings[0]
+
+    def test_only_once_a_turn(self, tmp_path):
+        import asyncio
+
+        agent, callbacks = self._agent(tmp_path, num_ctx=2_048)
+        agent.session.add_user("x" * 40_000)
+
+        async def go():
+            for _ in range(5):
+                await agent._warn_if_over_the_window()
+
+        asyncio.run(go())
+        assert len(callbacks.warnings) == 1
+
+    def test_nothing_to_say_when_it_fits(self, tmp_path):
+        import asyncio
+
+        agent, callbacks = self._agent(tmp_path, num_ctx=200_000)
+        agent.session.add_user("a short question")
+        asyncio.run(agent._warn_if_over_the_window())
+        assert callbacks.warnings == []
+
+    def test_an_unknown_window_says_nothing(self, tmp_path):
+        import asyncio
+
+        agent, callbacks = self._agent(tmp_path, num_ctx=0)
+        agent.session.add_user("x" * 40_000)
+        asyncio.run(agent._warn_if_over_the_window())
+        assert callbacks.warnings == []
+
+    def test_the_loop_asks(self):
+        import inspect
+
+        from wynxo.agent import Agent
+
+        assert "_warn_if_over_the_window" in inspect.getsource(Agent._act)

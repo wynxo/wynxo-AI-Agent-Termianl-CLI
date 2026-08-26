@@ -207,6 +207,8 @@ class Agent:
         self.memory = memory or Memory(workspace)
         self.checkpoints = Checkpoints()
         self._turn_mark = 0
+        self._warned_over_window = False
+        """Said once per turn: it is the same news on every iteration."""
         self.shield = Shield(workspace, enabled=config.protect_secrets)
         self.tools = registry or build_registry(
             workspace, allow_shell=config.allow_shell,
@@ -792,6 +794,7 @@ class Agent:
             if self.session.should_compact(self.policy.context_budget, self.config.num_ctx):
                 await self._compact()
                 result.compacted = True
+            await self._warn_if_over_the_window()
 
             try:
                 turn = await self._call_model()
@@ -828,6 +831,34 @@ class Agent:
         )
         result.content = "(stopped: iteration limit reached)"
         return result
+
+    async def _warn_if_over_the_window(self) -> None:
+        """Say so when the conversation no longer fits the model's window.
+
+        Ollama does not refuse an over-long prompt; it drops the far end of
+        it and answers anyway. So the model stops being able to see the
+        beginning of the task -- the instruction, usually -- and the only
+        symptom is that it starts behaving as though it was never told.
+
+        Compaction handles the common case. This is for the one it cannot:
+        a single message, or a system prompt and one file, already larger
+        than the window. Once per turn, because it is the same news every
+        iteration.
+        """
+        window = self.config.num_ctx
+        if window <= 0 or self._warned_over_window:
+            return
+        used = self.session.token_estimate()
+        if used <= window:
+            return
+        self._warned_over_window = True
+        await self.cb.on_warning(
+            f"This conversation is about {used} tokens and the model's window "
+            f"is {window}. Ollama drops the oldest part of an over-long "
+            "prompt without saying so, so it can no longer see the start of "
+            "the task. /compact summarises what is there, or restart with a "
+            "larger --ctx."
+        )
 
     async def _compact(self) -> None:
         """Summarise the older half of the conversation to reclaim context."""
@@ -882,6 +913,7 @@ class Agent:
         # was actually changed. A turn that only answered a question has
         # nothing new to break.
         self._turn_mark = self.checkpoints.mark()
+        self._warned_over_window = False
 
         # "hello" is not a task. Without this the planning scaffold at high
         # effort turns a greeting into invented work -- see is_small_talk().
