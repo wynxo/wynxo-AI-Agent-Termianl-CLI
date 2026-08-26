@@ -26,7 +26,8 @@ from .discovery import Found, private_subnets, scan_loopback, scan_subnets, veri
 from .platforms import ollama_server_help as server_help  # re-exported
 from .provider import OllamaClient, ProviderError, inspect_all
 from .select import (
-    HINT, HINT_ASCII, Choice, choose, supported as arrows_supported)
+    HINT, HINT_ASCII, Choice, choose, silence_cpr_warning,
+    supported as arrows_supported)
 from rich.text import Text
 
 from .ui import ACCENT, MUTED, UI
@@ -443,6 +444,12 @@ async def run_wizard(ui: UI) -> Config:
     ui.console.print(f"  [{MUTED}]Four questions. Everything is changeable later.[/]")
 
     prompt_session: PromptSession = PromptSession()
+    # The first thing a new user sees must not be prompt_toolkit warning
+    # that their terminal does not answer cursor position requests. Plenty
+    # do not -- a serial console, Termux, a pty without one -- and nothing
+    # here needs the answer. The REPL has silenced this since it was built;
+    # setup, which runs before it, never did.
+    silence_cpr_warning(prompt_session.app)
     config = Config()
 
     endpoint = await ask_endpoint(ui, prompt_session)

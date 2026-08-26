@@ -686,3 +686,45 @@ class TestNothingReachesTheUserAsATraceback:
         source = inspect.getsource(cli.main)
         assert "except SystemExit" in source
         assert source.index("except SystemExit") < source.index("BaseException")
+
+
+class TestNothingWarnsAboutCursorPositions:
+    """prompt_toolkit prints "your terminal doesn't support cursor position
+    requests" into the middle of whatever is on screen when the terminal
+    does not answer one -- a serial console, Termux, a pty without one.
+
+    The REPL has silenced it since it was built. Setup, which runs before
+    the REPL and is the first thing a new user ever sees, did not: the
+    warning landed between the question and its input line.
+    """
+
+    def test_the_helper_silences_it(self):
+        from prompt_toolkit import PromptSession
+
+        from wynxo.select import silence_cpr_warning
+
+        session = PromptSession()
+        session.app.renderer.cpr_not_supported_callback = lambda: None
+        silence_cpr_warning(session.app)
+        assert session.app.renderer.cpr_not_supported_callback is None
+
+    def test_it_survives_an_application_without_one(self):
+        from wynxo.select import silence_cpr_warning
+
+        silence_cpr_warning(object())      # must not raise
+
+    def test_setup_silences_it_too(self):
+        import inspect
+
+        from wynxo.wizard import run_wizard
+
+        source = inspect.getsource(run_wizard)
+        assert "silence_cpr_warning" in source
+        assert source.index("silence_cpr_warning") < source.index("ask_endpoint")
+
+    def test_the_repl_still_does(self):
+        import inspect
+
+        from wynxo.cli import Repl
+
+        assert "silence_cpr_warning" in inspect.getsource(Repl.__init__)
