@@ -335,6 +335,44 @@ def remove_tree(path: Path, dry_run: bool) -> bool:
         return False
 
 
+def prune_empty_parents(path: Path, dry_run: bool) -> list[Path]:
+    """Remove directories wynxo created on its way in, if nothing else uses them.
+
+    A machine that had never had an XDG layout gets ~/.config and
+    ~/.local/share made for it the first time wynxo saves anything. Leaving
+    those behind is a mark, and "wynxo can be removed without leaving marks"
+    is a promise this file exists to keep.
+
+    rmdir rather than rmtree, deliberately: it refuses a directory that is
+    not empty, so anything else living there stops this dead. That is the
+    whole safety argument -- there is no judgement call to get wrong.
+    """
+    removed: list[Path] = []
+    stop = Path.home().resolve()
+    current = path.parent
+    while True:
+        try:
+            resolved = current.resolve()
+        except OSError:
+            return removed
+        if resolved == stop or stop not in resolved.parents:
+            return removed
+        if dry_run:
+            try:
+                if any(resolved.iterdir()):
+                    return removed
+            except OSError:
+                return removed
+            removed.append(resolved)
+        else:
+            try:
+                resolved.rmdir()
+            except OSError:
+                return removed        # not empty, or not ours to remove
+            removed.append(resolved)
+        current = resolved.parent
+
+
 def remove_file(path: Path, dry_run: bool) -> bool:
     if not path.exists() and not path.is_symlink():
         return False
@@ -596,6 +634,9 @@ def main() -> int:
         for path in data_paths:
             if remove_tree(path, args.dry_run):
                 ok(f"removed {path}")
+                for parent in prune_empty_parents(path, args.dry_run):
+                    info(f"{'would remove' if args.dry_run else 'removed'} "
+                         f"{parent}, which was empty and wynxo made it")
     elif data_paths:
         info("kept your config and sessions (--keep-data)")
 

@@ -328,3 +328,80 @@ class TestRemovingTheMarksLeftInProjects:
 
         assert "args.keep_data else touched_projects()" in \
             inspect.getsource(uninstall.main)
+
+
+class TestDirectoriesWynxoMadeOnItsWayIn:
+    """A machine that never had an XDG layout gets ~/.config and
+    ~/.local/share created for it the first time wynxo saves anything.
+    Leaving those behind is a mark, and this file exists to keep the promise
+    that there are none."""
+
+    def _prune(self, path, dry_run=False):
+        import uninstall
+
+        return uninstall.prune_empty_parents(path, dry_run)
+
+    def test_an_empty_parent_goes(self, tmp_path, monkeypatch):
+        import pathlib as _pathlib
+
+        monkeypatch.setattr(_pathlib.Path, "home", staticmethod(lambda: tmp_path))
+        target = tmp_path / ".config" / "wynxo"
+        target.mkdir(parents=True)
+        target.rmdir()                       # as remove_tree would have left it
+        assert self._prune(target) == [(tmp_path / ".config").resolve()]
+        assert not (tmp_path / ".config").exists()
+
+    def test_a_parent_holding_anything_else_stays(self, tmp_path, monkeypatch):
+        """Somebody else's configuration is not ours to remove."""
+        import pathlib as _pathlib
+
+        monkeypatch.setattr(_pathlib.Path, "home", staticmethod(lambda: tmp_path))
+        (tmp_path / ".config" / "wynxo").mkdir(parents=True)
+        (tmp_path / ".config" / "git").mkdir()
+        (tmp_path / ".config" / "wynxo").rmdir()
+        assert self._prune(tmp_path / ".config" / "wynxo") == []
+        assert (tmp_path / ".config" / "git").exists()
+
+    def test_it_walks_up_while_they_are_empty(self, tmp_path, monkeypatch):
+        import pathlib as _pathlib
+
+        monkeypatch.setattr(_pathlib.Path, "home", staticmethod(lambda: tmp_path))
+        target = tmp_path / ".local" / "share" / "wynxo"
+        target.mkdir(parents=True)
+        target.rmdir()
+        assert len(self._prune(target)) == 2
+        assert not (tmp_path / ".local").exists()
+
+    def test_it_never_touches_home_itself(self, tmp_path, monkeypatch):
+        import pathlib as _pathlib
+
+        monkeypatch.setattr(_pathlib.Path, "home", staticmethod(lambda: tmp_path))
+        target = tmp_path / "wynxo"
+        target.mkdir()
+        target.rmdir()
+        assert self._prune(target) == []
+        assert tmp_path.exists()
+
+    def test_it_never_goes_above_home(self, tmp_path, monkeypatch):
+        """A config directory outside home -- XDG_CONFIG_HOME can point
+        anywhere -- must not walk the uninstaller up someone's filesystem."""
+        import pathlib as _pathlib
+
+        elsewhere = tmp_path / "elsewhere"
+        (elsewhere / "wynxo").mkdir(parents=True)
+        (elsewhere / "wynxo").rmdir()
+        monkeypatch.setattr(_pathlib.Path, "home",
+                            staticmethod(lambda: tmp_path / "home"))
+        (tmp_path / "home").mkdir()
+        assert self._prune(elsewhere / "wynxo") == []
+        assert elsewhere.exists()
+
+    def test_a_dry_run_changes_nothing(self, tmp_path, monkeypatch):
+        import pathlib as _pathlib
+
+        monkeypatch.setattr(_pathlib.Path, "home", staticmethod(lambda: tmp_path))
+        target = tmp_path / ".config" / "wynxo"
+        target.mkdir(parents=True)
+        target.rmdir()
+        assert self._prune(target, dry_run=True)
+        assert (tmp_path / ".config").exists()
