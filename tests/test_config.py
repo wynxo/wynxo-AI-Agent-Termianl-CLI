@@ -223,11 +223,53 @@ class TestSession:
         assert wire[0]["role"] == "system"
         assert wire[1]["content"] == "hi"
 
-    def test_compaction_triggers_at_the_threshold(self, tmp_path):
+    def _long_conversation(self, tmp_path, turns=12, size=3_000):
         session = Session(workspace=tmp_path)
-        session.add_user("x" * 40_000)   # ~11k tokens
+        for i in range(turns):
+            session.add_user(f"question {i} " + "x" * size)
+            session.add_assistant(f"answer {i} " + "y" * size)
+        return session
+
+    def test_compaction_triggers_at_the_threshold(self, tmp_path):
+        session = self._long_conversation(tmp_path)
         assert session.should_compact(budget=8_000, num_ctx=32_000)
         assert not session.should_compact(budget=64_000, num_ctx=64_000)
+
+    def test_the_window_wins_over_a_bigger_budget(self, tmp_path):
+        """An effort level's budget is a ceiling it puts on itself, never a
+        licence to exceed the window the model actually has. Taking the
+        budget whenever it was set let a session at low effort reach six
+        thousand tokens against Ollama's default 2048-token window -- three
+        times what the model can hold, truncated silently at the far end."""
+        # Sized to sit between the two thresholds: over the window's 75%,
+        # under the budget's, so only the smaller of them answers True.
+        session = self._long_conversation(tmp_path, turns=8, size=600)
+        assert 2_048 * 0.75 < session.token_estimate() < 8_000 * 0.75
+        assert session.should_compact(budget=8_000, num_ctx=2_048)
+
+    def test_a_budget_of_zero_means_the_window(self, tmp_path):
+        """max and ultra impose no budget of their own."""
+        session = self._long_conversation(tmp_path, turns=8, size=600)
+        assert session.should_compact(budget=0, num_ctx=2_048)
+        assert not session.should_compact(budget=0, num_ctx=200_000)
+
+    def test_it_does_not_fire_when_it_cannot_help(self, tmp_path):
+        """The last few messages are kept verbatim and the system prompt is
+        not summarisable, so on a small window they can sit above the
+        threshold on their own. Compaction then ran on every iteration,
+        spending a model call each time to remove nothing."""
+        session = Session(workspace=tmp_path, system_prompt="s" * 20_000)
+        for i in range(8):
+            session.add_user(f"q{i}")
+            session.add_assistant(f"a{i}")
+        # Well over the threshold, and almost none of it summarisable.
+        assert session.token_estimate() > 2_000 * 0.75
+        assert not session.should_compact(budget=2_000, num_ctx=2_000)
+
+    def test_nor_when_there_is_nothing_older_to_summarise(self, tmp_path):
+        session = Session(workspace=tmp_path)
+        session.add_user("x" * 40_000)
+        assert not session.should_compact(budget=8_000, num_ctx=32_000)
 
     def test_compaction_never_orphans_a_tool_message(self, tmp_path):
         """A tool result with no matching call confuses every model."""

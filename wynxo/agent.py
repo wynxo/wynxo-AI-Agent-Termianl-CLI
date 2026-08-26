@@ -721,12 +721,18 @@ class Agent:
     def _context_left(self) -> int:
         """Tokens still free in the window, as best we can tell.
 
-        Deliberately measured against the effort policy's budget rather than
-        the model's full num_ctx: the budget is what the rest of the turn was
-        planned around, and filling the window to its brim is how a session
-        ends up compacting mid-task.
+        Measured against the effort policy's budget rather than the model's
+        full num_ctx: the budget is what the rest of the turn was planned
+        around, and filling the window to its brim is how a session ends up
+        compacting mid-task.
+
+        Whichever is smaller, though. A budget is a ceiling an effort level
+        puts on itself, never a licence to exceed the window the model
+        actually has.
         """
-        limit = self.policy.context_budget or self.config.num_ctx
+        limit = min([n for n in (self.policy.context_budget,
+                                 self.config.num_ctx) if n and n > 0]
+                    or [8000])
         return max(0, limit - self.session.token_estimate())
 
     async def _verify_with_tests(self) -> int:

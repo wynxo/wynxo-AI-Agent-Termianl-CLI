@@ -13,6 +13,11 @@ from .coerce import as_float, as_int, as_list, as_text
 from .config import atomic_write, data_dir
 
 
+MIN_WORTH_COMPACTING = 400
+"""Tokens the older half must be worth before summarising it earns its
+model call. Below this, compacting costs more than it recovers."""
+
+
 def estimate_tokens(text: str) -> int:
     """Rough token count without pulling in a tokenizer.
 
@@ -99,10 +104,31 @@ class Session:
         return base + sum(message_tokens(m) for m in self.messages)
 
     def should_compact(self, budget: int, num_ctx: int) -> bool:
-        limit = budget if budget > 0 else num_ctx
+        # The smaller of the two. An effort level's budget is a ceiling it
+        # imposes on itself to keep a turn cheap; it can never raise the
+        # real one. Taking the budget whenever it was set meant that at low
+        # effort, with Ollama's default 2048-token window, the conversation
+        # was allowed to reach six thousand tokens -- three times what the
+        # model can hold. Ollama truncates the prompt silently, so the model
+        # forgets the beginning of the task and nothing says why. That is
+        # the exact failure setup warns about when it asks for num_ctx.
+        limit = min([n for n in (budget, num_ctx) if n and n > 0] or [8000])
         # Compact at 75%: leave room for the reply itself plus the next few
         # tool results, or compaction triggers only once it is already too late.
-        return self.token_estimate() > limit * 0.75
+        if self.token_estimate() <= limit * 0.75:
+            return False
+
+        # And only if there is enough to summarise for it to be worth a model
+        # call. The system prompt and the last few messages are not
+        # summarisable, so on a small window they can sit above the threshold
+        # on their own -- and compaction then fired on every iteration,
+        # spending a call each time to remove nothing.
+        older, _ = self.slice_for_summary()
+        if not older:
+            return False
+        removable = sum(message_tokens(m) for m in older)
+        return removable > max(MIN_WORTH_COMPACTING,
+                               self.token_estimate() * 0.15)
 
     # -- compaction --------------------------------------------------------
 
