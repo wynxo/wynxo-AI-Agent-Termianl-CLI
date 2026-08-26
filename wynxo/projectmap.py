@@ -158,7 +158,46 @@ def build(root: Path) -> str:
         out = _render(entries, per_file)
         if len(out) <= MAX_CHARS:
             return out
-    return out[:MAX_CHARS]
+    # Every file listed, with nothing said about any of them, still does not
+    # fit. Cutting the text there is the one thing not to do: it ends
+    # mid-directory while the header goes on claiming a total, so the model
+    # is told there are three hundred files and shown the first two hundred
+    # -- and looks for the rest with confidence in the wrong place. A
+    # summary by directory says less about more, and says so.
+    return _by_directory(entries)
+
+
+def _by_directory(entries: list[Entry]) -> str:
+    """One line per directory, for a project too large to list."""
+    folders: dict[str, list[Entry]] = {}
+    for entry in entries:
+        folder = entry.path.rsplit("/", 1)[0] if "/" in entry.path else "."
+        folders.setdefault(folder, []).append(entry)
+
+    width = min(38, max((len(f) for f in folders), default=10) + 2)
+    lines = [
+        "# Project map", "",
+        f"{len(entries)} source files in {len(folders)} directories -- too "
+        "many to list one by one,",
+        "so this is by directory. Use glob or list_dir for the rest.",
+        "",
+    ]
+    body = []
+    for folder in sorted(folders):
+        names = [e.path.rsplit("/", 1)[-1] for e in folders[folder]]
+        shown = ", ".join(names[:3])
+        if len(names) > 3:
+            shown += f", +{len(names) - 3}"
+        body.append(f"{folder.ljust(width)} {len(names):>4} files   {shown}")
+
+    kept, used = [], len("\n".join(lines)) + 60
+    for line in body:
+        if used + len(line) + 1 > MAX_CHARS:
+            kept.append(f"... and {len(body) - len(kept)} more directories")
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(lines + kept) + "\n"
 
 
 def _render(entries: list[Entry], per_file: int) -> str:

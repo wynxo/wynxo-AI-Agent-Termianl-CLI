@@ -132,3 +132,75 @@ class TestSummary:
 
     def test_nothing_maps_to_nothing(self):
         assert projectmap.summarise("") == ""
+
+
+class TestAProjectTooBigToList:
+    """The map fits its budget by giving up detail, never by dropping files
+    -- knowing a file exists is most of the value.
+
+    Past a few hundred files even the bare list did not fit, and the last
+    resort was cutting the text at the budget. That ended the map
+    mid-directory while the header went on claiming a total: the model was
+    told there were three hundred and sixty-eight files, shown the first
+    two hundred, and left to look for the rest with confidence in the wrong
+    place.
+    """
+
+    def _project(self, tmp_path, spec):
+        for area, count in spec:
+            directory = tmp_path / area
+            directory.mkdir(parents=True)
+            for i in range(count):
+                (directory / f"mod_{i:03}.py").write_text(
+                    f"class Thing{i}:\n    pass\n")
+        (tmp_path / "main.py").write_text("def main():\n    pass\n")
+        return tmp_path
+
+    BIG = [("src/core", 60), ("src/api", 45), ("tests/unit", 120),
+           ("tests/integration", 90), ("scripts", 12)]
+
+    def test_it_fits_the_budget(self, tmp_path):
+        from wynxo.projectmap import MAX_CHARS, build
+
+        assert len(build(self._project(tmp_path, self.BIG))) <= MAX_CHARS
+
+    def test_it_does_not_end_mid_line(self, tmp_path):
+        from wynxo.projectmap import build
+
+        text = build(self._project(tmp_path, self.BIG))
+        assert text.endswith("\n")
+
+    def test_every_directory_is_named(self, tmp_path):
+        from wynxo.projectmap import build
+
+        text = build(self._project(tmp_path, self.BIG))
+        for area, _ in self.BIG:
+            assert area in text, area
+
+    def test_it_says_it_is_a_summary(self, tmp_path):
+        """Silently showing less than it claims is the failure being fixed."""
+        from wynxo.projectmap import build
+
+        text = build(self._project(tmp_path, self.BIG))
+        assert "by directory" in text
+        assert "list_dir" in text or "glob" in text
+
+    def test_it_says_how_big_each_directory_is(self, tmp_path):
+        from wynxo.projectmap import build
+
+        text = build(self._project(tmp_path, self.BIG))
+        assert "120 files" in text
+        assert "45 files" in text
+
+    def test_a_small_project_still_gets_the_full_list(self, tmp_path):
+        from wynxo.projectmap import build
+
+        text = build(self._project(tmp_path, [("src", 8), ("tests", 6)]))
+        assert "src/mod_003.py" in text
+        assert "by directory" not in text
+
+    def test_a_middling_project_keeps_its_file_list(self, tmp_path):
+        from wynxo.projectmap import build
+
+        text = build(self._project(tmp_path, [("src/core", 40), ("tests", 40)]))
+        assert "src/core/mod_039.py" in text
