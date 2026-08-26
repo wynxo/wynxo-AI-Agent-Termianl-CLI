@@ -443,3 +443,73 @@ class TestHeader:
     def test_no_stray_escape_codes_in_plain_mode(self, capsys):
         UI().banner("m", "http://127.0.0.1:11434", "low", "/tmp/p")
         assert "?[" not in capsys.readouterr().out
+
+
+class TestAMessageStaysInItsOwnColumn:
+    """rich wraps a Text at the console edge and starts the next line at
+    column zero, so any message longer than the terminal is wide fell out
+    from under its own marker and ran into the left edge. The lines this
+    affects carry the warnings and errors -- the ones a person actually
+    stops to read."""
+
+    LONG = ("The model sent back an empty answer. Usually that means its "
+            "chat template does not fit the prompt wynxo builds, or the "
+            "conversation has outgrown the context window.")
+
+    def _lines(self, method, message, width=70):
+        import io
+
+        from rich.console import Console
+
+        ui = UI()
+        ui.width = width
+        ui.console = Console(file=io.StringIO(), force_terminal=False, width=width)
+        getattr(ui, method)(message)
+        return [line for line in ui.console.file.getvalue().split("\n") if line.strip()]
+
+    def test_a_long_warning_wraps_onto_more_than_one_line(self):
+        assert len(self._lines("warn", self.LONG)) > 1
+
+    def test_every_line_after_the_first_is_indented(self):
+        lines = self._lines("warn", self.LONG)
+        assert lines[0].startswith("  ! ")
+        for line in lines[1:]:
+            assert line.startswith("    "), line
+            assert not line.startswith("    !"), "the marker belongs on the first line only"
+
+    def test_the_continuation_sits_under_the_first_word(self):
+        lines = self._lines("warn", self.LONG)
+        head = len(lines[0]) - len(lines[0].lstrip())
+        assert lines[0][head:head + 2] == "! "
+        for line in lines[1:]:
+            assert len(line) - len(line.lstrip()) == head + 2, line
+
+    def test_nothing_overflows_the_terminal(self):
+        for width in (40, 60, 70, 100):
+            for line in self._lines("warn", self.LONG, width=width):
+                assert len(line) <= width, (width, line)
+
+    def test_every_kind_of_message_lines_up_the_same_way(self):
+        """The invariant, stated once for all three: a continuation line
+        begins in the column the first line's *text* begins in. For a
+        message with a marker that leaves the marker alone in its column;
+        for one without, the block simply stays square."""
+        for method in ("warn", "info", "success"):
+            lines = self._lines(method, self.LONG)
+            assert len(lines) > 1, method
+            column = lines[0].index("The model sent back")
+            for line in lines[1:]:
+                assert len(line) - len(line.lstrip()) == column, (method, line)
+
+    def test_a_short_message_is_left_alone(self):
+        assert self._lines("warn", "not a git checkout") == ["  ! not a git checkout"]
+
+    def test_a_message_keeps_its_own_line_breaks(self):
+        lines = self._lines("info", "first line\nsecond line")
+        assert len(lines) == 2
+        assert lines[0].strip() == "first line"
+        assert lines[1].strip() == "second line"
+
+    def test_a_very_narrow_terminal_still_produces_something(self):
+        # No crash, no zero-width wrap loop.
+        assert self._lines("warn", self.LONG, width=12)

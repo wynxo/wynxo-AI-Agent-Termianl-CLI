@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import re
 import sys
+import textwrap
 import time
 from typing import Iterable
 
@@ -344,11 +345,43 @@ class UI:
 
     # -- messages ----------------------------------------------------------
 
+    def _marked(self, marker: str, message: str, style: str) -> None:
+        """One message, wrapped so it stays in its own column.
+
+        rich wraps a Text at the console edge but starts the next line at
+        column zero, so any message longer than the terminal is wide fell
+        out from under its own marker and ran into the left edge -- the
+        longer and more important the message, the worse it looked. These
+        are the lines that carry warnings and errors, which are exactly the
+        ones a person reads carefully.
+
+        Wrapped here instead, with the continuation indented to sit under
+        the first word rather than under the marker, so the "!" stays the
+        only thing in its column and the prose forms a clean block.
+        """
+        head = f"  {marker} " if marker else "  "
+        hang = " " * cell_len(head)
+        width = max(20, self.width - 1)
+        room = max(8, width - cell_len(head))
+
+        out = Text()
+        first = True
+        # Wrap each of the message's own lines separately: a message that
+        # already has structure keeps it.
+        for line in sanitise(message).split("\n"):
+            pieces = textwrap.wrap(line, room) or [""]
+            for piece in pieces:
+                if not first:
+                    out.append("\n")
+                out.append((head if first else hang) + piece, style=style)
+                first = False
+        self.console.print(out)
+
     def info(self, message: str) -> None:
-        self.console.print(Text(f"  {message}", style=MUTED))
+        self._marked("", message, MUTED)
 
     def warn(self, message: str) -> None:
-        self.console.print(Text(f"  ! {message}", style=WARN))
+        self._marked("!", message, WARN)
 
     def error(self, message: str) -> None:
         self.console.print()
@@ -356,7 +389,7 @@ class UI:
                   padding=(0, 1)))
 
     def success(self, message: str) -> None:
-        self.console.print(Text(f"  {self.g.tick} {message}", style=GOOD))
+        self._marked(self.g.tick, message, GOOD)
 
     def assistant_markdown(self, text: str) -> None:
         if not text.strip():
