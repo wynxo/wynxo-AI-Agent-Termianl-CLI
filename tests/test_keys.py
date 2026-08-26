@@ -43,11 +43,12 @@ class TestKeyNames:
 
 class TestSafety:
     def test_start_is_a_noop_without_a_tty(self, monkeypatch):
-        monkeypatch.setattr(sys, "stdin", open(os.devnull))
-        watcher = KeyWatcher({"ctrl+o": lambda: None})
-        assert not watcher.available
-        watcher.start()
-        watcher.stop()          # must not raise
+        with open(os.devnull) as not_a_terminal:
+            monkeypatch.setattr(sys, "stdin", not_a_terminal)
+            watcher = KeyWatcher({"ctrl+o": lambda: None})
+            assert not watcher.available
+            watcher.start()
+            watcher.stop()          # must not raise
 
     def test_stop_twice_is_safe(self):
         watcher = KeyWatcher({})
@@ -125,6 +126,7 @@ class TestTerminalRestore:
             watcher.stop()
             assert termios.tcgetattr(slave) == before
         finally:
+            reader.close()          # takes the slave fd with it
             os.close(master)
 
     def test_keypresses_reach_handlers(self, monkeypatch):
@@ -143,6 +145,7 @@ class TestTerminalRestore:
             watcher.stop()
             assert seen == ["o", "t", "o"]
         finally:
+            reader.close()          # takes the slave fd with it
             os.close(master)
 
     def test_sigint_still_works(self, monkeypatch):
@@ -158,4 +161,5 @@ class TestTerminalRestore:
             assert attrs[3] & termios.ISIG, "ISIG cleared; Ctrl-C would be swallowed"
             watcher.stop()
         finally:
+            reader.close()          # takes the slave fd with it
             os.close(master)

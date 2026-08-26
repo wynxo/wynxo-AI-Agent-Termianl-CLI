@@ -360,9 +360,12 @@ class TestSheStopsWhenWynxoDoes:
         speaker._process = subprocess.Popen(
             [__import__("sys").executable, "-c", "import time; time.sleep(30)"])
         assert speaker.is_speaking() is True
+        held = speaker._process
         speaker.stop()
-        speaker._process = None
+        assert speaker._process is None
         assert speaker.is_speaking() is False
+        # stop() reaps rather than abandoning: nothing is left running.
+        assert held.poll() is not None
 
     def test_stopping_when_silent_is_harmless(self):
         from wynxo.speech import Speaker

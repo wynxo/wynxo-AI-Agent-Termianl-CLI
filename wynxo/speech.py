@@ -250,6 +250,13 @@ class Speaker:
                 process.terminate()
             except OSError:
                 pass
+            # Reaped rather than abandoned. A speech engine goes on SIGTERM
+            # immediately, so this returns at once; without it the child sits
+            # as a zombie until something else happens to make a subprocess.
+            try:
+                process.wait(timeout=0.5)
+            except Exception:
+                pass
 
     def say(self, text: str) -> bool:
         """Start speaking. Returns False if nothing was said."""
