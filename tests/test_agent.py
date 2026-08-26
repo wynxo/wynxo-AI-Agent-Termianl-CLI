@@ -945,3 +945,55 @@ class TestGreetingsAreNotTasks:
         from wynxo.agent import is_small_talk
 
         assert is_small_talk(text) is False, f"{text!r} would be brushed off"
+
+
+class TestAnEmptyAnswerIsNotSilence:
+    """A model that sends back nothing must not look like a model still working.
+
+    Local models do this: a chat template that swallows the reply, a window
+    the conversation just outgrew, a stop token emitted straight away.
+    Nothing errors and the turn succeeds, so the screen showed the question
+    and then nothing at all -- no answer, no warning, no way to tell whether
+    wynxo was thinking or had quietly given up.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_says_so_when_the_answer_is_empty(self, tmp_path):
+        agent, _, cb = make_agent(tmp_path, [{"content": ""}])
+        await agent.run("add retries to the fetch helper")
+        assert any("empty answer" in w for w in cb.warnings), cb.warnings
+
+    @pytest.mark.asyncio
+    async def test_it_says_so_for_whitespace_too(self, tmp_path):
+        agent, _, cb = make_agent(tmp_path, [{"content": "   \n\t  \n"}])
+        await agent.run("add retries to the fetch helper")
+        assert any("empty answer" in w for w in cb.warnings), cb.warnings
+
+    @pytest.mark.asyncio
+    async def test_small_talk_gets_the_same_warning(self, tmp_path):
+        # Greetings never reach the tool loop, so they need their own guard.
+        agent, _, cb = make_agent(tmp_path, [{"content": ""}])
+        await agent.run("hello")
+        assert any("empty answer" in w for w in cb.warnings), cb.warnings
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_answer_is_not_warned_about(self, tmp_path):
+        agent, _, cb = make_agent(tmp_path, [{"content": "Added a retry loop."}])
+        await agent.run("add retries to the fetch helper")
+        assert not any("empty answer" in w for w in cb.warnings), cb.warnings
+
+    @pytest.mark.asyncio
+    async def test_an_answer_that_arrived_as_thinking_is_not_warned_about(self, tmp_path):
+        # Already handled elsewhere: the thought becomes the answer. It must
+        # not also be reported as nothing.
+        agent, _, cb = make_agent(
+            tmp_path, [{"content": "", "thinking": "The file already retries."}])
+        await agent.run("does the fetch helper retry?")
+        assert not any("empty answer" in w for w in cb.warnings), cb.warnings
+
+    @pytest.mark.asyncio
+    async def test_the_warning_says_what_to_do_about_it(self, tmp_path):
+        agent, _, cb = make_agent(tmp_path, [{"content": ""}])
+        await agent.run("add retries to the fetch helper")
+        said = " ".join(cb.warnings)
+        assert "/doctor" in said and "/compact" in said

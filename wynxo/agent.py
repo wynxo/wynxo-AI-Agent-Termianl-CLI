@@ -816,6 +816,7 @@ class Agent:
             self.session.add_assistant(turn.content, _wire_calls(turn))
 
             if not turn.tool_calls:
+                await self._warn_if_nothing_came_back(turn)
                 result.content = turn.content
                 return result
 
@@ -831,6 +832,30 @@ class Agent:
         )
         result.content = "(stopped: iteration limit reached)"
         return result
+
+    async def _warn_if_nothing_came_back(self, turn: ParsedTurn) -> None:
+        """Say so when the model answers with nothing at all.
+
+        A local model does this far more often than a hosted one: a chat
+        template that swallows the reply, a window the conversation has just
+        outgrown, a stop token emitted immediately. Nothing errors. The turn
+        succeeds. The screen shows the question, and then silence -- no
+        answer, no warning, no way to tell whether wynxo is still working or
+        has quietly given up.
+
+        Two neighbouring cases are already handled: an answer that ended up
+        labelled as thought, and an answer that parsed but never streamed.
+        This is the one where there really is nothing, and saying so is the
+        entire fix.
+        """
+        if turn.content.strip() or turn.tool_calls:
+            return
+        await self.cb.on_warning(
+            "The model sent back an empty answer. Usually that means its "
+            "chat template does not fit the prompt wynxo builds, or the "
+            "conversation has outgrown the context window. /doctor checks "
+            "the first; /compact fixes the second."
+        )
 
     async def _warn_if_over_the_window(self) -> None:
         """Say so when the conversation no longer fits the model's window.
@@ -927,6 +952,7 @@ class Agent:
                                   errors=[str(exc)])
             except asyncio.CancelledError:
                 raise Interrupted from None
+            await self._warn_if_nothing_came_back(turn)
             self.session.add_assistant(turn.content)
             self.session.save()
             return TurnResult(content=turn.content, iterations=1,
