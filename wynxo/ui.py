@@ -618,6 +618,12 @@ class CodeStreamer:
         self.in_span = False
         """Inside a `code span`. Reset at every newline, so an unpaired
         backtick colours one line rather than the rest of the answer."""
+        self.in_bold = False
+        self.in_heading = False
+        self.pending_star = ""
+        """A single asterisk, held for one character to see whether a second
+        follows. `2 * 3` has to survive; `**bold**` has to work."""
+        self.pending_hashes = ""
         self._pen_shown = ""
         """The style the terminal is currently set to, when writing to it
         directly. Only used where there is no bar to redraw through."""
@@ -702,6 +708,7 @@ class CodeStreamer:
             return
         self._prose(text)
         if end_of_line:
+            self._flush_marks()
             self._newline()
 
     def _opens_a_fence(self, text: str) -> bool:
@@ -784,14 +791,10 @@ class CodeStreamer:
         and what the eye expects.
         """
         for char in text:
-            # `like this` reads as code in every chat window there is, and
-            # the model writes it constantly. Toggled per character rather
-            # than matched per line, because a line is not finished when it
-            # is drawn -- and by the time it is, its characters have already
-            # gone to the terminal and cannot be restyled.
-            if char == "`" and self.marks_code:
-                self.in_span = not self.in_span
-                continue
+            if self.marks_code:
+                consumed, char = self._mark(char)
+                if consumed:
+                    continue
 
             if char.isspace():
                 self.word = ""
@@ -807,6 +810,73 @@ class CodeStreamer:
                     # Either the word is longer than the line, or the line has
                     # already gone to the terminal and cannot be taken back.
                     self._newline()
+            if not self.column:
+                self._write(self.indent)
+            self._write(char)
+            self.word += char
+
+    def _mark(self, char: str) -> tuple[bool, str]:
+        """Handle the markdown a model actually writes, one character at a time.
+
+        `code`, **bold**, and a ## heading. Per character rather than per
+        finished line, because a line is not finished when it is drawn --
+        by the time it is, its characters have gone to the terminal and
+        cannot be restyled.
+
+        Returns (consumed, char): the mark itself is swallowed, everything
+        else comes back to be written.
+        """
+        # A heading is decided by what starts the line. The hashes are held
+        # rather than written, because "#" is also just a character and only
+        # "## " makes it a heading.
+        if self.pending_hashes:
+            if char == "#" and len(self.pending_hashes) < 6:
+                self.pending_hashes += "#"
+                return True, char
+            if char == " ":
+                self.in_heading = True
+                self.pending_hashes = ""
+                return True, char
+            held, self.pending_hashes = self.pending_hashes, ""
+            self._prose_out(held)
+        elif char == "#" and not self.column and not self.line.plain:
+            self.pending_hashes = "#"
+            return True, char
+
+        if self.pending_star:
+            self.pending_star = False
+            if char == "*":
+                self.in_bold = not self.in_bold
+                return True, char
+            self._prose_out("*")          # a lone asterisk, meant literally
+        elif char == "*":
+            self.pending_star = True
+            return True, char
+
+        if char == "`":
+            self.in_span = not self.in_span
+            return True, char
+        return False, char
+
+    def _flush_marks(self) -> None:
+        """Write out anything held back that turned out to be literal.
+
+        A line ending on a single "*" was waiting to see whether a second
+        followed. None ever does, and without this the asterisk was simply
+        dropped.
+        """
+        held, self.pending_hashes = self.pending_hashes, ""
+        if self.pending_star:
+            self.pending_star = False
+            held += "*"
+        if held:
+            self._prose_out(held)
+
+    def _prose_out(self, text: str) -> None:
+        """Write held-back characters through the ordinary prose path."""
+        for char in text:
+            if self.column + 1 > self.width:
+                self._newline()
             if not self.column:
                 self._write(self.indent)
             self._write(char)
@@ -844,7 +914,13 @@ class CodeStreamer:
     @property
     def _pen(self) -> str:
         """The style for what is being written right now."""
-        return CODE_SPAN if self.in_span else ""
+        if self.in_span:
+            return CODE_SPAN
+        if self.in_heading:
+            return f"bold {ACCENT}"
+        if self.in_bold:
+            return "bold"
+        return ""
 
     def _stylize(self, style: str, start: int, end: int) -> None:
         """Style a slice, growing the previous span where it can.
@@ -920,9 +996,13 @@ class CodeStreamer:
                 self.ui.console.file.write(
                     ("\x1b[0m" if self._pen_shown else "") + "\n")
                 self.ui.console.file.flush()
+        # Emphasis is reset: a line is where it ends, so one stray backtick
+        # or asterisk cannot colour the rest of the answer. What is *held*
+        # is not reset here -- a wrap is not the end of a line, and a
+        # half-seen "*" may still pair with the next character.
         self.line = self._blank()
         self.column = 0
-        self.in_span = False
+        self.in_span = self.in_bold = self.in_heading = False
         self._pen_shown = ""
 
     def _ensure_started(self) -> None:
@@ -934,6 +1014,7 @@ class CodeStreamer:
         if self.buffer or self.partial:
             self._segment(self.buffer, end_of_line=True)
             self.buffer = ""
+        self._flush_marks()
         if self.column:
             self._newline()
         self.in_code = False

@@ -204,6 +204,55 @@ class TestInlineCodeInTheModelsProse:
         written = self._plain(self._stream("use `x` and `y` now\n"))
         assert "use x and y now" in written
 
+    @pytest.mark.parametrize("with_bar", [True, False])
+    def test_bold_loses_its_asterisks(self, with_bar):
+        written = self._plain(
+            self._stream("this is **much** safer\n", with_bar))
+        assert "this is much safer" in written
+
+    @pytest.mark.parametrize("text", [
+        "maths: 2 * 3 * 4 = 24",
+        "a glob like *.py stays",
+        "one lone * on its own",
+        "trailing star at the end *",
+    ])
+    def test_a_single_asterisk_is_meant_literally(self, text):
+        """Held for exactly one character to see whether a second follows,
+        then written if none does."""
+        written = self._plain(self._stream(text + "\n"))
+        assert text in written
+
+    def test_a_heading_loses_its_hashes(self):
+        written = self._plain(self._stream("## What changed\nbody\n"))
+        assert "What changed" in written
+        assert "#" not in written
+
+    @pytest.mark.parametrize("text", [
+        "#notaheading stays",
+        "issue #42 is fixed",
+        "a # in the middle is fine",
+        "####### seven is too many",
+    ])
+    def test_a_hash_that_is_not_a_heading_survives(self, text):
+        written = self._plain(self._stream(text + "\n"))
+        assert text in written
+
+    def test_a_heading_is_styled(self):
+        written = self._stream("# Summary\n")
+        assert "\x1b[" in written
+
+    def test_emphasis_does_not_leak_into_the_next_line(self):
+        written = self._plain(
+            self._stream("unclosed **bold here\nplain line follows\n"))
+        assert "plain line follows" in written
+
+    def test_a_file_being_written_keeps_its_asterisks_and_hashes(self):
+        source = "# a comment\nx = 2 * 3\n"
+        written = self._plain(
+            self._stream(source, literal=True, code=False))
+        assert "# a comment" in written
+        assert "2 * 3" in written
+
 
 class TestSomebodyElsesTextCannotDriveTheTerminal:
     """A terminal acts on escape sequences in what it is shown.
