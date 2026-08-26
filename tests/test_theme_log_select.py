@@ -527,22 +527,137 @@ class TestCommitCommand:
         assert "no preamble" in lowered
 
 
+class _Anything:
+    """Answers to anything: attribute, call, await, with-block, iteration.
+
+    Stands in for the collaborators a settings command does not actually
+    need in order to offer a choice -- the agent, the session, the running
+    speaker. What a command *does* need is real, below.
+    """
+
+    def __init__(self, name="stub"):
+        object.__setattr__(self, "_name", name)
+
+    def __getattr__(self, item):
+        return _Anything(f"{self._name}.{item}")
+
+    def __setattr__(self, item, value):
+        pass
+
+    def __call__(self, *args, **kwargs):
+        return _Anything(f"{self._name}()")
+
+    def __await__(self):
+        async def answer():
+            return _Anything(self._name)
+
+        return answer().__await__()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):
+        return iter([])
+
+    def __bool__(self):
+        return False
+
+    def __len__(self):
+        return 0
+
+
 class TestEverySettingIsPickable:
-    """Entering a settings command bare should offer the choice, not print
-    a table describing what you already have."""
+    """Typing a settings command bare must offer the choice, not print a
+    table describing what you already have.
+
+    Driven rather than read. The version of this test that grepped each
+    method for "_pick" passed for months while /pet and /speak printed a
+    table and stopped: both contained a picker -- for the voice, and for
+    the engine -- just not on the path you reach by typing the command with
+    no argument. Calling the command is the only way to ask the question
+    that was actually meant.
+    """
 
     PICKERS = ("cmd_theme", "cmd_effort", "cmd_mode", "cmd_scope",
-               "cmd_pet", "cmd_speak", "cmd_endpoint", "cmd_model")
+               "cmd_pet", "cmd_speak", "cmd_endpoint", "cmd_model",
+               "cmd_ctx", "cmd_thinking", "cmd_talker", "cmd_fullscreen",
+               "cmd_secrets", "cmd_logo")
 
-    def test_they_all_offer_the_arrow_picker(self):
-        import inspect
+    def _run_bare(self, name, monkeypatch):
+        """Call one command with no arguments; report the pickers it opened."""
+        import asyncio
+        import io
 
-        from wynxo import cli
+        from rich.console import Console
 
-        missing = [name for name in self.PICKERS
-                   if "_pick" not in inspect.getsource(getattr(cli.Repl, name))
-                   and "choose(" not in inspect.getsource(getattr(cli.Repl, name))]
-        assert missing == [], f"still print-only: {missing}"
+        from wynxo import cli, provider as provider_module, speech as speech_module
+        from wynxo.config import Config, Endpoint
+        from wynxo.pet import Pet
+        from wynxo.provider import ModelInfo
+        from wynxo.ui import UI
+
+        models = [
+            ModelInfo(name="qwen3-coder:30b", size=30_000_000_000,
+                      parameter_size="30B", quantization="Q4",
+                      capabilities=["tools"]),
+            ModelInfo(name="llama3.2:3b", size=2_000_000_000,
+                      parameter_size="3B", quantization="Q4",
+                      capabilities=["tools"]),
+        ]
+        engine = speech_module.Engine("espeak-ng", "espeak-ng", "robotic")
+        # A machine with no synthesiser is right to refuse rather than offer
+        # an empty list, so give this one a voice.
+        monkeypatch.setattr(speech_module, "available", lambda: [engine])
+        monkeypatch.setattr(speech_module, "pick", lambda preferred="auto": engine)
+
+        async def already_inspected(client, entries, *args, **kwargs):
+            return entries
+
+        # Imported inside cmd_model, so patched where it is defined.
+        monkeypatch.setattr(provider_module, "inspect_all", already_inspected)
+
+        class _Client(_Anything):
+            async def list_models(self):
+                return models
+
+        ui = UI()
+        ui.console = Console(file=io.StringIO(), width=90)
+        config = Config(
+            endpoints=[Endpoint(name="local", url="http://127.0.0.1:11434")],
+            active_endpoint="local", model="qwen3-coder:30b", num_ctx=32768)
+
+        repl = object.__new__(cli.Repl)
+        for attr, value in (("ui", ui), ("config", config),
+                            ("client", _Client("client")),
+                            ("agent", _Anything("agent")), ("pet", Pet()),
+                            ("speaker", _Anything("speaker")), ("talker", None),
+                            ("policy", _Anything("policy")), ("chat", None),
+                            ("prompt_session", _Anything("prompt_session"))):
+            object.__setattr__(repl, attr, value)
+
+        opened = []
+
+        async def offer(title, options, current):
+            opened.append(title)
+            return None                  # escape: the command must stop here
+
+        async def ask(question, default=""):
+            opened.append(question)
+            return ""
+
+        object.__setattr__(repl, "_pick", offer)
+        object.__setattr__(repl, "_type_in", ask)
+
+        asyncio.run(getattr(cli.Repl, name)(repl, []))
+        return opened
+
+    @pytest.mark.parametrize("name", PICKERS)
+    def test_it_offers_a_choice_when_typed_bare(self, name, monkeypatch):
+        assert self._run_bare(name, monkeypatch), (
+            f"/{name[4:]} typed bare printed something and stopped")
 
     def test_they_are_all_async_so_they_can_await_a_choice(self):
         import inspect

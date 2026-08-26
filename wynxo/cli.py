@@ -1422,10 +1422,7 @@ class Repl:
             return True
 
         if name == "/thinking":
-            self.ui.show_thinking = not self.ui.show_thinking
-            self.config.show_thinking = self.ui.show_thinking
-            self.ui.info(f"thinking display {'on' if self.ui.show_thinking else 'off'}")
-            return True
+            return await self.cmd_thinking(args)
 
         if name == "/plan":
             todo = self.agent.tools.get("todo_write")
@@ -1490,7 +1487,7 @@ class Repl:
             return await self.cmd_speak(args)
 
         if name == "/talker":
-            return self.cmd_talker(args)
+            return await self.cmd_talker(args)
 
         if name == "/log":
             return self.cmd_log(args)
@@ -1846,19 +1843,49 @@ class Repl:
             self.ui.warn(warning)
         return True
 
+    _ENDPOINT_ADD = "\x00add"
+    _ENDPOINT_TEST = "\x00test"
+    """Sentinels for the two actions in the server picker. Not the plain
+    words: a server can be named "add", and choosing it must select it."""
+
     async def cmd_endpoint(self, args: list[str]) -> bool:
         action = args[0].lower() if args else "list"
 
         if action == "list" and not args:
-            # Bare /endpoint: pick which server to talk to. With more than
-            # one configured that is almost always what you meant.
-            options = [(e.name, e.url) for e in self.config.endpoints]
-            picked = (await self._pick("ollama server", options,
-                                       self.config.active_endpoint)
-                      if len(options) > 1 else NO_PICKER)
+            # Bare /endpoint: pick which server to talk to. The actions live
+            # in the same list as the servers, so this opens a picker even
+            # with a single server configured -- which is the usual case, and
+            # was the one that used to get a table and a line of syntax to
+            # copy. Adding a second server is exactly what someone with one
+            # server is here to do.
+            #
+            # Sentinel values rather than the words: a server may legitimately
+            # be named "add" or "test", and picking it must not run a command.
+            options = [
+                Choice(value=endpoint.name, label=endpoint.name,
+                       badge=("current" if endpoint.name ==
+                              self.config.active_endpoint else ""),
+                       hint=endpoint.url)
+                for endpoint in self.config.endpoints
+            ]
+            options.append(Choice(value=self._ENDPOINT_ADD, label="add a server",
+                                  hint="another machine running Ollama"))
+            options.append(Choice(value=self._ENDPOINT_TEST, label="test all",
+                                  hint="check which of them answer"))
+
+            picked = await self._pick("ollama server", options,
+                                      self.config.active_endpoint)
             if picked is None:
                 return True
             if picked is not NO_PICKER:
+                if picked == self._ENDPOINT_TEST:
+                    return await self.cmd_endpoint(["test"])
+                if picked == self._ENDPOINT_ADD:
+                    typed = await self._type_in(
+                        "url of the Ollama server (host, or host:port):")
+                    if not typed:
+                        return True
+                    return await self.cmd_endpoint(["add", typed])
                 if picked == self.config.active_endpoint:
                     self.ui.info(f"already using {picked}")
                     return True
@@ -2182,7 +2209,34 @@ class Repl:
         from .speech import (Speaker, available, install_hint,
                              pick as pick_engine)
 
-        action = args[0].lower() if args else "show"
+        action = args[0].lower() if args else ""
+
+        if not action:
+            # Bare /speak used to print the status and stop, which told you
+            # what the setting was and gave you no way to change it. Every
+            # other setting opens a picker; this one offers the actions.
+            engines = available()
+            if not engines:
+                self.ui.warn("No speech synthesiser found on this machine.")
+                for line in install_hint().splitlines():
+                    self.ui.info(line)
+                return True
+            chosen = await self._pick(
+                "speech",
+                [("on", "read answers out loud"),
+                 ("off", "stay quiet"),
+                 ("test", "say a sentence now, to check it works"),
+                 ("engine", f"which synthesiser speaks "
+                            f"({len(engines)} available here)"),
+                 ("voice", "the named voice the synthesiser should use")],
+                "on" if self.config.speak else "off",
+            )
+            if chosen is None:
+                return True
+            if chosen is NO_PICKER:
+                action = "show"
+            else:
+                return await self.cmd_speak([chosen])
 
         if action in ("show", "status"):
             self.ui.info(f"speech: {self.speaker.describe()}")
@@ -2239,6 +2293,13 @@ class Repl:
                 return True
             args = [action, picked]
 
+        if action == "voice" and len(args) == 1:
+            typed = await self._type_in("voice name (blank to cancel):",
+                                        self.config.speech_voice or "")
+            if not typed:
+                return True
+            args = [action, typed]
+
         if action in ("engine", "voice") and len(args) > 1:
             if action == "engine":
                 engine = pick_engine(args[1])
@@ -2259,19 +2320,48 @@ class Repl:
         self.ui.info("/speak on | off | test | engine <name> | voice <name>")
         return True
 
-    def cmd_talker(self, args: list[str]) -> bool:
+    async def cmd_talker(self, args: list[str]) -> bool:
         """Set the small model that does the talking, or turn it off."""
         from .duo import Talker
         from .prompts import VOICES
 
         if not args:
-            if self.talker is None:
-                self.ui.info("no talker -- one model does both jobs")
-                self.ui.info("/talker <model> to have a small one do the talking")
-            else:
-                self.ui.info(f"talker: {self.talker.model}   "
-                             f"coder: {self.config.model}")
-            return True
+            # Bare /talker used to name the current one and then tell you the
+            # syntax for changing it. Ask the server what it has and offer
+            # that instead -- a talker is a model, and you cannot pick a
+            # model you cannot remember the tag of.
+            try:
+                with self.ui.status("asking the server what it has..."):
+                    models = await self.client.list_models()
+            except ProviderError as exc:
+                self.ui.error(str(exc))
+                return True
+
+            options = [("off", "one model does both jobs")]
+            for model in models:
+                if model.name == self.config.model:
+                    continue        # the coder cannot also be the talker
+                hint = " ".join(part for part in (model.human_size(),
+                                                   model.parameter_size,
+                                                   model.quantization) if part)
+                options.append((model.name, hint or "installed"))
+            if len(options) == 1:
+                self.ui.info("no other model on that server to talk with")
+                return True
+
+            chosen = await self._pick("talker", options,
+                                      self.config.talker or "off")
+            if chosen is None:
+                return True
+            if chosen is NO_PICKER:
+                if self.talker is None:
+                    self.ui.info("no talker -- one model does both jobs")
+                    self.ui.info("/talker <model> to have a small one do the talking")
+                else:
+                    self.ui.info(f"talker: {self.talker.model}   "
+                                 f"coder: {self.config.model}")
+                return True
+            args = [chosen]
 
         if args[0].lower() in ("off", "none"):
             self.talker = None
@@ -2413,6 +2503,43 @@ class Repl:
             width=self.ui.width,
             unicode=self.ui.g.unicode,
         )
+
+    async def cmd_thinking(self, args: list[str]) -> bool:
+        """Show or hide the model's reasoning.
+
+        A picker rather than a bare toggle. Every other setting opens one,
+        and a toggle is the one shape that cannot tell you what it is about
+        to do: you press it to find out, and if it was already what you
+        wanted you have to press it twice more to get back. With two named
+        options the current one is marked and choosing it again is a no-op.
+        """
+        want = args[0].lower() if args else ""
+        if want in ("show", "yes"):
+            want = "on"
+        elif want in ("hide", "no"):
+            want = "off"
+        if want not in ("on", "off"):
+            chosen = await self._pick(
+                "thinking",
+                [("on", "show the model's reasoning as it works"),
+                 ("off", "keep only the answer; ^O reveals the reasoning "
+                         "for one turn")],
+                "on" if self.ui.show_thinking else "off",
+            )
+            if chosen is NO_PICKER:
+                state = "on" if self.ui.show_thinking else "off"
+                self.ui.info(f"thinking display is {state}  {self.ui.g.dot}  "
+                             "/thinking on | off")
+                return True
+            if chosen is None:
+                return True
+            want = chosen
+
+        self.ui.show_thinking = want == "on"
+        self.config.show_thinking = self.ui.show_thinking
+        self.config.save()
+        self.ui.info(f"thinking display {'on' if self.ui.show_thinking else 'off'}")
+        return True
 
     async def cmd_fullscreen(self, args: list[str]) -> bool:
         """Switch screens now, and remember the choice.
@@ -2672,12 +2799,29 @@ class Repl:
                     f"    [{self.pet.style()}]{frames}[/]  [{MUTED}]{mood.value}[/]")
             self.pet.rest()
             self.ui.console.print()
-            self.ui.info(f"name: {self.pet.name}   voice: {self.config.voice}   "
-                         f"{'on' if self.pet.enabled else 'off'}"
-                         f"{'' if self.pet.animate else ', still'}")
-            self.ui.info(f"/pet off {self.ui.g.dot} /pet name <x> {self.ui.g.dot} /pet voice "
-                         + " | ".join(VOICES))
-            return True
+            # The moods are worth seeing, so they stay. What used to follow
+            # them was a line of usage text -- it told you what you could
+            # type and left you to type it. The picker acts instead.
+            chosen = await self._pick(
+                "companion",
+                [("on", "she reacts as the work goes"),
+                 ("off", "no companion"),
+                 ("animate", "let the faces move"),
+                 ("still", "one face, held"),
+                 ("name", f"what to call her (now: {self.pet.name})"),
+                 ("voice", f"how she writes (now: {self.config.voice})")],
+                ("on" if self.pet.enabled else "off"),
+            )
+            if chosen is None:
+                return True
+            if chosen is NO_PICKER:
+                self.ui.info(f"name: {self.pet.name}   voice: {self.config.voice}   "
+                             f"{'on' if self.pet.enabled else 'off'}"
+                             f"{'' if self.pet.animate else ', still'}")
+                self.ui.info(f"/pet off {self.ui.g.dot} /pet name <x> "
+                             f"{self.ui.g.dot} /pet voice " + " | ".join(VOICES))
+                return True
+            return await self.cmd_pet([chosen])
 
         action = args[0].lower()
 
@@ -2694,6 +2838,13 @@ class Repl:
             self.config.save()
             self.ui.success(f"animation {'on' if self.pet.animate else 'off'}")
             return True
+
+        if action == "name" and len(args) == 1:
+            typed = await self._type_in("what should she be called?",
+                                        self.pet.name)
+            if not typed:
+                return True
+            args = [action, typed]
 
         if action == "name" and len(args) > 1:
             self.pet.name = " ".join(args[1:])[:24]
@@ -2788,14 +2939,13 @@ class Repl:
         self.ui.warn("usage: /memory [show | add <note> | forget <text> | edit | reload]")
         return True
 
+    CTX_SIZES = (4096, 8192, 16384, 32768, 65536, 131072)
+    """The window sizes worth offering. Powers of two because that is what
+    every model is trained and every runner tuned for."""
+
     async def cmd_ctx(self, args: list[str]) -> bool:
         if not args:
-            used = self.agent.session.token_estimate()
-            self.ui.info(
-                f"num_ctx={self.config.num_ctx}, roughly {used} tokens in use "
-                f"({100 * used / max(1, self.config.num_ctx):.0f}%)"
-            )
-            return True
+            return await self._pick_context()
         try:
             value = int(args[0])
         except ValueError:
@@ -2807,6 +2957,55 @@ class Repl:
         if warning := await check_context(self.client, self.config):
             self.ui.warn(warning)
         return True
+
+    async def _pick_context(self) -> bool:
+        """Choose the context window from a list rather than be told the number.
+
+        Bare /ctx used to report the setting and stop -- which is the one
+        thing you already knew, since you asked. The sizes are the ones
+        worth having; the model's own maximum is marked when the server
+        told us what it is, because going past it costs memory and buys
+        nothing.
+        """
+        used = self.agent.session.token_estimate()
+        native = 0
+        info = getattr(self.agent, "model_info", None)
+        if info is not None:
+            native = getattr(info, "context_length", 0) or 0
+
+        sizes = sorted(set(self.CTX_SIZES) | {self.config.num_ctx}
+                       | ({native} if native else set()))
+        options = []
+        for size in sizes:
+            note = []
+            if native and size == native:
+                note.append("the model's own window")
+            elif native and size > native:
+                note.append(f"past the model's {native}")
+            if size < 8192:
+                note.append("too small for real work")
+            if used and size < used:
+                note.append(f"smaller than the {used} tokens already in use")
+            options.append((str(size), ", ".join(note) or f"{size // 1024}k tokens"))
+        options.append(("custom", "type an exact number"))
+
+        chosen = await self._pick("context window", options,
+                                  str(self.config.num_ctx))
+        if chosen is None:
+            return True
+        if chosen is NO_PICKER:
+            self.ui.info(
+                f"num_ctx={self.config.num_ctx}, roughly {used} tokens in use "
+                f"({100 * used / max(1, self.config.num_ctx):.0f}%)"
+            )
+            return True
+        if chosen == "custom":
+            typed = await self._type_in("context window, in tokens:",
+                                        str(self.config.num_ctx))
+            if not typed:
+                return True
+            chosen = typed
+        return await self.cmd_ctx([chosen])
 
     def cmd_stats(self) -> bool:
         usage = self.agent.session.usage
