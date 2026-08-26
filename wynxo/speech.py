@@ -118,10 +118,16 @@ _LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s*", re.MULTILINE)
 _BULLET = re.compile(r"^\s*[-*+]\s+", re.MULTILINE)
 _EMPHASIS = re.compile(r"(\*\*|__|\*|_)(.+?)\1", re.DOTALL)
-_PATHY = re.compile(r"\S*[/\\]\S*")
+_PATHY = re.compile(r"(?<!\S)\S*[/\\]\S*")
 """Anything with a slash in it. Read aloud, a path is a stream of
 punctuation names -- and the answer almost always says what the file *is*
-right next to it anyway."""
+right next to it anyway.
+
+Only a run that starts a word can match, which is what the greedy
+form found anyway -- but saying so keeps it linear. Left open, \\S*
+ate to the end at every position and gave the characters back one at
+a time: a 40k answer took ten seconds to prepare for speech.
+"""
 
 
 def speakable(text: str, limit: int = MAX_SPOKEN) -> str:

@@ -371,3 +371,37 @@ class TestSheStopsWhenWynxoDoes:
         from wynxo.speech import Speaker
 
         Speaker().stop()          # must not raise
+
+
+class TestSpeakableStaysFastOnLongAnswers:
+    """Preparing an answer for speech must not cost more than saying it.
+
+    The path rule was written \\S*[/\\\\]\\S*, which at every position ate to
+    the end of the answer, failed to find a slash, and gave the characters
+    back one at a time. A 40k answer took ten seconds -- with the UI
+    waiting on it.
+    """
+
+    BUDGET = 5.0    # linear does this in milliseconds; quadratic in seconds
+
+    def test_a_long_answer_with_no_paths_at_all(self):
+        import time
+
+        start = time.perf_counter()
+        speech.speakable("x" * 40_000, limit=10 ** 9)
+        assert time.perf_counter() - start < self.BUDGET
+
+    def test_a_long_answer_of_path_ish_characters(self):
+        # Worst case: one unbroken run of the characters a path is made of,
+        # with no slash anywhere to end the search early.
+        import time
+
+        start = time.perf_counter()
+        speech.speakable("a.b-c_d" * 6_000, limit=10 ** 9)
+        assert time.perf_counter() - start < self.BUDGET
+
+    def test_paths_still_come_out_of_a_long_answer(self):
+        text = "x" * 20_000 + " open src/main.py now " + "y" * 20_000
+        spoken = speech.speakable(text, limit=10 ** 9)
+        assert "src/main.py" not in spoken
+        assert "open" in spoken and "now" in spoken
