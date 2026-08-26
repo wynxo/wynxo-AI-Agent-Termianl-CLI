@@ -1286,6 +1286,29 @@ class TestThePickerInsideTheApp:
         assert seen["current"] == "gemma:2b"
 
 
+class TestNoTestMayNeedAConsole:
+    """A Windows runner has no console screen buffer, and prompt_toolkit
+    raises from the constructor when it asks for one. Building a
+    PromptSession or an Application in a test is therefore a Windows-only
+    failure that nothing here can reproduce -- which is exactly how it got
+    in twice.
+    """
+
+    def test_nothing_builds_a_prompt_session(self):
+        import ast
+        import pathlib
+
+        for path in sorted(pathlib.Path("tests").glob("test_*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and \
+                        ast.unparse(node.func) == "PromptSession":
+                    raise AssertionError(
+                        f"{path.name}:{node.lineno} builds a PromptSession; "
+                        "on a Windows runner that raises "
+                        "NoConsoleScreenBufferError")
+
+
 class TestWithNoConsoleAtAll:
     """Windows without a console handle.
 

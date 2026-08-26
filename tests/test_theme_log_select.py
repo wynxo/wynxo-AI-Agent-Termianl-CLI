@@ -699,14 +699,19 @@ class TestNothingWarnsAboutCursorPositions:
     """
 
     def test_the_helper_silences_it(self):
-        from prompt_toolkit import PromptSession
+        """Against a stand-in rather than a real PromptSession: building one
+        opens a console handle, and on a Windows runner there is not one --
+        the same NoConsoleScreenBufferError the chat layout was taught to
+        survive."""
+        import types
 
         from wynxo.select import silence_cpr_warning
 
-        session = PromptSession()
-        session.app.renderer.cpr_not_supported_callback = lambda: None
-        silence_cpr_warning(session.app)
-        assert session.app.renderer.cpr_not_supported_callback is None
+        application = types.SimpleNamespace(
+            renderer=types.SimpleNamespace(
+                cpr_not_supported_callback=lambda: None))
+        silence_cpr_warning(application)
+        assert application.renderer.cpr_not_supported_callback is None
 
     def test_it_survives_an_application_without_one(self):
         from wynxo.select import silence_cpr_warning
