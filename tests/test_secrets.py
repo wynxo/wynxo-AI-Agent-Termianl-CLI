@@ -14,6 +14,7 @@ lockfile checksums and function calls cannot read its own project.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -294,3 +295,46 @@ class TestTheSetting:
         from wynxo.cli import COMMANDS
 
         assert "/secrets" in COMMANDS
+
+
+class TestRedactionStaysFastOnLongLines:
+    """A minified bundle is one enormous line, and every read goes through here.
+
+    The URL-credential rule used to leave its scheme unbounded, so the
+    pattern ate to the end of the text at every position, failed to find
+    "://", and handed the characters back one at a time. Masking 80k
+    characters took 28 seconds; reading a 200k-character line took three
+    minutes. Nothing errored -- wynxo just stopped.
+    """
+
+    # Deliberately loose. The linear version does this in hundredths of a
+    # second and the quadratic one in tens of seconds, so anywhere in between
+    # separates them cleanly even on a slow shared runner.
+    BUDGET = 5.0
+
+    def _elapsed(self, text: str) -> float:
+        start = time.perf_counter()
+        redact(text)
+        return time.perf_counter() - start
+
+    def test_one_very_long_line_is_masked_promptly(self):
+        assert self._elapsed("x" * 80_000) < self.BUDGET
+
+    def test_a_long_line_of_url_ish_characters_is_too(self):
+        # Worst case for the scheme rule: every character could begin one.
+        assert self._elapsed("a+b-c.d" * 12_000) < self.BUDGET
+
+    def test_a_long_line_that_really_holds_a_dsn_is_too(self):
+        text = "x" * 40_000 + " postgres://user:hunter2@db/x " + "y" * 40_000
+        start = time.perf_counter()
+        cleaned, masked = redact(text)
+        assert time.perf_counter() - start < self.BUDGET
+        assert masked == 1
+        assert "hunter2" not in cleaned
+
+    def test_the_cost_grows_with_the_text_not_with_its_square(self):
+        small = self._elapsed("x" * 20_000)
+        large = self._elapsed("x" * 80_000)
+        # Four times the text. Linear gives ~4x, quadratic ~16x. Ten is a
+        # wide enough gate that timing noise on a tiny number cannot trip it.
+        assert large < max(small, 0.01) * 10

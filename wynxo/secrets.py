@@ -123,7 +123,15 @@ _KNOWN_TOKEN = re.compile(
 # sits inside a URL rather than beside a name, so neither the assignment rule
 # nor the token prefixes reach it -- and DSNs are one of the most common ways
 # a real credential ends up committed.
-_URL_CRED = re.compile(r"([a-zA-Z][\w+.-]*://[^\s:/@]+):([^\s:/@]+)@")
+# The scheme is bounded rather than left open. Unbounded, [\w+.-]* eats to
+# the end of the text at every single position, fails to find "://", and
+# gives the characters back one at a time -- quadratic. On a file with one
+# long line (a minified bundle, a lockfile, a base64 blob) that is not a
+# subtlety: masking 80k characters took 28 seconds, and every read_file and
+# every tool result goes through here. Bounded, the same text takes 0.02s.
+# 31 is far past any real scheme; the longest in the wild are custom
+# reverse-DNS app schemes, and those are nowhere near it.
+_URL_CRED = re.compile(r"([a-zA-Z][\w+.-]{0,31}://[^\s:/@]+):([^\s:/@]+)@")
 
 # The body has to actually span lines. A real key does; the one-line string
 # literal that *builds* the replacement ("BEGIN...\\n{MASK}\\n...END") does
