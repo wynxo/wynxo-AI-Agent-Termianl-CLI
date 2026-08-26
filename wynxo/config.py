@@ -18,7 +18,7 @@ from pathlib import Path
 from . import platforms
 from typing import Any
 
-from .schema import Field, Schema
+from .schema import Field, Schema, ValidationError
 
 DEFAULT_MODEL = "qwen3-coder:30b"
 DEFAULT_ENDPOINT = "http://127.0.0.1:11434"
@@ -28,6 +28,12 @@ DEFAULT_ENDPOINT = "http://127.0.0.1:11434"
 # common reason a local agent "goes stupid" halfway through a task.
 MIN_USABLE_CONTEXT = 16_384
 DEFAULT_CONTEXT = 32_768
+
+# Not a recommendation -- MIN_USABLE_CONTEXT above is that, and /doctor says
+# so. These are the bounds outside which the number is not a context window
+# at all. A config holding num_ctx: -5 used to load and be sent to Ollama.
+MIN_CONTEXT = 512
+MAX_CONTEXT = 8_388_608
 
 
 def config_dir() -> Path:
@@ -60,9 +66,11 @@ class Config(Schema):
                       default_factory=lambda: [Endpoint()])
     active_endpoint = Field(str, "Which endpoint to use.", default="local")
     model = Field(str, "Model tag.", default=DEFAULT_MODEL)
-    effort = Field(str, "Default effort level.", default="medium")
+    effort = Field(str, "Default effort level.", default="medium",
+                   choices=("low", "medium", "high", "xhigh", "max", "ultra"))
 
-    num_ctx = Field(int, "Context window sent with every request.", default=DEFAULT_CONTEXT)
+    num_ctx = Field(int, "Context window sent with every request.",
+                    default=DEFAULT_CONTEXT, ge=MIN_CONTEXT, le=MAX_CONTEXT)
     keep_alive = Field(str, "How long Ollama keeps the model resident. A reload of "
                             "a 30B costs many seconds and makes the agent feel broken.",
                        default="30m")
@@ -82,7 +90,8 @@ class Config(Schema):
                                   "private keys are refused; keys found inside "
                                   "ordinary files are masked.", default=True)
     theme = Field(str, "Colour palette: purple, sakura, midnight, ember or plain.",
-                  default="purple")
+                  default="purple",
+                  choices=("purple", "sakura", "midnight", "ember", "plain"))
     clear_on_start = Field(bool, "Clear the terminal when wynxo opens.", default=True)
     logo = Field(str, "Which start-up logo to show, or 'off' for none.",
                  default="wyn")
@@ -258,12 +267,39 @@ def load(project_dir: Path | None = None) -> Config:
         except ValueError:
             pass
 
-    try:
-        return Config.validate(data)
-    except Exception:
-        # A corrupt config file should never be fatal -- fall back to defaults
-        # rather than leaving the user with an agent that will not start.
-        return Config()
+    return _validate_forgivingly(data)
+
+
+def _validate_forgivingly(data: dict[str, Any]) -> Config:
+    """Build a Config, dropping only the settings that are actually wrong.
+
+    A single bad value used to cost the whole file. num_ctx: -5, or an
+    effort level named in a version that no longer has it, and every other
+    setting went with it: model, endpoints, theme, the lot -- silently, and
+    the next save wrote the defaults over what had been there.
+
+    So drop the offending keys and keep the rest, saying which went and
+    what it fell back to. Bounded by the number of fields: each pass either
+    removes at least one key or stops.
+    """
+    data = dict(data)
+    for _ in range(len(Config._fields) + 1):
+        try:
+            return Config.validate(data)
+        except ValidationError as exc:
+            bad = [loc for loc, _msg in exc.error_list if loc in data]
+            if not bad:
+                break
+            for loc, message in exc.error_list:
+                if loc in data:
+                    LOAD_PROBLEMS.append(
+                        f"{loc}={data[loc]!r} in your settings is not usable "
+                        f"({message}); using the default instead")
+                    del data[loc]
+        except Exception:
+            break
+    # Nothing salvageable, or a shape that is not settings at all.
+    return Config()
 
 
 def is_configured() -> bool:

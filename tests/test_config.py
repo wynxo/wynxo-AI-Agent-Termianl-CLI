@@ -467,3 +467,112 @@ class TestAnUnreadableSettingsFileSaysSo:
         from wynxo.cli import Repl
 
         assert "LOAD_PROBLEMS" in inspect.getsource(Repl._connect)
+
+
+class TestOneBadSettingDoesNotCostYouTheRest:
+    """A single unusable value used to discard the whole file.
+
+    load() caught every exception from Config.validate and returned a bare
+    Config(): num_ctx: -5 in the file, and your model, your endpoints, your
+    theme and your companion's name went with it. Silently -- and the next
+    save wrote the defaults over what had been there, so the settings were
+    not merely ignored, they were gone.
+    """
+
+    @pytest.fixture
+    def where(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("wynxo.config.config_dir", lambda: tmp_path)
+        return tmp_path
+
+    GOOD = {
+        "model": "my-favourite-model:70b",
+        "endpoints": [{"name": "gpubox", "url": "http://192.168.1.50:11434"}],
+        "active_endpoint": "gpubox",
+        "theme": "sakura",
+        "pet_name": "nyx",
+    }
+
+    def _load(self, where, tmp_path, extra):
+        import json
+
+        from wynxo.config import load
+
+        (where / "config.json").write_text(json.dumps({**self.GOOD, **extra}),
+                                           encoding="utf-8")
+        return load(tmp_path)
+
+    @pytest.mark.parametrize("bad", [
+        {"num_ctx": -5},
+        {"num_ctx": 0},
+        {"num_ctx": 99999999999999999999},
+        {"num_ctx": "big"},
+        {"effort": "supersonic"},
+        {"theme": "chartreuse"},
+        {"endpoints": "http://not-a-list"},
+    ])
+    def test_the_good_settings_all_survive(self, where, tmp_path, bad):
+        config = self._load(where, tmp_path, bad)
+        assert config.model == "my-favourite-model:70b"
+        assert config.pet_name == "nyx"
+        if "theme" not in bad:
+            assert config.theme == "sakura"
+        if "endpoints" not in bad:
+            assert config.endpoint().url == "http://192.168.1.50:11434"
+
+    @pytest.mark.parametrize("bad,field", [
+        ({"num_ctx": -5}, "num_ctx"),
+        ({"effort": "supersonic"}, "effort"),
+        ({"theme": "chartreuse"}, "theme"),
+    ])
+    def test_it_says_which_setting_it_dropped(self, where, tmp_path, bad, field):
+        from wynxo import config as config_module
+
+        self._load(where, tmp_path, bad)
+        said = " ".join(config_module.LOAD_PROBLEMS)
+        assert field in said, said
+        assert "default" in said, said
+
+    def test_the_bad_setting_falls_back_to_its_default(self, where, tmp_path):
+        from wynxo.config import DEFAULT_CONTEXT
+
+        config = self._load(where, tmp_path, {"num_ctx": -5, "effort": "supersonic"})
+        assert config.num_ctx == DEFAULT_CONTEXT
+        assert config.effort == "medium"
+
+    def test_several_bad_settings_are_all_reported(self, where, tmp_path):
+        from wynxo import config as config_module
+
+        self._load(where, tmp_path,
+                   {"num_ctx": -5, "effort": "supersonic", "theme": "chartreuse"})
+        said = " ".join(config_module.LOAD_PROBLEMS)
+        for field in ("num_ctx", "effort", "theme"):
+            assert field in said, said
+
+    def test_a_perfectly_good_file_is_reported_as_nothing_wrong(self, where, tmp_path):
+        from wynxo import config as config_module
+
+        config = self._load(where, tmp_path, {})
+        assert config_module.LOAD_PROBLEMS == []
+        assert config.num_ctx > 0
+
+    def test_a_usable_context_window_is_still_accepted(self, where, tmp_path):
+        # The bounds mark what is not a context window at all. What counts
+        # as sensible is /doctor's business, and it must stay free to warn
+        # about a small one rather than have it refused here.
+        from wynxo.config import MIN_CONTEXT
+
+        assert self._load(where, tmp_path, {"num_ctx": MIN_CONTEXT}).num_ctx == MIN_CONTEXT
+        assert self._load(where, tmp_path, {"num_ctx": 4096}).num_ctx == 4096
+        assert self._load(where, tmp_path, {"num_ctx": 131072}).num_ctx == 131072
+
+    def test_every_effort_level_the_cli_offers_is_accepted(self, where, tmp_path):
+        from wynxo.effort import POLICIES
+
+        for name in POLICIES:
+            assert self._load(where, tmp_path, {"effort": name}).effort == name
+
+    def test_every_theme_that_exists_is_accepted(self, where, tmp_path):
+        from wynxo import theme
+
+        for name in theme.names():
+            assert self._load(where, tmp_path, {"theme": name}).theme == name
