@@ -14,9 +14,6 @@ async def _stream_test_output(callback, line: str) -> None:
 def install() -> None:
     from .agent import Agent
 
-    # The public turn entry point is Agent.run(), not Agent.turn(). Guard the
-    # lookup so importing this optional hardening module never crashes merely
-    # because the core API was refactored.
     original_run = getattr(Agent, "run", None)
     if original_run is not None and not getattr(original_run, "_wynxo_run_hardening", False):
         async def run(self, request):
@@ -31,6 +28,13 @@ def install() -> None:
         return
 
     async def verify_with_tests(self):
+        # Preserve the core function's early exits (disabled verification,
+        # plan mode, no file changes, no runner, shell disabled). Looking up
+        # the shell before those guards made a disabled setting appear to run.
+        if not self.config.verify_with_tests or getattr(self.permissions, "mode", None) is not None and getattr(self.permissions.mode, "value", self.permissions.mode) == "plan":
+            return await original_verify(self)
+        if not self.checkpoints.changes_since(self._turn_mark):
+            return await original_verify(self)
         shell = self.tools.get("shell")
         if shell is None:
             return await original_verify(self)
