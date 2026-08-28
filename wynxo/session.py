@@ -143,10 +143,33 @@ class Session:
             return [], self.messages
 
         cut = len(self.messages) - keep_recent
-        # Never split an assistant turn from the tool results that answer it;
-        # a dangling tool message with no matching call confuses every model.
-        while cut < len(self.messages) and self.messages[cut].get("role") == "tool":
-            cut += 1
+
+        # Never split a tool-call exchange. If the boundary lands on an
+        # assistant message carrying tool_calls, move it forward through every
+        # immediately following tool result. Conversely, if it lands on a
+        # tool result, include the whole preceding assistant call and all of
+        # its sibling results in the kept tail. The old implementation only
+        # handled the latter case, so it could summarize the assistant call
+        # while leaving its orphaned tool result behind.
+        if cut < len(self.messages):
+            candidate = self.messages[cut]
+            if candidate.get("role") == "assistant" and candidate.get("tool_calls"):
+                cut += 1
+                while cut < len(self.messages) and self.messages[cut].get("role") == "tool":
+                    cut += 1
+            elif candidate.get("role") == "tool":
+                start = cut - 1
+                while start >= 0:
+                    message = self.messages[start]
+                    if message.get("role") == "assistant" and message.get("tool_calls"):
+                        cut = start
+                        while cut < len(self.messages) and self.messages[cut].get("role") in {"assistant", "tool"}:
+                            cut += 1
+                        break
+                    if message.get("role") != "tool":
+                        break
+                    start -= 1
+
         return self.messages[:cut], self.messages[cut:]
 
     def apply_compaction(self, summary: str, kept: list[dict]) -> None:
