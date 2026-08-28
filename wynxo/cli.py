@@ -1037,13 +1037,8 @@ class Repl:
         async with self.callbacks._turn_lock:
             self.callbacks._thinking_buffer.clear()
             self.callbacks._thinking_shown = 0
-            # Keep the classic watcher-start reference visible for the
-            # compatibility audit; the actual watcher is created and started
-            # inside the turn implementation after its bindings are prepared.
-            if self.chat is None:
-                watcher = None
-                if watcher is not None:
-                    watcher.start()
+            # The classic path starts its terminal watcher inside the locked
+            # turn; chat mode uses prompt-toolkit bindings instead.
             await self._turn_locked(text)
 
     async def _turn_locked(self, text: str) -> None:
