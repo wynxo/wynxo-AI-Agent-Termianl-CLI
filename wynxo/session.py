@@ -137,38 +137,66 @@ class Session:
 
         The tail is kept whole because the model needs exact recent state --
         a summarised tool result is worse than useless when it was the thing
-        the next step depends on.
+        the next step depends on. Tool-call exchanges are atomic: an assistant
+        message carrying tool calls always stays with all immediately following
+        tool results.
         """
         if len(self.messages) <= keep_recent:
             return [], self.messages
 
         cut = len(self.messages) - keep_recent
 
-        # Never split a tool-call exchange. If the boundary lands on an
-        # assistant message carrying tool_calls, move it forward through every
-        # immediately following tool result. Conversely, if it lands on a
-        # tool result, include the whole preceding assistant call and all of
-        # its sibling results in the kept tail. The old implementation only
-        # handled the latter case, so it could summarize the assistant call
-        # while leaving its orphaned tool result behind.
+        # Find the atomic tool-call exchange that contains the proposed
+        # boundary. If the boundary is at the assistant call, or anywhere in
+        # its following tool results, move the boundary to the start of that
+        # exchange. This may keep a few more than `keep_recent`, which is
+        # preferable to emitting an invalid history with orphaned tool
+        # messages or tool calls.
+        exchange_start = None
+        for index in range(cut, -1, -1):
+            message = self.messages[index]
+            if message.get("role") == "tool":
+                # A tool result belongs to the nearest preceding assistant
+                # carrying tool_calls. If the search reaches a non-tool before
+                # finding one, this is not a well-formed exchange; leave the
+                # original boundary alone and let normal history handling deal
+                # with it.
+                cursor = index - 1
+                while cursor >= 0 and self.messages[cursor].get("role") == "tool":
+                    cursor -= 1
+                if cursor >= 0:
+                    owner = self.messages[cursor]
+                    if owner.get("role") == "assistant" and owner.get("tool_calls"):
+                        exchange_start = cursor
+                break
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                exchange_start = index
+                break
+
+        if exchange_start is not None:
+            cut = exchange_start
+
+        # Also handle the case where the candidate boundary points immediately
+        # before a tool result. Walk left over a contiguous tool-result group
+        # and keep its owning assistant with it.
+        if cut < len(self.messages) and self.messages[cut].get("role") == "tool":
+            cursor = cut - 1
+            while cursor >= 0 and self.messages[cursor].get("role") == "tool":
+                cursor -= 1
+            if cursor >= 0:
+                owner = self.messages[cursor]
+                if owner.get("role") == "assistant" and owner.get("tool_calls"):
+                    cut = cursor
+
+        # If the boundary starts on an assistant tool call, keep every result
+        # that immediately answers it. This handles a boundary chosen at the
+        # exact start of an exchange.
         if cut < len(self.messages):
             candidate = self.messages[cut]
             if candidate.get("role") == "assistant" and candidate.get("tool_calls"):
                 cut += 1
                 while cut < len(self.messages) and self.messages[cut].get("role") == "tool":
                     cut += 1
-            elif candidate.get("role") == "tool":
-                start = cut - 1
-                while start >= 0:
-                    message = self.messages[start]
-                    if message.get("role") == "assistant" and message.get("tool_calls"):
-                        cut = start
-                        while cut < len(self.messages) and self.messages[cut].get("role") in {"assistant", "tool"}:
-                            cut += 1
-                        break
-                    if message.get("role") != "tool":
-                        break
-                    start -= 1
 
         return self.messages[:cut], self.messages[cut:]
 
