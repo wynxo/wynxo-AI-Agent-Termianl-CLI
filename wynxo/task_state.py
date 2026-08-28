@@ -82,6 +82,15 @@ class TaskStateMachine:
         if success and success not in self.successes:
             self.successes.append(success)
 
+    def clear_blocking_failures(self) -> None:
+        """A check that previously failed now passes. The old failure is
+        history, not current state: the completion report must not keep
+        saying "partially completed" for a failure that was fixed and
+        re-verified."""
+        self.failures = [f for f in self.failures
+                         if not f.startswith(("tests failed",
+                                              "syntax check failed"))]
+
     def set_root_cause(self, cause: str) -> None:
         self.root_cause = cause.strip()
 

@@ -62,6 +62,7 @@ def build_registry(
     memory: Memory | None = None,
     shield: Shield | None = None,
     app_catalog: ApplicationCatalog | None = None,
+    shell_max_output: int | None = None,
 ) -> Registry:
     tools: list[Tool] = [
         ReadFile(workspace, boundary, shield),
@@ -84,5 +85,8 @@ def build_registry(
         RunTests(workspace, boundary, shield),
     ]
     if allow_shell:
-        tools.append(Shell(workspace, boundary, shield))
+        kwargs = {}
+        if shell_max_output:
+            kwargs["max_output"] = shell_max_output
+        tools.append(Shell(workspace, boundary, shield, **kwargs))
     return Registry(tools)

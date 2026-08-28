@@ -1569,6 +1569,10 @@ class Repl:
         if self._dictation_task is not None and not self._dictation_task.done():
             self._dictation_task.cancel()
             return
+        if not self.config.stt_enabled:
+            self.ui.error("speech input is disabled: set stt_enabled=true in "
+                          "config (or use /config)")
+            return
         self._dictation_task = asyncio.ensure_future(self._dictate())
 
     async def _dictate(self) -> None:
@@ -1581,6 +1585,7 @@ class Repl:
                 transcription_timeout=self.config.stt_transcription_timeout,
             ),
             on_state=self._on_speech_state,
+            backend=self.config.stt_backend,
         )
         if session is None:
             self.ui.error(hint)

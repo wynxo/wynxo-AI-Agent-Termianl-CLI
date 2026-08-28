@@ -89,7 +89,11 @@ _SMALL_TALK = re.compile(
     r"who\s+are\s+you|what\s+are\s+you|what'?s?\s+your\s+name|"
     r"how\s+are\s+you(?:\s+(?:doing|today))?|how'?s\s+it\s+going|"
     r"what'?s?\s+up|wyd|how\s+are\s+things|"
-    r"are\s+you\s+(?:there|awake|ready|alive)|test(?:ing)?"
+    r"are\s+you\s+(?:there|awake|ready|alive)|test(?:ing)?|"
+    r"y(?:es|eah|ep)?|n(?:o|ope|ah)?|sure|alright|fine|good|right|wow|aha|"
+    r"help|need\s+help|i\s+need\s+help|i'?m?\s+(?:really\s+)?stuck|"
+    r"can\s+you\s+help\s+me|could\s+you\s+help\s+me|"
+    r"what'?s?|how'?s?\s+the\s+weather|what\s+is\s+the\s+weather|weather"
     # \b matters more than it looks: alternation takes the first branch that
     # matches, so h[ei]y? claimed the "he" of "hello" and left "llo" behind,
     # which is not small talk -- so "hello there" was treated as a task.
@@ -260,7 +264,8 @@ class Agent:
         self.shield = Shield(workspace, enabled=config.protect_secrets)
         self.tools = registry or build_registry(
             workspace, allow_shell=config.allow_shell,
-            boundary=boundary, memory=self.memory, shield=self.shield)
+            boundary=boundary, memory=self.memory, shield=self.shield,
+            shell_max_output=config.max_command_output_chars)
         self.permissions = PermissionStore()
         self.permissions.preapprove(config.auto_approve)
 
@@ -707,6 +712,16 @@ class Agent:
             self.task_state.record_success(f"{call.name}: {result.display or 'completed'}")
             if call.name == "read_file" and path:
                 self.task_state.add_file(str(path), changed=False)
+            if call.name in ("write_file", "edit_file", "multi_edit") and path:
+                # What the agent left on disk, so /undo can tell it apart
+                # from a change the user makes afterwards. Resolved exactly
+                # as _checkpoint resolved it, so the snapshot is found.
+                try:
+                    resolved = tool.resolve_path(str(path))
+                except (PermissionError, OSError, ValueError):
+                    resolved = None
+                if resolved is not None:
+                    self.checkpoints.mark_expected(resolved)
             if call.name == "todo_write" or self.checkpoints.changes_since(pre_call):
                 # A file changed or the plan moved: measurable progress, so
                 # repeat counts reset. A re-read after that is a fresh
@@ -913,20 +928,22 @@ class Agent:
         if focused:
             result = await run_tests(focused)
             if not result.ok:
-                return await self._report_test_failure(focused, result)
+                return await self._report_test_failure(focused, result, run_tests)
 
         result = await run_tests(runner.command)
         if result.ok:
             self.task_state.record_success(f"tests passed: {runner.command}")
             self.task_state.record_verification(runner.command)
             # A passing run is measurable progress: whatever the model does
-            # next starts from a clean repeat counter.
+            # next starts from a clean repeat counter. And it means a check
+            # that failed earlier in the turn is fixed, not still broken.
             self.task_state.mark_progress()
+            self.task_state.clear_blocking_failures()
             await self.cb.on_tool_result(
                 "tests", True, TESTS_PASSED_NOTE.format(command=runner.command), "")
             return 0
 
-        return await self._report_test_failure(runner.command, result)
+        return await self._report_test_failure(runner.command, result, run_tests)
 
     async def _syntax_gate(self, py_changed, shell) -> int:
         """Cheap validation when the project has no test runner: a Python
@@ -952,6 +969,7 @@ class Agent:
         if result.ok:
             self.task_state.record_success("syntax check passed")
             self.task_state.mark_progress()
+            self.task_state.clear_blocking_failures()
             await self.cb.on_tool_result(
                 "tests", True, "syntax check passed (compileall)", "")
             return 0
@@ -964,8 +982,12 @@ class Agent:
             output=body + testing.failure_report(result.output, self.workspace)))
         return 1
 
-    async def _report_test_failure(self, command: str, result) -> int:
-        """Turn a failed test run into the model's next instruction."""
+    async def _report_test_failure(self, command: str, result, retest) -> int:
+        """Turn a failed test run into the model's next instruction.
+
+        ``retest`` runs a command through the same harness that produced the
+        failure, so the fix pass can be verified once before the turn ends.
+        """
         code = result.metadata.get("exit_code", 0 if result.ok else 1)
         body = testing.summarise(result.output)
         body += testing.failure_report(result.output, self.workspace)
@@ -994,10 +1016,32 @@ class Agent:
         # in one go is usually making it worse, and the user is better served
         # by seeing the failure than by watching it thrash.
         follow = await self._act(max_iterations=min(12, self.policy.max_iterations))
-        return 0 if follow.interrupted else 1
+        if follow.interrupted:
+            return 0
 
-    async def _act(self, max_iterations: int | None = None) -> TurnResult:
-        """The tool loop proper."""
+        # The fix may have landed, and the turn is about to be declared done
+        # with the failure still on record. Re-run the exact command that
+        # failed, once: a passing retest clears the stale failure so the
+        # completion report and the user see current state, not history.
+        retest = await retest(command)
+        if retest.ok:
+            self.task_state.record_success(f"tests passed after fix: {command}")
+            self.task_state.record_verification(f"{command} (after fix)")
+            self.task_state.clear_blocking_failures()
+            self.task_state.mark_progress()
+            await self.cb.on_tool_result(
+                "tests", True, TESTS_PASSED_NOTE.format(command=command), "")
+            return 0
+        return 1
+
+    async def _act(self, max_iterations: int | None = None,
+                   first_turn: ParsedTurn | None = None) -> TurnResult:
+        """The tool loop proper.
+
+        ``first_turn`` is a turn the caller already obtained -- used when a
+        request routed as conversation comes back with tool calls, so those
+        calls are executed rather than silently dropped.
+        """
         limit = max_iterations or min(self.policy.max_iterations, self.config.max_tool_iterations)
         result = TurnResult(content="")
 
@@ -1009,11 +1053,15 @@ class Agent:
                 result.compacted = True
             await self._warn_if_over_the_window()
 
-            try:
-                turn = await self._call_model()
-            except ProviderError as exc:
-                result.errors.append(str(exc))
-                raise
+            if first_turn is not None:
+                turn = first_turn
+                first_turn = None
+            else:
+                try:
+                    turn = await self._call_model()
+                except ProviderError as exc:
+                    result.errors.append(str(exc))
+                    raise
 
             if turn.thinking and not self.config.stream:
                 await self.cb.on_thinking(turn.thinking)
@@ -1187,6 +1235,9 @@ class Agent:
         # integration") and calls launch_application with the user's own
         # words; the OS catalog decides what actually exists.
         chatting = is_small_talk(request)
+        initial: ParsedTurn | None = None
+        """A turn already obtained (conversation that grew tool calls); the
+        tool loop executes it before asking the model again."""
         if chatting:
             self.session.add_user(request)
             try:
@@ -1196,7 +1247,7 @@ class Agent:
                                   errors=[str(exc)])
             except asyncio.CancelledError:
                 raise Interrupted from None
-            if not turn.content.strip():
+            if not turn.content.strip() and not turn.tool_calls:
                 # Same one-chance recovery as the tool loop: a greeting that
                 # comes back empty should not die on the spot.
                 self.session.add_user(EMPTY_ANSWER_NUDGE)
@@ -1208,13 +1259,19 @@ class Agent:
                                       errors=[str(exc)])
                 except asyncio.CancelledError:
                     raise Interrupted from None
-            await self._warn_if_nothing_came_back(turn)
-            self.session.add_assistant(turn.content)
-            self.session.save()
-            return TurnResult(content=turn.content, iterations=1,
-                              elapsed=time.monotonic() - started)
+            if turn.tool_calls:
+                # Routing said conversation, but the model decided it needs
+                # tools. Never drop those calls: hand the turn to the tool
+                # loop and carry on like any other task.
+                initial = turn
+            else:
+                await self._warn_if_nothing_came_back(turn)
+                self.session.add_assistant(turn.content)
+                self.session.save()
+                return TurnResult(content=turn.content, iterations=1,
+                                  elapsed=time.monotonic() - started)
 
-        if self.policy.plan == "inline":
+        if self.policy.plan == "inline" and initial is None:
             request = (
                 f"{request}\n\n"
                 "(If this takes more than a couple of steps, open with a one-line "
@@ -1222,7 +1279,7 @@ class Agent:
             )
 
         plan = ""
-        if self.policy.plan in ("explicit", "critique"):
+        if initial is None and self.policy.plan in ("explicit", "critique"):
             self.session.add_user(request)
             try:
                 plan = await self._plan(request)
@@ -1246,11 +1303,11 @@ class Agent:
                     "to begin."
                 )
                 await self.cb.on_stage("executing")
-        else:
+        elif initial is None:
             self.session.add_user(request)
 
         try:
-            result = await self._act()
+            result = await self._act(first_turn=initial)
 
             if not result.interrupted and result.content:
                 # Inside the same guard as _act(). A provider error during

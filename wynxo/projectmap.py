@@ -111,18 +111,49 @@ def _python_symbols(text: str) -> list[str]:
     return out[:MAX_SYMBOLS_PER_FILE]
 
 
+def _is_junction(path: Path) -> bool:
+    """Windows junctions, which is_symlink() reports as False."""
+    try:
+        return bool(path.is_junction())
+    except AttributeError:      # Python before 3.12
+        return False
+
+
 def walk(root: Path, limit: int = MAX_FILES) -> list[Path]:
-    """Source files under ``root``, skipping the noise directories."""
+    """Source files under ``root``, skipping the noise directories.
+
+    Symlinks are not descended into at all. A link can point anywhere --
+    outside the project, or back at a parent -- and following it is how a
+    map either reads things it should not or loops forever on a self
+    reference (a junction to its own directory never empties the stack and
+    never grows the file list). The map is the real tree; links are not
+    part of it.
+    """
     found: list[Path] = []
     stack = [root]
+    seen: set[Path] = set()
     while stack and len(found) < limit:
         directory = stack.pop()
+        try:
+            key = directory.resolve()
+        except (OSError, RuntimeError):
+            key = directory
+        if key in seen:
+            continue
+        seen.add(key)
         try:
             entries = sorted(directory.iterdir(), key=lambda p: p.name.lower())
         except OSError:
             continue
         for entry in entries:
             if entry.name.startswith(".") and entry.name != ".github":
+                continue
+            # Links are not part of the map. is_symlink() catches POSIX
+            # links; Windows junctions need their own check because
+            # is_symlink() reports False for them. A junction to the
+            # project's own parent used to loop forever, and one pointing
+            # outside pulled unrelated files into the map.
+            if entry.is_symlink() or _is_junction(entry):
                 continue
             if entry.is_dir():
                 if entry.name not in SKIP_DIRS:

@@ -213,8 +213,16 @@ def test_repeated_identical_failure_is_flagged_as_no_progress(tmp_path: Path):
     agent, backend, _ = make_agent(tmp_path, ["Done."])
     result = type("R", (), {"ok": False, "output": "E   AssertionError: x",
                             "metadata": {"exit_code": 1}})()
-    asyncio.run(agent._report_test_failure("python -m pytest", result))
-    asyncio.run(agent._report_test_failure("python -m pytest", result))
+
+    async def still_failing(command):
+        return type("R", (), {"ok": False,
+                               "output": "E   AssertionError: x",
+                               "metadata": {"exit_code": 1}})()
+
+    asyncio.run(agent._report_test_failure("python -m pytest", result,
+                                           still_failing))
+    asyncio.run(agent._report_test_failure("python -m pytest", result,
+                                           still_failing))
     all_text = " ".join(
         str(m.get("content", "")) for req in backend.requests for m in req)
     assert "No meaningful progress" in all_text

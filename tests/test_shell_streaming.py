@@ -236,3 +236,20 @@ class TestStoppingMeansStopping:
                 type("Done", (), {"returncode": 0, "pid": 999999})())
 
         asyncio.run(check())
+
+
+def test_max_output_config_changes_what_is_kept(tmp_path):
+    """config.max_command_output_chars must actually reach the shell: the
+    hardcoded constant used to make the setting a lie."""
+    import sys
+    py = sys.executable
+    big = f"& '{py}' -c \"import sys; [print('x'*80) for _ in range(600)]\""
+    full = run(Shell(workspace=tmp_path), big)
+    capped = run(Shell(workspace=tmp_path, max_output=2000), big)
+    assert full.ok, full.error
+    assert capped.ok, capped.error
+    assert len(capped.output) < len(full.output), (
+        "a smaller max_output must retain less output")
+    # And the smaller cap is still useful: the tail is what a failing build
+    # shows, so the end of the output must survive even the small cap.
+    assert capped.output.strip().endswith("x" * 80)

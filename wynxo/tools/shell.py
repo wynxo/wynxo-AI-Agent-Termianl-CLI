@@ -172,6 +172,13 @@ class Shell(Tool):
     mutating = True
     concurrency_safe = False
 
+    def __init__(self, workspace, boundary=None, shield=None,
+                 max_output: int = MAX_OUTPUT):
+        super().__init__(workspace, boundary, shield)
+        # The agent threads config.max_command_output_chars through here; the
+        # hardcoded default keeps every other construction site working.
+        self.max_output = max(int(max_output or 0), 1000)
+
     async def run(self, args: ShellInput) -> ToolResult:
         command = args.command.strip()
         if not command:
@@ -289,7 +296,7 @@ class Shell(Tool):
 
         async def emit(line: str) -> None:
             nonlocal head_chars, dropped
-            if head_chars < MAX_OUTPUT // 2:
+            if head_chars < self.max_output // 2:
                 head.append(line)
                 head_chars += len(line) + 1
             else:

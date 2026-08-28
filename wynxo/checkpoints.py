@@ -16,6 +16,15 @@ MAX_SNAPSHOTS = 100
 MAX_FILE_BYTES = 2_000_000
 
 
+def _read(path: Path) -> str:
+    """The file exactly as capture and undo see it: no newline translation,
+    and bytes that are not UTF-8 kept as surrogates so round-trips are
+    exact."""
+    with path.open("r", encoding="utf-8", errors="surrogateescape",
+                   newline="") as handle:
+        return handle.read()
+
+
 @dataclass
 class Snapshot:
     path: Path
@@ -24,6 +33,12 @@ class Snapshot:
     tool: str
     when: float = field(default_factory=time.time)
     label: str = ""
+    expected: str | None = None
+    """What the file held when the agent finished its edit, filled in after
+    the write succeeds. Undo refuses when the current content differs from
+    this: the file drifted since the agent touched it, which means someone
+    else -- almost always the user -- changed it, and undoing would destroy
+    that work."""
 
     @property
     def existed(self) -> bool:
@@ -65,6 +80,21 @@ class Checkpoints:
         if len(self._stack) > MAX_SNAPSHOTS:
             self._stack.pop(0)
 
+    def mark_expected(self, path: Path) -> None:
+        """Record what ``path`` holds right now as the state the agent left.
+
+        Called after a successful edit. Undo compares the file against this
+        before reverting: if it differs, the file changed after the agent
+        was done with it, and undoing would overwrite someone else's work.
+        """
+        for snapshot in reversed(self._stack):
+            if snapshot.path == path:
+                try:
+                    snapshot.expected = _read(snapshot.path)
+                except OSError:
+                    snapshot.expected = None
+                return
+
     def undo(self) -> tuple[bool, str]:
         """Revert the most recent change, refusing if the file drifted since it."""
         if not self._stack:
@@ -74,11 +104,21 @@ class Checkpoints:
         name = snapshot.label or snapshot.path.name
 
         try:
+            # The snapshot knows what the agent left behind. Anything else
+            # now on disk means someone changed the file after the agent
+            # finished -- almost always the user -- and undoing over it
+            # would destroy that work silently. Refuse.
+            if snapshot.expected is not None and snapshot.path.exists():
+                if _read(snapshot.path) != snapshot.expected:
+                    return False, (
+                        f"{name} changed after it was edited -- not undoing "
+                        "over the newer change."
+                    )
             # A checkpoint is safe only if the current file still represents
             # the agent's last edit. If the user changed it afterwards, never
             # overwrite that work silently.
             if snapshot.existed and snapshot.path.exists():
-                current = snapshot.path.read_text(encoding="utf-8", errors="surrogateescape", newline="")
+                current = _read(snapshot.path)
                 if current == snapshot.content:
                     return False, f"{name} is already at its checkpoint state."
             if snapshot.existed:

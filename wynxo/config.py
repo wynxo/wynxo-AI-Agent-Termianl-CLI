@@ -137,8 +137,10 @@ class Config(Schema):
     speech_rate = Field(int, "Speaking rate. 0 leaves the engine's default; "
                              "the scale differs per engine.", default=0)
     speech_model = Field(str, "Path to a piper .onnx voice model.", default="")
-    stt_enabled = Field(bool, "Enable microphone speech recognition independently of TTS.", default=False)
-    stt_backend = Field(str, "Speech recognition backend name.", default="auto")
+    stt_enabled = Field(bool, "Enable microphone speech recognition (Ctrl-R).", default=True)
+    stt_backend = Field(str, "Speech recognition backend: auto, offline (faster-whisper) "
+                              "or online (SpeechRecognition).", default="auto",
+                        choices=("auto", "offline", "online"))
     stt_device = Field((str, int), "Microphone device name or index, or empty for the default.", default="")
     stt_language = Field(str, "Speech recognition language, for example en-US.", default="")
     stt_silence_timeout = Field(float, "Seconds of silence before recording stops.", default=1.25, ge=0.2, le=10.0)

@@ -233,3 +233,56 @@ class TestUndoPutsBackExactlyWhatWasThere:
         checkpoints.undo()
 
         assert path.read_bytes() == before
+
+
+class TestUndoNeverClobbersUserChanges:
+    """The pre-edit snapshot cannot tell the agent's edit apart from a
+    change the user made afterwards -- so the post-edit state is recorded
+    too, and undo refuses when the file drifted from it."""
+
+    def test_undo_refuses_when_the_user_edited_after_the_agent(self, tmp_path):
+        from wynxo.checkpoints import Checkpoints
+
+        target = tmp_path / "a.py"
+        target.write_text("original\n")
+        points = Checkpoints()
+        points.capture(target, "edit_file")
+        target.write_text("agent edit\n")        # the agent's change
+        points.mark_expected(target)             # what the agent left
+        target.write_text("user edit after\n")   # the user changes it again
+
+        ok, message = points.undo()
+        assert not ok
+        assert "changed after" in message
+        assert target.read_text() == "user edit after\n", \
+            "the user's change must survive"
+
+    def test_undo_still_works_when_only_the_agent_edited(self, tmp_path):
+        from wynxo.checkpoints import Checkpoints
+
+        target = tmp_path / "a.py"
+        target.write_text("original\n")
+        points = Checkpoints()
+        points.capture(target, "edit_file")
+        target.write_text("agent edit\n")
+        points.mark_expected(target)
+
+        ok, message = points.undo()
+        assert ok
+        assert target.read_text() == "original\n"
+
+    def test_undo_of_a_new_file_refuses_if_the_user_edited_it(self, tmp_path):
+        from wynxo.checkpoints import Checkpoints
+
+        created = tmp_path / "new.py"
+        points = Checkpoints()
+        points.capture(created, "write_file")    # did not exist
+        created.write_text("agent wrote this\n")
+        points.mark_expected(created)
+        created.write_text("user edited it\n")
+
+        ok, message = points.undo()
+        assert not ok
+        assert "changed after" in message
+        assert created.read_text() == "user edited it\n", \
+            "deleting would destroy the user's edit"

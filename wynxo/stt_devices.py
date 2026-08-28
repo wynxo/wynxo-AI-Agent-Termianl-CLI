@@ -201,14 +201,17 @@ class GoogleWebTranscriber:
 def create_session(config: SpeechConfig | None = None,
                    on_state=None,
                    recorder=None, transcriber=None,
+                   backend: str = "auto",
                    ) -> tuple[SpeechSession | None, str]:
     """A ready SpeechSession, or (None, what-to-install).
 
     The backends are detected, not configured: whichever transcriber is
-    installed is the one used, offline preferred over online. Both halves
-    are optional dependencies and the hint names exactly what is missing,
-    so a user who presses Ctrl-R on a fresh machine learns the one command
-    that makes it work.
+    installed is the one used, offline preferred over online. ``backend``
+    forces a preference -- "offline" uses faster-whisper, "online" uses
+    SpeechRecognition -- and "auto" (the default) keeps the detection
+    order. Both halves are optional dependencies and the hint names exactly
+    what is missing, so a user who presses Ctrl-R on a fresh machine learns
+    the one command that makes it work.
     """
     config = config or SpeechConfig()
 
@@ -219,15 +222,13 @@ def create_session(config: SpeechConfig | None = None,
         except ImportError:
             recorder = None
     if transcriber is None:
-        try:
-            import faster_whisper  # noqa: F401
-            transcriber = WhisperTranscriber()
-        except ImportError:
-            try:
-                import speech_recognition  # noqa: F401
-                transcriber = GoogleWebTranscriber()
-            except ImportError:
-                transcriber = None
+        if backend == "online":
+            transcriber = _transcriber_online()
+        elif backend == "offline":
+            transcriber = _transcriber_offline()
+        else:
+            # auto: offline preferred, online as the fallback.
+            transcriber = _transcriber_offline() or _transcriber_online()
 
     if recorder is None and transcriber is None:
         return None, ("speech input needs a microphone backend and a "
@@ -240,6 +241,22 @@ def create_session(config: SpeechConfig | None = None,
                       "or SpeechRecognition (online)")
     return SpeechSession(recorder, transcriber, config, on_state), \
         f"stt: {getattr(recorder, 'name', '?')} + {getattr(transcriber, 'name', '?')}"
+
+
+def _transcriber_offline():
+    try:
+        import faster_whisper  # noqa: F401
+        return WhisperTranscriber()
+    except ImportError:
+        return None
+
+
+def _transcriber_online():
+    try:
+        import speech_recognition  # noqa: F401
+        return GoogleWebTranscriber()
+    except ImportError:
+        return None
 
 
 __all__ = [

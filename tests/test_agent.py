@@ -1252,3 +1252,72 @@ class TestCompletionReportFromState:
         assert result.content == "hey!"
         assert agent.task_state.completion_report() is None
         asyncio.run(agent.client.aclose())
+
+
+class TestChatRoutingKeepsToolCalls:
+    """Routing is a heuristic, so it must never be able to discard work: if a
+    turn routed as conversation comes back with tool calls, they run."""
+
+    def test_chat_turn_with_tool_calls_executes_them(self, tmp_path):
+        (tmp_path / "a.txt").write_text("hello\n")
+        agent, fake, cb = make_agent(tmp_path, [
+            # A conversational request, answered with a tool call.
+            {"tool_calls": [{"function": {"name": "read_file",
+                                          "arguments": {"path": "a.txt"}}}]},
+            {"content": "It says hello."},
+        ])
+        result = asyncio.run(agent.run("hi"))
+        assert result.content == "It says hello."
+        # The read actually ran and its result reached the model.
+        tool_msgs = [m for m in fake.requests[-1]["messages"]
+                     if m.get("role") == "tool"]
+        assert len(tool_msgs) == 1, "the tool call must not be dropped"
+        assert "hello" in tool_msgs[0].get("content", "")
+        asyncio.run(agent.client.aclose())
+
+
+class TestConversationRouting:
+    """The classifier must keep conversation conversational and tasks
+    task-like; the dangerous direction is a real request treated as chat."""
+
+    def test_affirmations_and_questions_are_chat(self):
+        from wynxo.agent import is_small_talk
+        for text in ("yes", "no", "yeah", "sure", "good", "ok", "help",
+                     "i need help", "can you help me", "what is the weather",
+                     "what's up", "testing"):
+            assert is_small_talk(text), f"{text!r} should be conversation"
+
+    def test_real_work_is_never_chat(self):
+        from wynxo.agent import is_small_talk
+        for text in ("fix this bug", "fix calc.py", "open vscode",
+                     "read README.md", "run the tests", "delete temp.txt",
+                     "hello, now fix the parser", "help me fix this",
+                     "the code is broken", "check the logs",
+                     "what is the bug in shell.py", "how do I install pytest"):
+            assert not is_small_talk(text), f"{text!r} should be a task"
+
+
+class TestUndoProtectsUserChangesEndToEnd:
+    """The agent's edit, then a user edit on top, then /undo: the user's
+    change must survive. The pre-edit snapshot alone cannot tell the two
+    apart; the post-edit expected state is what makes it safe."""
+
+    def test_user_edit_after_the_agent_survives_undo(self, tmp_path):
+        (tmp_path / "a.txt").write_text("original\n")
+        agent, fake, _ = make_agent(tmp_path, [
+            {"tool_calls": [{"function": {"name": "edit_file",
+                                          "arguments": {"path": "a.txt",
+                                                        "old_text": "original",
+                                                        "new_text": "agent edit"}}}]},
+            {"content": "Done."},
+        ])
+        result = asyncio.run(agent.run("Update a.txt"))
+        assert result.content == "Done."
+        assert (tmp_path / "a.txt").read_text() == "agent edit\n"
+        # The user edits on top of the agent's work.
+        (tmp_path / "a.txt").write_text("user edit\n")
+        ok, message = agent.checkpoints.undo()
+        assert not ok, "undo must refuse to clobber the user's edit"
+        assert "changed after" in message
+        assert (tmp_path / "a.txt").read_text() == "user edit\n"
+        asyncio.run(agent.client.aclose())
