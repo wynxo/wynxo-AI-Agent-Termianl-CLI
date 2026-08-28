@@ -400,9 +400,11 @@ class ChatUI:
                                           input_processors=[])
         composer = Window(
             content=composer_control,
-            height=1,
+            # Keep the footer compact. The containing footer owns the fixed
+            # rows; this window must never absorb the flexible body space.
+            height=Dimension(min=1, preferred=1, max=3),
             wrap_lines=True,
-            dont_extend_height=False,
+            dont_extend_height=True,
             get_line_prefix=lambda *_: [("class:prompt", self._composer_prefix())],
         )
         # The composer is a fixed bottom block. A one-line Window lets long
@@ -410,10 +412,12 @@ class ChatUI:
         # scrolling BufferControl keeps the caret and the newest text visible
         # while leaving the bottom border immovable.
         composer_frame = HSplit([
-            Window(content=FormattedTextControl(self._edge(True)), height=1),
+            Window(content=FormattedTextControl(self._edge(True)), height=1,
+                   dont_extend_height=True),
             composer,
-            Window(content=FormattedTextControl(self._edge(False)), height=1),
-        ])
+            Window(content=FormattedTextControl(self._edge(False)), height=1,
+                   dont_extend_height=True),
+        ], height=Dimension(min=3, preferred=3, max=5))
         header = FloatContainer(
             content=Window(content=FormattedTextControl(self._header_fragments),
                            height=1),
@@ -429,11 +433,11 @@ class ChatUI:
         body = HSplit([
             header,
             Window(content=FormattedTextControl(self._rule_fragments),
-                   height=1),
+                   height=1, dont_extend_height=True),
             transcript,
             status,
             composer_frame,
-        ])
+        ], height=Dimension(min=0, preferred=0, weight=1))
 
         # The completer had nowhere to draw. A Buffer with a completer set
         # will happily compute suggestions and show none of them unless the
