@@ -3,19 +3,19 @@ from __future__ import annotations
 
 def install() -> None:
     from .tools.search import Glob, Grep
+    from .tools.files import IGNORED
 
     original_collect = Glob._collect
     if not getattr(original_collect, "_wynxo_hidden_config", False):
         def collect(self, root, pattern):
             out = []
-            ignored = __import__("wynxo.tools.files", fromlist=["IGNORED"]).IGNORED
             import fnmatch
             for path in root.rglob("*"):
                 if len(out) > 200 * 4:
                     break
                 if not path.is_file():
                     continue
-                if any(part in ignored for part in path.parts):
+                if any(part in IGNORED for part in path.parts):
                     continue
                 rel = self.relative(path)
                 if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(path.name, pattern):
@@ -29,7 +29,6 @@ def install() -> None:
     if not getattr(original_candidates, "_wynxo_hidden_config", False):
         def candidates(self, root, glob):
             import fnmatch
-            from .files import IGNORED
             out = []
             for path in root.rglob("*"):
                 if not path.is_file():
