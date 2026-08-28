@@ -22,5 +22,6 @@ from . import _journal_hardening as _journal_hardening  # noqa: F401,E402
 from . import _journal_permissions_hardening as _journal_permissions_hardening  # noqa: F401,E402
 from . import _mentions_hardening as _mentions_hardening  # noqa: F401,E402
 from . import _discovery_hardening as _discovery_hardening  # noqa: F401,E402
+from . import _atomic_hardening as _atomic_hardening  # noqa: F401,E402
 
 __all__ = ["__version__"]
