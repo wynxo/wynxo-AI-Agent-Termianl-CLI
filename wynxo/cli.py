@@ -1034,6 +1034,12 @@ class Repl:
 
     async def turn(self, text: str) -> None:
         """Run one request, with a live status bar and mid-flight keybinds."""
+        # The classic watcher is started in the locked implementation after
+        # its bindings are created; chat mode intentionally uses prompt-toolkit.
+        if self.chat is None:
+            watcher = None
+            if watcher is not None:
+                watcher.start()
         async with self.callbacks._turn_lock:
             self.callbacks._thinking_buffer.clear()
             self.callbacks._thinking_shown = 0
