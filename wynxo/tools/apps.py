@@ -39,7 +39,12 @@ class LaunchApplication(Tool):
         "(Start Menu shortcuts on Windows, /Applications on macOS, .desktop "
         "entries on Linux) and launches a matching application. Never guess "
         "and never substitute another application; if nothing installed "
-        "matches, the tool says so and you should tell the user."
+        "matches, the tool says so and you should tell the user.\n\n"
+        "A successful launch completes the request: reply with a short "
+        "confirmation and stop. Do not continue inspecting files, planning "
+        "or running further tools unless the user asked for additional work "
+        "in the same message -- if they did, do that work before launching, "
+        "or launch last."
     )
     Input = LaunchApplicationInput
     mutating = True
@@ -98,8 +103,11 @@ class LaunchApplication(Tool):
                 status="failed", application=entry.name,
                 source=entry.source, path=str(entry.path))
         return ToolResult.success(
-            f"Launched {entry.name}.",
+            f"Launched {entry.name}. This completes the request -- reply "
+            "with a short confirmation and stop; do not perform further "
+            "tool calls unless the user asked for additional work.",
             display=f"launched {entry.name}",
+            terminal=True,
             status="launched", application=entry.name,
             source=entry.source, path=str(entry.path))
 

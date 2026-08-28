@@ -30,17 +30,30 @@ class ToolResult:
     """What the user sees, when it should differ (e.g. a rendered diff)."""
 
     error: str = ""
+    terminal: bool = False
+    """Whether completing this call completes the user's request.
+
+    A tool sets this when its success *is* the answer -- launching an
+    application, for example. The agent treats it as a structured stop
+    signal: the tool loop ends instead of continuing to invent coding work,
+    unless the user asked for more in the same request. It is intent the
+    tool knows deterministically, never something the model has to remember.
+    """
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def success(cls, output: str, display: str = "", **meta) -> "ToolResult":
-        return cls(ok=True, output=output, display=display, metadata=meta)
+        terminal = bool(meta.pop("terminal", False))
+        return cls(ok=True, output=output, display=display,
+                   terminal=terminal, metadata=meta)
 
     @classmethod
     def failure(cls, error: str, **meta) -> "ToolResult":
         # The error goes in `output` too: the model only reads that field, and
         # a tool failing silently is how agents get stuck in loops.
-        return cls(ok=False, output=f"ERROR: {error}", error=error, metadata=meta)
+        terminal = bool(meta.pop("terminal", False))
+        return cls(ok=False, output=f"ERROR: {error}", error=error,
+                   terminal=terminal, metadata=meta)
 
 
 class Tool(ABC):

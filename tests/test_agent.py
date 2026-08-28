@@ -120,6 +120,75 @@ def make_agent(tmp_path, turns, effort="low", capabilities=("tools",),
     return agent, fake, cb
 
 
+class TestSystemActionEndsTheTurn:
+    """A successful system action (application launch) is the answer: the
+    turn ends there instead of the model continuing into invented coding
+    work -- no further tool calls, no repository inspection, no tests."""
+
+    async def test_a_successful_launch_stops_the_tool_loop(self, tmp_path,
+                                                           monkeypatch):
+        from wynxo.scope import Mode
+        from wynxo.tools import apps as apps_module
+        from wynxo.tools.appcatalog import (AppEntry, ApplicationCatalog,
+                                            Sources)
+
+        launched = []
+
+        async def noop_launch(entry):
+            launched.append(str(entry.path))
+
+        monkeypatch.setattr(apps_module, "_launch_entry", noop_launch)
+
+        agent, fake, cb = make_agent(tmp_path, [
+            {"tool_calls": [{"function": {"name": "launch_application",
+                                          "arguments": {"query": "Editor"}}}]},
+            {"content": "Editor is open."},
+            # The model would have kept going after the launch; the loop must
+            # never reach these.
+            {"tool_calls": [{"function": {"name": "read_file",
+                                          "arguments": {"path": "x.py"}}}]},
+            {"content": "must never be reached"},
+        ])
+        catalog = ApplicationCatalog(sources=Sources(
+            shortcut_dirs=(), use_app_paths=False))
+        catalog._entries = (AppEntry("Editor", tmp_path / "Editor.lnk",
+                                     "start_menu"),)
+        agent.tools.get("launch_application").catalog = catalog
+        agent.permissions.mode = Mode.AUTO
+
+        result = await agent.run("open the editor")
+        assert result.terminal_action is True
+        assert result.content == "Editor is open."
+        assert len(fake.requests) == 2, (
+            "the loop must stop after the launch instead of making "
+            "further tool calls")
+        assert [name for name, _ in cb.tools] == ["launch_application"]
+        assert launched
+        await agent.client.aclose()
+
+    async def test_a_failed_launch_does_not_end_the_turn(self, tmp_path):
+        """A miss is not terminal: the model still needs to tell the user and
+        decide what to do next, so the loop carries on normally."""
+        from wynxo.scope import Mode
+        from wynxo.tools.appcatalog import ApplicationCatalog, Sources
+
+        agent, fake, cb = make_agent(tmp_path, [
+            {"tool_calls": [{"function": {"name": "launch_application",
+                                          "arguments": {"query": "Nothing Here"}}}]},
+            {"content": "I could not find an application called that."},
+        ])
+        catalog = ApplicationCatalog(sources=Sources(
+            shortcut_dirs=(), use_app_paths=False))
+        agent.tools.get("launch_application").catalog = catalog
+        agent.permissions.mode = Mode.AUTO
+
+        result = await agent.run("open Nothing Here")
+        assert result.terminal_action is False
+        assert "could not find" in result.content.lower()
+        assert len(fake.requests) == 2
+        await agent.client.aclose()
+
+
 class TestBasicLoop:
     async def test_plain_answer_no_tools(self, tmp_path):
         agent, _, cb = make_agent(tmp_path, [{"content": "It is 42."}])

@@ -56,6 +56,32 @@ def test_a_matched_application_is_launched(monkeypatch, tmp_path):
     assert launched[0].endswith("Visual Studio Code.lnk")
 
 
+def test_a_successful_launch_is_a_terminal_action(monkeypatch, tmp_path):
+    """Launching the application *is* the answer to the user's request; the
+    agent must be able to stop the turn on it rather than inventing coding
+    work after it."""
+    launched = []
+    patch_startfile(monkeypatch, launched)
+    tool = tool_with(catalog_with(tmp_path, "Steam"))
+    result = asyncio.run(tool.invoke({"query": "Steam"}))
+    assert result.ok
+    assert result.terminal is True
+
+
+def test_a_miss_and_ambiguity_are_not_terminal(tmp_path, monkeypatch):
+    """Only a real launch ends the turn. A miss or an ambiguous query leaves
+    the model to tell the user and ask -- the turn is not over yet."""
+    launched = []
+    patch_startfile(monkeypatch, launched)
+    tool = tool_with(catalog_with(tmp_path, "Alpha Editor", "Beta Editor"))
+    ambiguous = asyncio.run(tool.invoke({"query": "editor"}))
+    assert not ambiguous.ok
+    assert ambiguous.terminal is False
+    miss = asyncio.run(tool.invoke({"query": "No Such Thing"}))
+    assert not miss.ok
+    assert miss.terminal is False
+
+
 def test_the_launch_message_says_what_was_launched(monkeypatch, tmp_path):
     launched = []
     patch_startfile(monkeypatch, launched)

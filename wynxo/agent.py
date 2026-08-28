@@ -209,6 +209,9 @@ class TurnResult:
     compacted: bool = False
     empty_retried: bool = False
     recovered: bool = False
+    terminal_action: bool = False
+    """A system action (e.g. an application launch) succeeded and the turn
+    ended there, by design, instead of continuing into coding work."""
     """The loop hit the no-progress repeat cap and gave the model a
     structured recovery prompt before it kept going."""
     errors: list[str] = field(default_factory=list)
@@ -541,6 +544,10 @@ class Agent:
             batch.append(call)
         return batch if len(batch) > 1 else []
 
+    def _note_terminal(self, result) -> None:
+        if isinstance(result, ToolResult) and result.terminal:
+            self._terminal_action = True
+
     async def _run_together(self, batch: list) -> None:
         """Run a batch of read-only calls at once.
 
@@ -578,6 +585,7 @@ class Agent:
             event = ToolEvent(call.name, summarise_call(call.name, call.arguments, self.workspace))
             event.start()
             if isinstance(result, ToolResult):
+                self._note_terminal(result)
                 event.finish(result.ok, output=result.output, error=result.error,
                              display=result.display, **result.metadata)
                 await self.cb.on_tool_result(call.name, result.ok, result.display,
@@ -689,6 +697,7 @@ class Agent:
             tool.context_left = 0
         self.session.usage.tool_calls += 1
 
+        self._note_terminal(result)
         event.finish(result.ok, output=result.output, error=result.error,
                      display=result.display, execution_id=execution_id,
                      **result.metadata)
@@ -1044,6 +1053,7 @@ class Agent:
         """
         limit = max_iterations or min(self.policy.max_iterations, self.config.max_tool_iterations)
         result = TurnResult(content="")
+        self._terminal_action = False
 
         for iteration in range(limit):
             result.iterations = iteration + 1
@@ -1110,6 +1120,27 @@ class Agent:
                 await self.cb.on_warning(
                     f"{stuck}; stopping the tool loop.")
                 result.content = f"(stopped: {stuck})"
+                return result
+
+            if self._terminal_action:
+                # A system action succeeded: the user's request was to launch
+                # an application (or similar), and launching it *is* the
+                # answer. Stop the tool loop now -- further tool calls,
+                # planning follow-through and verification would be invented
+                # work the user did not ask for. A closing line is produced
+                # only when the model gave none alongside its tool call.
+                result.terminal_action = True
+                if not turn.content.strip():
+                    try:
+                        closing = await self._call_model(
+                            use_tools=False, stream_content=False)
+                        if closing.content.strip():
+                            result.content = closing.content.strip()
+                            self.session.add_assistant(closing.content)
+                    except ProviderError:
+                        pass
+                else:
+                    result.content = turn.content
                 return result
 
         await self.cb.on_warning(
@@ -1309,7 +1340,8 @@ class Agent:
         try:
             result = await self._act(first_turn=initial)
 
-            if not result.interrupted and result.content:
+            if not result.interrupted and result.content \
+                    and not result.terminal_action:
                 # Inside the same guard as _act(). A provider error during
                 # verification used to escape run() entirely and take the
                 # whole REPL down with it -- the work was already done, and
