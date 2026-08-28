@@ -24,9 +24,10 @@ def make_chat(pet_mood="idle", pet_on=True, pet_animate=True) -> ChatUI:
 
 
 def text_of(fragments) -> str:
-    """The visible text of (style, text) fragment lists, as the renderer
-    would lay it out -- newlines between top-level entries."""
-    return "\n".join(text for _, text in fragments)
+    """The visible text of (style, text) fragment lists, exactly as the
+    renderer lays it out: fragments concatenate on one line, and every row
+    but the last carries its own trailing newline."""
+    return "".join(text for _, text in fragments).rstrip("\n")
 
 
 class TestFragmentContract:
@@ -53,6 +54,66 @@ class TestFragmentContract:
         assert converted, "renderer conversion must not raise"
         assert all(isinstance(style, str) and isinstance(text, str)
                    for style, text in converted)
+
+
+class TestTheFloatRendersAsRows:
+    """The float feeds a FormattedTextControl, which lays fragments out on
+    one line unless the text carries newlines. A flat list used to render
+    the pet, toast and panel as one wrapped blob in the real application;
+    every row must land on its own screen line."""
+
+    def _screen_rows(self, chat) -> list[str]:
+        from prompt_toolkit.output import DummyOutput
+        from prompt_toolkit.renderer import Renderer
+
+        class Capture(DummyOutput):
+            def __init__(self):
+                self.data = ""
+
+            def write(self, data):
+                self.data += data
+
+            def flush(self):
+                pass
+
+        out = Capture()
+        renderer = Renderer(chat.app.style, out, full_screen=True)
+        renderer.render(chat.app, chat.app.layout, is_done=False)
+        buf = renderer._last_screen.data_buffer
+        rows = []
+        for y in range(16):
+            row = buf[y]
+            cells = []
+            for x in range(80):
+                ch = row.get(x, None)
+                cells.append(ch.char if ch else " ")
+            rows.append("".join(cells))
+        return rows
+
+    def test_the_pet_and_panel_each_keep_their_own_rows(self):
+        chat = make_chat(pet_mood="idle")
+        chat.size = lambda: (80, 24)
+        chat.set_todos("[x] inspect\n[>] edit\n[ ] test", title="Fix")
+        rows = self._screen_rows(chat)
+        # The pet face, its tail and the panel's box each occupy distinct
+        # screen rows on the right-hand side -- never one wrapping line.
+        joined = "\n".join(row.rstrip() for row in rows)
+        pet_face = chat._pet_lines()[0]
+        assert joined.index(pet_face) < joined.index("\u256d")  # ╭ above the box
+        assert "\u256d" in joined and "\u256f" in joined       # ╭ and ╯ both present
+        assert joined.index("\u256d") < joined.index("\u256f")   # box is upright
+
+    def test_panel_rows_are_distinct_lines_not_a_blob(self):
+        chat = make_chat(pet_mood="idle")
+        chat.size = lambda: (80, 24)
+        chat.set_todos("[x] inspect\n[>] edit\n[ ] test", title="Fix")
+        rows = self._screen_rows(chat)
+        for row in rows:
+            assert len(row.rstrip()) <= 80, "no wrapped overflow past the edge"
+        # Every panel marker sits on its own row: no row carries two markers.
+        for row in rows:
+            marker_count = sum(row.count(m) for m in ("\u2713", "\u22c6"))
+            assert marker_count <= 1, f"two progress markers on one row: {row!r}"
 
 
 class TestTodoPanelStates:

@@ -209,7 +209,7 @@ class ChatUI:
     does the obvious thing instead of being swallowed.
     """
 
-    HEADER_ROWS = 2        # the identity line, and a rule under it
+    HEADER_ROWS = 1        # the identity line, no rule under it
     ACTIVITY_ROWS = 1      # activity is rendered inside the fixed footer row
     TODO_WIDTH = 38        # fixed top-right todo panel width on wide screens
     TODO_MAX_ROWS = 10
@@ -569,6 +569,14 @@ class ChatUI:
                     and len(panel) > room:
                 panel = self._todo_compact_line()
             out.extend(panel[:room])
+        # The FormattedTextControl lays fragments out on one line unless the
+        # text carries its own newline, so a flat list of rows would render
+        # as one long wrapping blob -- the pet, toast and panel all run
+        # together. Every entry here is one visual row: terminate each one
+        # but the last.
+        for i, (style, text) in enumerate(out):
+            if i < len(out) - 1:
+                out[i] = (style, text + "\n")
         return out
 
     def _todo_panel(self) -> list[tuple[str, str]]:
@@ -676,11 +684,6 @@ class ChatUI:
         the session.
         """
         return ANSI(self._header())
-
-    def _rule_fragments(self):
-        width, _ = self.size()
-        bar = "─" if self._unicode else "-"
-        return [("class:edge", bar * max(0, width))]
 
     def _status_fragments(self):
         """Compatibility alias for integrations that rendered the old status.
@@ -801,10 +804,8 @@ class ChatUI:
         )
         body = HSplit([
             header,
-            Window(content=FormattedTextControl(self._rule_fragments),
-                   height=1, dont_extend_height=True),
             # Activity is rendered inside the footer's fixed row; keeping it
-            # out of the HSplit preserves the established five-child layout
+            # out of the HSplit preserves the established four-child layout
             # and guarantees it can never consume transcript/composer space.
             # The only flexible child: every spare row the screen has ends
             # up here, because no other child reports a max above its
@@ -1078,9 +1079,9 @@ class ChatUI:
         output = self.transcript_rows()
         return "\n".join([
             f"root      {rows}x{width}",
-            f"header    {self.HEADER_ROWS} (identity + rule)",
+            f"header    {self.HEADER_ROWS} (identity line)",
             f"output    {output}",
-            f"composer  {frame} (content {content} + 2 borders, cap {self.COMPOSER_MAX_ROWS})",
+            f"composer  {frame} (content {content} + gap, cap {self.COMPOSER_MAX_ROWS})",
             f"footer    {self.FOOTER_ROWS}",
             f"check     {self.HEADER_ROWS + output + frame + self.FOOTER_ROWS} <= {rows}",
         ])

@@ -65,8 +65,8 @@ class TestTheLayoutContract:
     def test_the_body_is_transcript_then_composer_then_footer(self):
         chat = ChatUI(status=lambda: "")
         children = body_children(chat)
-        assert len(children) == 5
-        header, rule, transcript, composer_frame, footer = children
+        assert len(children) == 4
+        header, transcript, composer_frame, footer = children
         assert isinstance(header, FloatContainer)   # header + todo float
         assert isinstance(transcript, Window)
         assert isinstance(composer_frame, HSplit)
@@ -82,7 +82,7 @@ class TestTheLayoutContract:
 
     def test_the_composer_frame_reports_natural_height(self):
         chat = ChatUI(status=lambda: "", width=80)
-        frame = body_children(chat)[3]
+        frame = body_children(chat)[2]
         dim = frame.preferred_height(80, 40)
         assert dim.min == 2                       # breathing gap + one input row
         assert dim.preferred == 2                 # empty input = exactly this
@@ -93,7 +93,7 @@ class TestTheLayoutContract:
         empty box. It may only add rows to a child whose max exceeds its
         preferred size; the composer must never be that child."""
         chat = ChatUI(status=lambda: "")
-        frame = body_children(chat)[3]
+        frame = body_children(chat)[2]
         for text in ("", "hello", "word " * 60, "a\nb\nc"):
             chat.buffer.text = text
             dim = frame.preferred_height(80, 40)
@@ -102,9 +102,9 @@ class TestTheLayoutContract:
     def test_the_transcript_is_the_only_child_that_can_grow(self):
         chat = ChatUI(status=lambda: "")
         children = body_children(chat)
-        transcript = children[2]
+        transcript = children[1]
         assert not transcript.dont_extend_height()
-        for child in (children[0], children[1], children[3], children[4]):
+        for child in (children[0], children[2], children[3]):
             if isinstance(child, Window):
                 dim = child.preferred_height(80, 40)
                 assert dim.max == dim.preferred, \
@@ -114,7 +114,7 @@ class TestTheLayoutContract:
         """The coding-agent shape: no borders around the input, just the
         caret and a breathing gap above it."""
         chat = ChatUI(status=lambda: "", width=80)
-        frame = body_children(chat)[3]
+        frame = body_children(chat)[2]
         gap, composer = list(frame.children)
         assert isinstance(gap, Window)
         assert gap.preferred_height(80, 40).max == 1      # the gap row
@@ -157,7 +157,7 @@ class TestTheLayoutContract:
         chat.transcript.console.print("hello")
         chat.flush()
         sizes = allocated_heights(chat, rows=30)
-        transcript, frame, footer = sizes[2], sizes[3], sizes[4]
+        transcript, frame, footer = sizes[1], sizes[2], sizes[3]
         assert frame == 2
         assert footer == 1
         assert transcript == 30 - chat.HEADER_ROWS - 2 - 1
@@ -168,18 +168,18 @@ class TestTheLayoutContract:
             chat.transcript.console.print(f"line {i}")
         chat.flush()
         sizes = allocated_heights(chat, rows=24)
-        assert sizes[3] == 2
-        assert sizes[4] == 1
-        assert sizes[2] == 24 - chat.HEADER_ROWS - 2 - 1
+        assert sizes[2] == 2
+        assert sizes[3] == 1
+        assert sizes[1] == 24 - chat.HEADER_ROWS - 2 - 1
 
     def test_empty_and_long_input_do_not_change_the_footer_or_steal_output(self):
         chat = ChatUI(status=lambda: "", width=80)
         for value in ("", "hello", "hello " * 100):
             chat.buffer.text = value
             sizes = allocated_heights(chat, rows=40)
-            assert sizes[4] == 1
-            assert sizes[3] <= chat.COMPOSER_MAX_ROWS + 1
-            assert sizes[2] == 40 - chat.HEADER_ROWS - sizes[3] - 1
+            assert sizes[3] == 1
+            assert sizes[2] <= chat.COMPOSER_MAX_ROWS + 1
+            assert sizes[1] == 40 - chat.HEADER_ROWS - sizes[2] - 1
 
 
 class TestComposerBehaviour:
@@ -414,7 +414,7 @@ class TestResize:
         # The composer is capped, the footer fixed; the transcript keeps
         # whatever is left, and nothing goes negative.
         assert all(s >= 0 for s in sizes)
-        assert sizes[3] == chat.COMPOSER_MAX_ROWS
+        assert sizes[2] == chat.composer_frame_rows()
 
     def test_transcript_rows_never_go_negative_or_zero(self):
         for rows in range(4, 30):
@@ -438,9 +438,9 @@ class TestStreamingDoesNotReflow:
             chat.transcript.console.print(f"token line {i} " + "x" * 40)
             chat.flush()
             sizes = allocated_heights(chat, rows=30)
+            assert sizes[2] == before[2]
             assert sizes[3] == before[3]
-            assert sizes[4] == before[4]
-        assert sizes[2] == before[2], "output keeps its allocated flexible region"
+        assert sizes[1] == before[1], "output keeps its allocated flexible region"
 
     def test_status_and_thinking_changes_do_not_move_anything(self):
         state = {"text": ""}

@@ -172,12 +172,14 @@ class Glyphs:
         if unicode_ok:
             self.bullet, self.arrow, self.tick = "•", "→", "✓"
             self.cross, self.gear, self.dot = "✗", "●", "·"
+            self.caret = "❯"
             # Rounded box corners, for the input field the prompt sits in.
             self.tl, self.tr, self.bl, self.br = "╭", "╮", "╰", "╯"
             self.hbar, self.vbar, self.ellipsis = "─", "│", "…"
         else:
             self.bullet, self.arrow, self.tick = "*", "->", "+"
             self.cross, self.gear, self.dot = "x", "o", "."
+            self.caret = ">"
             self.tl, self.tr, self.bl, self.br = "+", "+", "+", "+"
             self.hbar, self.vbar, self.ellipsis = "-", "|", "..."
 

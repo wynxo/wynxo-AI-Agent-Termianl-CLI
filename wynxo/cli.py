@@ -1052,8 +1052,10 @@ class Repl:
                     text = (await chat.next_message()).strip()
                     if not text:
                         continue
+                    # The same caret the composer uses, so what you said
+                    # echoes in the same voice as what you are typing.
                     chat.transcript.console.print(
-                        f"  [{ACCENT}]>[/] {escape(text)}")
+                        f"  [{ACCENT}]{self.ui.g.caret}[/] {escape(text)}")
                     chat.flush()
                     if text.startswith("/"):
                         if await self._guarded(self.command(text)) is False:
