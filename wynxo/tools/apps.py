@@ -12,11 +12,11 @@ from pathlib import Path
 from ..schema import Field, Schema
 from .base import Tool, ToolResult
 
-APPLICATIONS = ("calculator", "notepad", "browser", "terminal", "explorer")
+APPLICATIONS = ("calculator", "notepad", "browser", "terminal", "explorer", "vscode")
 
 
 class OpenApplicationInput(Schema):
-    application = Field(str, "Allowlisted application: calculator, notepad, browser, terminal, or explorer.", choices=APPLICATIONS)
+    application = Field(str, "Allowlisted application: calculator, notepad, browser, terminal, explorer, or vscode.", choices=APPLICATIONS)
 
 
 class OpenApplication(Tool):
@@ -44,6 +44,7 @@ class OpenApplication(Tool):
 
     @staticmethod
     def _command(application: str) -> list[str] | None:
+        code_bin = shutil.which("code")
         if sys.platform == "win32":
             return {
                 "calculator": ["calc.exe"],
@@ -51,6 +52,7 @@ class OpenApplication(Tool):
                 "explorer": ["explorer.exe"],
                 "browser": ["cmd.exe", "/c", "start", "", "https://www.google.com"],
                 "terminal": [os.environ.get("COMSPEC", "cmd.exe")],
+                "vscode": [code_bin, "--wait"] if code_bin else None,
             }.get(application)
         if sys.platform == "darwin":
             return {
@@ -59,6 +61,7 @@ class OpenApplication(Tool):
                 "explorer": ["open", str(Path.home())],
                 "browser": ["open", "https://www.google.com"],
                 "terminal": ["open", "-a", "Terminal"],
+                "vscode": [code_bin, "--wait"] if code_bin else None,
             }.get(application)
         browser = shutil.which("xdg-open") or shutil.which("gio")
         terminal = shutil.which("x-terminal-emulator") or shutil.which("gnome-terminal")
@@ -68,4 +71,5 @@ class OpenApplication(Tool):
             "explorer": [browser or "xdg-open", str(Path.home())],
             "browser": [browser or "xdg-open", "https://www.google.com"],
             "terminal": [terminal] if terminal else None,
+            "vscode": [code_bin, "--wait"] if code_bin else None,
         }.get(application)

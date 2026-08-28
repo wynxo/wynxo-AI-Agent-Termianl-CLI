@@ -169,7 +169,7 @@ class ChatUI:
     TODO_MAX_ROWS = 10
     COMPOSER_ROWS = 3      # top border, the line you type on, bottom border
     STATUS_ROWS = 1        # the floor: the activity bar on its own
-    MAX_STATUS_ROWS = 14
+    MAX_STATUS_ROWS = 6
     """The ceiling. The pinned block grows to fit a plan and the line being
     written, but never so far that there is no conversation left to read."""
 
@@ -400,8 +400,11 @@ class ChatUI:
                                           input_processors=[])
         composer = Window(
             content=composer_control,
-            # Keep the footer compact. The containing footer owns the fixed
-            # rows; this window must never absorb the flexible body space.
+            # BufferControl's natural height is one row for ordinary input;
+            # allow it to grow only to the three-row viewport needed for a
+            # genuinely multiline/long buffer. The fixed frame, not this
+            # window, owns the footer height and the transcript owns all
+            # remaining flexible space.
             height=Dimension(min=1, preferred=1, max=3),
             wrap_lines=True,
             dont_extend_height=True,
@@ -434,6 +437,9 @@ class ChatUI:
             header,
             Window(content=FormattedTextControl(self._rule_fragments),
                    height=1, dont_extend_height=True),
+            # This is the only flexible child. The composer and status have
+            # explicit fixed heights, so new transcript lines cannot steal or
+            # donate rows to the input frame.
             transcript,
             status,
             composer_frame,

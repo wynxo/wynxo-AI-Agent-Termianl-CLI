@@ -54,7 +54,7 @@ VERIFIED = "VERIFIED"
 # greeting, "hi, now fix the parser" is a task with a greeting stuck on it.
 _SMALL_TALK = re.compile(
     r"^\s*(?:"
-    r"h[ei]y?|hey+|hi+|hello+|yo|sup|hiya|howdy|heya|"
+    r"h[ei]y?|hey+|hi+|hel{1,2}o+|yo|sup|hiya|howdy|heya|"
     r"good\s*(?:morning|afternoon|evening|night)|"
     r"thanks?|thank\s*you|ty|thx|cheers|"
     r"ok(?:ay)?|k|cool|nice|great|awesome|lol|lmao|haha+|hmm+|"
@@ -72,7 +72,7 @@ _SMALL_TALK = re.compile(
 )
 
 # Anything that means real work, regardless of how short the message is.
-_SYSTEM_ACTION = re.compile(r"^\s*(?:open|launch|start|run)\s+(?:the\s+)?(?:calc|calculator|notepad|browser|explorer|file explorer|terminal)(?:\s+(?:on\s+)?my\s+(?:pc|computer|machine))?\s*[.!?]*$", re.IGNORECASE)
+_SYSTEM_ACTION = re.compile(r"^\s*(?:open|launch|start|run)\s+(?:the\s+)?(?:calc|calculator|notepad|browser|explorer|file explorer|terminal|vscode|vs\s*code)(?:\s+(?:on\s+)?my\s+(?:pc|computer|machine))?\s*[.!?]*$", re.IGNORECASE)
 
 
 _TASK_SIGNAL = re.compile(
@@ -144,6 +144,8 @@ def system_application(request: str) -> str | None:
         return "calculator"
     if "notepad" in text:
         return "notepad"
+    if "vscode" in text or "vs code" in text:
+        return "vscode"
     if "explorer" in text:
         return "explorer"
     if "browser" in text:
@@ -742,6 +744,11 @@ class Agent:
         the model.
         """
         rounds = await self._verify_with_tests()
+
+        # Do not run model-based verification when nothing changed: conversation,
+        # questions and simple responses need no review.
+        if not self.checkpoints.changes_since(self._turn_mark):
+            return rounds
 
         if self.policy.verify_rounds == 0:
             return rounds

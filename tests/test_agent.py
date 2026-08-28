@@ -217,9 +217,13 @@ class TestEffortShapesTheLoop:
         await agent.client.aclose()
 
     async def test_high_effort_plans_then_verifies(self, tmp_path):
+        target = tmp_path / "output.txt"
+        target.write_text("old\n")
         agent, fake, cb = make_agent(tmp_path, [
             {"content": "Plan: change the thing."},   # planning pass
-            {"content": "Changed it."},               # execution
+            {"tool_calls": [{"function": {"name": "write_file", "arguments": {
+                "path": str(target), "content": "new\n"}}}]},  # execution
+            {"content": "Changed it."},               # after tool
             {"content": "VERIFIED"},                  # verification
         ], effort="high")
         result = await agent.run("do it")
@@ -255,6 +259,9 @@ class TestEffortShapesTheLoop:
         (tmp_path / "f.py").write_text("old\n")
         agent, _, _ = make_agent(tmp_path, [
             {"content": "Plan."},
+            # Execution writes a first version.
+            {"tool_calls": [{"function": {"name": "write_file", "arguments": {
+                "path": "f.py", "content": "first\n"}}}]},
             {"content": "Wrote it."},
             # Verification notices a problem and fixes it with a tool.
             {"tool_calls": [{"function": {"name": "write_file", "arguments": {
@@ -875,7 +882,47 @@ class TestProviderErrorsNeverEscape:
     async def test_a_failure_during_verification_is_caught(self, tmp_path):
         """The reported crash: run() guarded _act() but not _verify(), so a
         provider error there escaped and killed the REPL."""
+        # fail_after=2 means the 3rd call errors. The agent must write a
+        # file in the execution phase so that verification is triggered.
+        target = tmp_path / "out.py"
         agent = self.failing(tmp_path, fail_after=2)
+        # Patch the mock to write a file on the 2nd call (index 1).
+        original_handler = agent.client._client._transport.handler
+        calls = {"n": 0}
+        _fail_after = 2
+        def handler_with_write(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path == "/api/version":
+                return httpx.Response(200, json={"version": "0.5.0-fake"})
+            if path == "/api/show":
+                return httpx.Response(200, json={
+                    "capabilities": ["tools"], "details": {},
+                    "model_info": {"q.context_length": 40960}})
+            if path != "/api/chat":
+                return httpx.Response(404, json={"error": "no"})
+            index = calls["n"]
+            calls["n"] += 1
+            if index == _fail_after:
+                return httpx.Response(200, text=json.dumps({"error": "boom"}))
+            if index == 1:
+                # Execution phase: write a file so verification runs.
+                return httpx.Response(200, text="\n".join([
+                    json.dumps({"message": {"role": "assistant", "content": "",
+                        "tool_calls": [{"function": {"name": "write_file",
+                            "arguments": {"path": str(target), "content": "x\n"}}}]},
+                        "done": False}),
+                    json.dumps({"message": {"role": "assistant", "content": ""},
+                        "done": True, "prompt_eval_count": 10,
+                        "eval_count": 5, "total_duration": 10 ** 9}),
+                ]))
+            return httpx.Response(200, text="\n".join([
+                json.dumps({"message": {"role": "assistant",
+                                        "content": "An answer."}, "done": False}),
+                json.dumps({"message": {"role": "assistant", "content": ""},
+                            "done": True, "prompt_eval_count": 10,
+                            "eval_count": 5, "total_duration": 10 ** 9}),
+            ]))
+        agent.client._client._transport.handler = handler_with_write
         result = await agent.run("check the retry path")
         assert result.errors, "the error was not reported"
         await agent.client.aclose()
