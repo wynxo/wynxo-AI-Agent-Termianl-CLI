@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .checkpoints import Checkpoints
+from ._agent_hardening import _stream_test_output
 from .config import Config
 from .effort import EffortPolicy, override
 from .memory import Memory
@@ -760,10 +761,19 @@ class Agent:
             return 0        # the user disabled it, so this is not ours to do
 
         await self.cb.on_stage("testing", runner.command)
-        result = await shell.invoke(
-            {"command": runner.command, "timeout": testing.DEFAULT_TIMEOUT},
-            timeout=testing.DEFAULT_TIMEOUT + 30,
-        )
+        previous_output = shell.on_output
+
+        async def forward_output(line: str) -> None:
+            await _stream_test_output(self.cb.on_tool_output, line)
+
+        shell.on_output = forward_output
+        try:
+            result = await shell.invoke(
+                {"command": runner.command, "timeout": testing.DEFAULT_TIMEOUT},
+                timeout=testing.DEFAULT_TIMEOUT + 30,
+            )
+        finally:
+            shell.on_output = previous_output
         code = result.metadata.get("exit_code", 0 if result.ok else 1)
 
         if result.ok:
