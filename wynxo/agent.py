@@ -72,9 +72,6 @@ _SMALL_TALK = re.compile(
 )
 
 # Anything that means real work, regardless of how short the message is.
-_SYSTEM_ACTION = re.compile(r"^\s*(?:open|launch|start|run)\s+(?:the\s+)?(?:calc|calculator|notepad|browser|explorer|file explorer|terminal|vscode|vs\s*code)(?:\s+(?:on\s+)?my\s+(?:pc|computer|machine))?\s*[.!?]*$", re.IGNORECASE)
-
-
 _TASK_SIGNAL = re.compile(
     r"(?:"
     r"\.(?:py|js|ts|tsx|jsx|go|rs|rb|java|c|h|cpp|cs|sh|md|json|ya?ml|toml|txt|html|css)\b"
@@ -130,29 +127,6 @@ def _is_chatter(clause: str) -> bool:
         return not trimmed or bool(
             _SMALL_TALK.match(trimmed) or _PERSONAL.match(trimmed))
     return False
-
-
-def is_system_action(request: str) -> bool:
-    return bool(_SYSTEM_ACTION.match(request.strip()))
-
-
-def system_application(request: str) -> str | None:
-    text = request.strip().lower()
-    if not is_system_action(text):
-        return None
-    if "calc" in text:
-        return "calculator"
-    if "notepad" in text:
-        return "notepad"
-    if "vscode" in text or "vs code" in text:
-        return "vscode"
-    if "explorer" in text:
-        return "explorer"
-    if "browser" in text:
-        return "browser"
-    if "terminal" in text:
-        return "terminal"
-    return None
 
 
 def is_small_talk(request: str) -> bool:
@@ -1024,17 +998,10 @@ class Agent:
 
         # "hello" is not a task. Without this the planning scaffold at high
         # effort turns a greeting into invented work -- see is_small_talk().
-        if is_system_action(request):
-            self.session.add_user(request)
-            application = system_application(request)
-            call = type("SystemCall", (), {"name": "open_application", "arguments": {"application": application}, "call_id": "system"})()
-            await self._run_one(call)
-            result = TurnResult(content=f"Opened {application}.", iterations=1, tool_calls=1)
-            self.task_state.transition(TaskState.COMPLETED)
-            self.session.add_assistant(result.content)
-            self.session.save()
-            return result
-
+        # Application launching is deliberately NOT short-circuited here: the
+        # model reads the intent ("open vscode" vs "fix the vscode
+        # integration") and calls launch_application with the user's own
+        # words; the OS catalog decides what actually exists.
         chatting = is_small_talk(request)
         if chatting:
             self.session.add_user(request)

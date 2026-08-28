@@ -47,6 +47,7 @@ from .select import (
 from .scope import Mode, Scope, resolve as resolve_scope
 from .status import Status, WARN
 from .tools import build_registry
+from .tools.appcatalog import ApplicationCatalog
 from rich.markup import escape
 from rich.text import Text
 
@@ -57,7 +58,7 @@ from .ui import (ACCENT, BAR_ACCENT, MUTED, ActivityBar, CodeStreamer,
 _ACTIVITY = {
     "read_file": "reading", "write_file": "writing file", "edit_file": "editing",
     "list_dir": "listing", "glob": "finding", "grep": "searching",
-    "shell": "running", "todo_write": "planning", "open_application": "opening",
+    "shell": "running", "todo_write": "planning", "launch_application": "launching",
 }
 _LANGUAGE = {"read_file": "python", "shell": "console"}
 
@@ -171,6 +172,7 @@ COMMANDS = {
     "/endpoint": "list | use <name> | add <url> | test -- where Ollama serves",
     "/ctx": "show or set the context window (num_ctx)",
     "/tools": "list the tools the agent can call",
+    "/apps": "list the applications discovered on this machine (add refresh to rescan)",
     "/pet": "the companion: on | off | name <x> | voice <x>",
     "/theme": "colour palette: purple | sakura | midnight | ember | plain",
     "/fullscreen": "draw on the alternate screen, like vim: on | off",
@@ -764,6 +766,10 @@ class Repl:
         self.project_info = self.discovery.scan()
         self.agent = Agent(self.client, config, self.policy, workspace, self.callbacks,
                            boundary=self.boundary, memory=self.memory)
+        launcher = self.agent.tools.get("launch_application")
+        self._app_catalog = launcher.catalog if launcher else ApplicationCatalog()
+        """The one application scan this session shares: /apps and the
+        launch tool must agree on what this machine has installed."""
         self._model_names: list[str] = []
         self.agent.permissions.mode = mode
         self.agent.refresh_system_prompt()
@@ -1529,6 +1535,9 @@ class Repl:
             )
             return True
 
+        if name == "/apps":
+            return self.cmd_apps(args)
+
         if name == "/thinking":
             return await self.cmd_thinking(args)
 
@@ -2201,6 +2210,29 @@ class Repl:
             return
         self.agent.refresh_system_prompt()
 
+    def cmd_apps(self, args: list[str]) -> bool:
+        """The applications actually discovered on this machine.
+
+        Generated from the OS -- Start Menu shortcuts, App Paths, PATH, and
+        the platform equivalents -- never from a code-level list, so what is
+        shown is exactly what launch_application can launch.
+        """
+        if args and args[0].lower() in ("refresh", "rescan", "again"):
+            with self.ui.status("scanning for installed applications..."):
+                entries = self._app_catalog.refresh()
+        else:
+            entries = self._app_catalog.entries()
+        if not entries:
+            self.ui.info("no applications discovered on this machine")
+            return True
+        self.ui.table(
+            ["application", "found in", "target"],
+            [(e.name, e.where, self.ui.shorten_path(str(e.path))) for e in entries],
+            title=f"{len(entries)} applications",
+        )
+        self.ui.info("launched by name via launch_application; /apps refresh to rescan")
+        return True
+
     def cmd_map(self, args: list[str]) -> bool:
         """Show the map, or force a rebuild."""
         from . import projectmap
@@ -2378,7 +2410,8 @@ class Repl:
         self.agent.boundary = boundary
         self.agent.tools = build_registry(
             self.workspace, allow_shell=self.config.allow_shell,
-            boundary=boundary, memory=self.agent.memory)
+            boundary=boundary, memory=self.agent.memory,
+            app_catalog=self._app_catalog)
         current_todo = self.agent.tools.get("todo_write")
         if previous_todo is not None and current_todo is not None:
             current_todo.items = previous_todo.items

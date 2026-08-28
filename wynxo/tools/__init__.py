@@ -15,7 +15,8 @@ from .memory_tool import Remember
 from .search import Glob, Grep
 from .shell import Shell
 from .todo import TodoWrite
-from .apps import OpenApplication
+from .apps import LaunchApplication
+from .appcatalog import ApplicationCatalog
 from .navigation_tool import NavigateSymbols
 
 __all__ = ["Tool", "ToolResult", "Registry", "build_registry"]
@@ -60,6 +61,7 @@ def build_registry(
     boundary: Boundary | None = None,
     memory: Memory | None = None,
     shield: Shield | None = None,
+    app_catalog: ApplicationCatalog | None = None,
 ) -> Registry:
     tools: list[Tool] = [
         ReadFile(workspace, boundary, shield),
@@ -70,7 +72,7 @@ def build_registry(
         Glob(workspace, boundary, shield),
         Grep(workspace, boundary, shield),
         TodoWrite(workspace, boundary, shield),
-        OpenApplication(workspace, boundary, shield),
+        LaunchApplication(workspace, boundary, shield, catalog=app_catalog),
         NavigateSymbols(workspace, boundary, shield),
         Remember(workspace, boundary, memory, shield),
         ListDirectory(workspace, boundary, shield),

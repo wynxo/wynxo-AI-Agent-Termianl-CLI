@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from wynxo.agent import is_system_action, system_application
 from wynxo.memory import Memory
-from wynxo.tools.apps import OpenApplication
+from wynxo.tools.appcatalog import ApplicationCatalog, Sources
+from wynxo.tools.apps import LaunchApplication
 from wynxo.tools.memory_tool import Remember
 
 
@@ -24,17 +24,37 @@ def test_explicit_memory_request_is_allowed(tmp_path: Path):
     assert len(memory.user.entries()) == 1
 
 
-def test_system_action_routing_distinguishes_file_fix():
-    assert is_system_action("run calc on my pc")
-    assert system_application("launch calc") == "calculator"
-    assert system_application("open calculator") == "calculator"
-    assert not is_system_action("fix calc.py")
+def test_the_launch_tool_takes_a_query_not_an_allowlisted_name(tmp_path: Path):
+    """The schema is a free-form query resolved against the machine's real
+    applications -- there is no allowlist to fail a name against."""
+    catalog = ApplicationCatalog(sources=Sources(
+        shortcut_dirs=(tmp_path / "none",)))
+    tool = LaunchApplication(tmp_path, catalog=catalog)
+    assert "query" in tool.Input.json_schema()["properties"]
+    assert "application" not in tool.Input.json_schema()["properties"]
 
 
-def test_application_tool_schema_is_allowlisted():
-    tool = OpenApplication(Path.cwd())
-    result = __import__('asyncio').run(tool.invoke({"application": "unknown"}))
+def test_an_unknown_application_is_a_clean_miss(tmp_path: Path):
+    catalog = ApplicationCatalog(sources=Sources(
+        shortcut_dirs=(tmp_path / "none",)))
+    tool = LaunchApplication(tmp_path, catalog=catalog)
+    result = __import__('asyncio').run(tool.invoke({"query": "Zorg Editor 9000"}))
     assert not result.ok
+    assert "Could not find" in result.error
+    assert result.metadata.get("not_found") is True
+
+
+def test_a_path_query_is_refused_without_touching_the_catalog(tmp_path: Path):
+    """The model must never be able to smuggle an executable path through
+    the launch tool; only catalog entries are launchable."""
+    catalog = ApplicationCatalog(sources=Sources(
+        shortcut_dirs=(tmp_path / "none",)))
+    tool = LaunchApplication(tmp_path, catalog=catalog)
+    result = __import__('asyncio').run(
+        tool.invoke({"query": "C:\\tools\\something.exe"}))
+    assert not result.ok
+    assert "name" in result.error.lower()
+    assert result.metadata.get("status") == "path_query"
 
 
 @pytest.mark.asyncio
