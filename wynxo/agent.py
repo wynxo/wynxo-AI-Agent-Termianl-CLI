@@ -529,7 +529,7 @@ class Agent:
                 call.name, self._trim_output(result.output), call.call_id)
 
     def _trim_output(self, output: str) -> str:
-        keep = self.policy.max_tool_output
+        keep = min(self.policy.max_tool_output, self.config.max_tool_result_chars)
         if len(output) <= keep:
             return output
         return (output[: keep // 2]
@@ -789,7 +789,7 @@ class Agent:
 
     async def _act(self, max_iterations: int | None = None) -> TurnResult:
         """The tool loop proper."""
-        limit = max_iterations or self.policy.max_iterations
+        limit = max_iterations or min(self.policy.max_iterations, self.config.max_tool_iterations)
         result = TurnResult(content="")
 
         for iteration in range(limit):
