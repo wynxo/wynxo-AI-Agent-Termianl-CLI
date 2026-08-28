@@ -115,12 +115,12 @@ REMARKS: dict[str, list[str]] = {
 }
 
 REMARKS_KAWAII: dict[str, list[str]] = {
-    "greet": ["ready when you are~", "what are we making today?", "listening~"],
-    "done": ["all done~", "there we go", "finished~"],
-    "denied": ["okay, leaving it", "no worries~"],
-    "error": ["ah, that didn't work", "hit a wall, sorry"],
-    "long": ["still going~", "this one's slow", "almost..."],
-    "interrupted": ["stopped~", "okay, dropping it"],
+    "greet": ["ready when you are~", "what are we making today?", "listening~", "let's do our best! ♡", "nya~ ready~"],
+    "done": ["all done~", "there we go", "finished~", "yay! completed! ✨", "mission accomplished~ ♡"],
+    "denied": ["okay, leaving it", "no worries~", "that's fine~ ♡", "understood~"],
+    "error": ["ah, that didn't work", "hit a wall, sorry", "uh oh~ 😭", "let's try again~"],
+    "long": ["still going~", "this one's slow", "almost...", "hanging in there~", "patience~ ✨"],
+    "interrupted": ["stopped~", "okay, dropping it", "understood~ ♡"],
 }
 
 

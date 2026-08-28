@@ -149,8 +149,26 @@ PLAIN = Palette(
     code_theme="ansi_dark",
 )
 
+# Extra vibrant kawaii catboy heaven theme with more saturated colors
+CATBOY = Palette(
+    name="catboy",
+    accent="#ff6ec7",        # Hot pink
+    accent_dim="#ff1493",    # Deep pink
+    text="#fffacd",          # Lemon chiffon
+    muted="#ffb6c1",         # Light pink
+    faint="#dda0dd",         # Plum
+    good="#00ff7f",          # Spring green
+    warn="#ffd700",          # Gold
+    bad="#ff69b4",           # Hot pink (warm bad)
+    bar_bg="#1a0a1f",        # Very dark magenta
+    bar_text="#fffacd",
+    bar_dim="#ffb6c1",
+    bar_accent="#ff6ec7",
+    code_theme="solarized-dark",
+)
+
 PALETTES: dict[str, Palette] = {
-    p.name: p for p in (PURPLE, SAKURA, KAWAII, MIDNIGHT, EMBER, PLAIN)
+    p.name: p for p in (PURPLE, SAKURA, KAWAII, MIDNIGHT, EMBER, CATBOY, PLAIN)
 }
 DEFAULT = "purple"
 
