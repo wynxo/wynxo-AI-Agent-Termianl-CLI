@@ -25,11 +25,15 @@ def test_atomic_write_preserves_existing_mode(tmp_path: Path):
     assert not any(p.suffix == ".tmp" for p in tmp_path.iterdir())
 
 
-def test_windows_destructive_commands_are_rejected():
+def test_windows_drive_destructive_commands_are_rejected():
     assert windows_hard_refusal("Remove-Item -Recurse -Force C:\\")
     assert windows_hard_refusal("Format-Volume -DriveLetter C")
     assert windows_hard_refusal("Stop-Computer -Force")
-    assert windows_hard_refusal("Set-Content .env 'SECRET=1'")
+
+
+def test_windows_project_mutations_are_not_misclassified_as_read_only():
+    assert not windows_is_read_only_command("Set-Content .env 'SECRET=1'")
+    assert not windows_is_read_only_command("Remove-Item build")
 
 
 def test_windows_compound_commands_are_not_read_only():
