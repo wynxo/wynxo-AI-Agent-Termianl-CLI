@@ -5,6 +5,8 @@ be handed tools, and a machine with no synthesiser must not fail to start.
 """
 
 import json
+import os
+import tempfile
 
 import httpx
 import pytest
@@ -103,13 +105,57 @@ class TestEngineCommands:
         assert "it''s" in script
         assert script.count("'") % 2 == 0
 
-    def test_powershell_asks_for_a_female_voice(self, monkeypatch):
+    def test_powershell_prefers_a_natural_voice_over_zira(self, monkeypatch):
+        """A stock Windows box only has the robotic Zira; a free natural
+        voice (Aria, Jenny, ...) should win automatically when installed,
+        with Zira and then the generic hint as fallbacks."""
         monkeypatch.setattr(speech, "_powershell", lambda: "powershell")
         argv = speech.command(self._engine("powershell"), "hi")
-        assert "SelectVoiceByHints('Female')" in argv[-1]
+        script = argv[-1]
+        assert "GetInstalledVoices" in script
+        assert "Aria" in script                 # natural names tried first
+        assert "Zira" in script                 # known fallback
+        assert "SelectVoiceByHints('Female')" in script   # last resort
+
+    def test_powershell_honours_an_explicit_voice(self, monkeypatch):
+        """speech_voice used to be ignored entirely on Windows -- whatever
+        SelectVoiceByHints picked was what you got. A named voice now wins,
+        with the female hint as the fallback if the name is wrong."""
+        monkeypatch.setattr(speech, "_powershell", lambda: "powershell")
+        argv = speech.command(self._engine("powershell"), "hi",
+                              voice="Microsoft Jenny Natural")
+        script = argv[-1]
+        assert "SelectVoice('Microsoft Jenny Natural')" in script
+        assert "catch" in script
+        assert "SelectVoiceByHints('Female')" in script
+
+    def test_powershell_escapes_the_voice_name_too(self, monkeypatch):
+        monkeypatch.setattr(speech, "_powershell", lambda: "powershell")
+        argv = speech.command(self._engine("powershell"), "hi",
+                              voice="it's")
+        script = argv[-1]
+        assert script.count("'") % 2 == 0
 
     def test_piper_without_a_model_refuses_rather_than_guesses(self):
         assert speech.command(self._engine("piper"), "hi") is None
+
+    def test_edge_tts_builds_the_synthesis_command(self):
+        """edge-tts is the one voice worth installing: Microsoft's neural
+        voices, which sound like a person. Its command is the synthesis
+        half; the Speaker appends the output file and plays it."""
+        engine = next(e for e in speech.ENGINES if e.name == "edge-tts")
+        argv = speech.command(engine, "hello", voice="en-US-AriaNeural")
+        assert argv[:4] == ["edge-tts", "--voice", "en-US-AriaNeural",
+                            "--text"]
+        assert argv[4] == "hello"
+        assert argv[-1] == "--write-media"   # path appended by the Speaker
+
+    def test_a_player_is_found_for_edge_tts(self, monkeypatch):
+        """Synthesised audio must be played back; without any player the
+        engine would be silence, so one is required and found."""
+        monkeypatch.setattr(speech.shutil, "which", lambda n: n == "ffplay"
+                            and "/usr/bin/ffplay" or None)
+        assert speech._player() is not None
 
 
 class TestSpeakerDegrades:
@@ -133,6 +179,60 @@ class TestSpeakerDegrades:
 
     def test_stop_is_safe_when_nothing_is_speaking(self):
         speech.Speaker(None).stop()   # must not raise
+
+    def test_edge_tts_synthesises_then_plays_and_cleans_up(self, monkeypatch):
+        """The edge-tts path is two steps: synth to a temp file, then play
+        it with the quietest available player. The file must be removed
+        when she is stopped, or temp files pile up."""
+        import os
+
+        engine = next(e for e in speech.ENGINES if e.name == "edge-tts")
+        speaker = speech.Speaker(engine, voice="en-US-AriaNeural")
+        created = []
+        real_mkstemp = tempfile.mkstemp
+
+        def _mkstemp(suffix):
+            # The real one, tracked -- pytest's own temp machinery must not
+            # see a fake mkstemp.
+            fd, path = real_mkstemp(suffix=suffix)
+            created.append(path)
+            return fd, path
+
+        played = []
+
+        class _Proc:
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        def _popen(argv, **kw):
+            played.append(argv)
+            return _Proc()
+
+        monkeypatch.setattr("tempfile.mkstemp", _mkstemp)
+        monkeypatch.setattr(speech, "_player",
+                            lambda: ["ffplay", "-nodisp", "-autoexit"])
+        monkeypatch.setattr(speech.subprocess, "run",
+                            lambda *a, **k: type("R", (), {"returncode": 0})())
+        monkeypatch.setattr(speech.subprocess, "Popen", _popen)
+
+        assert speaker.say("hello there") is True
+        assert played and played[0][:3] == ["ffplay", "-nodisp", "-autoexit"]
+        assert os.path.exists(created[0])
+        speaker.stop()
+        assert not os.path.exists(created[0])   # temp file removed
+
+    def test_edge_tts_without_a_player_disables_cleanly(self, monkeypatch):
+        engine = next(e for e in speech.ENGINES if e.name == "edge-tts")
+        speaker = speech.Speaker(engine)
+        monkeypatch.setattr(speech, "_player", lambda: None)
+        assert speaker.say("hello") is False
+        assert speaker.enabled is False
 
 
 class FakeDuoServer:

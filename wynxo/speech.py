@@ -7,8 +7,16 @@ is. Typing stays the input.
 Nothing here is a Python dependency. Every engine is a program that is
 already on the machine (``say`` on macOS, PowerShell's speech synthesiser on
 Windows, ``termux-tts-speak`` on Android) or one the user installed on
-purpose (``piper``, ``espeak-ng``). That keeps wynxo's install a pure-Python
-one: no wheels, no compiler, no 60MB model downloaded behind your back.
+purpose (``piper``, ``espeak-ng``, ``edge-tts``). That keeps wynxo's install
+a pure-Python one: no wheels, no compiler, no 60MB model downloaded behind
+your back.
+
+The one voice worth going out of your way for is ``edge-tts``: a free
+``pip install edge-tts`` and she speaks with Microsoft's neural voices (the
+same ones Edge reads aloud with), which sound like a person rather than a
+phone lady. Windows' built-in SAPI voices are the robotic ones -- wynxo
+prefers any installed natural voice (Aria, Jenny, ...) over Zira on its
+own.
 
 The other half of the problem is *what* to say. A coding agent's answer is
 full of paths, fences and diffs; read literally it is unlistenable. So
@@ -19,10 +27,12 @@ the synthesiser -- see the tests for the shapes that matters for.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 
 from .platforms import is_macos, is_termux, is_windows
@@ -46,6 +56,13 @@ class Engine:
 
 # Best first: the picker takes the first one that is actually present.
 ENGINES: list[Engine] = [
+    # Microsoft's neural voices (the ones Edge reads aloud with): free, no
+    # API key, and genuinely human-sounding -- the difference between a
+    # woman and a phone lady. Needs `pip install edge-tts` once; synthesis
+    # goes over the network and is played back by ffplay/mpv/afplay (or the
+    # default player).
+    Engine("edge-tts", "edge-tts",
+           "Microsoft's neural voices -- most human, needs pip install edge-tts"),
     Engine("piper", "piper", "neural, most natural -- needs a voice model"),
     Engine("say", "say", "built into macOS, good quality"),
     Engine("powershell", "", "built into Windows"),
@@ -55,6 +72,31 @@ ENGINES: list[Engine] = [
     Engine("flite", "flite", "robotic, very small"),
     Engine("spd-say", "spd-say", "whatever speech-dispatcher is set to"),
 ]
+
+
+# Female natural voices, best-known first. A Windows install that has any of
+# them (they are free from Settings > Time & language > Speech in Windows
+# 11) sounds like a person; without them the only female SAPI voice is the
+# robotic Zira.
+_NATURAL_VOICES = ("Aria", "Jenny", "Michelle", "Ana", "Emma", "Cora",
+                   "Libby", "Neerja", "Sonia", "Zira")
+
+
+def _player() -> list[str] | None:
+    """How to play a synthesized audio file, quietest first.
+
+    ffplay's -nodisp means no window pops up; mpv --no-video likewise. On
+    Windows with neither, the default player is the fallback -- it opens a
+    window, but it plays.
+    """
+    for binary, args in (("ffplay", ["-nodisp", "-autoexit"]),
+                         ("mpv", ["--no-video"]),
+                         ("afplay", [])):
+        if shutil.which(binary):
+            return [binary, *args]
+    if is_windows():
+        return ["cmd", "/c", "start", ""]
+    return None
 
 
 def _powershell() -> str | None:
@@ -99,7 +141,12 @@ def install_hint() -> str:
     if is_termux():
         return "pkg install termux-api   (and the Termux:API app from F-Droid)"
     if is_windows():
-        return "PowerShell is required and is part of Windows."
+        return ("PowerShell is required and is part of Windows.\n"
+                "For a voice that sounds like a person rather than a phone "
+                "lady: pip install edge-tts, then /speak engine edge-tts. "
+                "Or install a free natural voice (Aria, Jenny, ...) from "
+                "Settings > Time & language > Speech and wynxo will prefer "
+                "it over Zira automatically.")
     if is_macos():
         return "`say` is part of macOS and should already be there."
     return ("sudo apt install espeak-ng     (Debian/Ubuntu)\n"
@@ -201,8 +248,32 @@ def command(engine: Engine, text: str, voice: str = "", rate: int = 0,
         script = (
             "Add-Type -AssemblyName System.Speech;"
             "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-            "$s.SelectVoiceByHints('Female');"
         )
+        if voice:
+            # An explicit voice wins. SelectVoice throws on a name it does
+            # not know, so the fallback is still a female voice.
+            v = voice.replace("'", "''")
+            script += (
+                f"try {{ $s.SelectVoice('{v}') }} "
+                f"catch {{ $s.SelectVoiceByHints('Female') }};"
+            )
+        else:
+            # Otherwise pick the most natural female voice installed, not
+            # just "a female voice" -- on a stock Windows install that is
+            # the robotic Zira, and a natural voice (Aria, Jenny, ...) is
+            # free from Settings > Time & language > Speech. They are
+            # discoverable by name; prefer the known ones in order.
+            names = "|".join(_NATURAL_VOICES)
+            script += (
+                "$g = $s.GetInstalledVoices() | ForEach-Object "
+                "{ $_.VoiceInfo } | Where-Object "
+                "{ $_.Gender -eq 'Female' };"
+                f"$pick = $g | Where-Object {{ $_.Name -match '{names}' }} "
+                "| Select-Object -First 1;"
+                "if ($pick) { $s.SelectVoice($pick.Name) } "
+                "elseif ($g) { $s.SelectVoice($g[0].Name) } "
+                "else { $s.SelectVoiceByHints('Female') };"
+            )
         if rate:
             script += f"$s.Rate = {max(-10, min(10, rate))};"
         script += f"$s.Speak('{literal}')"
@@ -235,6 +306,13 @@ def command(engine: Engine, text: str, voice: str = "", rate: int = 0,
             return None
         return ["piper", "--model", model, "--output-raw"]
 
+    if engine.name == "edge-tts":
+        # Two steps: synthesise to a file, then play it. The synthesis half
+        # is here; the Speaker owns the play half so it can clean up the
+        # file afterwards.
+        return ["edge-tts", "--voice", voice or "en-US-AriaNeural",
+                "--text", text, "--write-media"]
+
     return None
 
 
@@ -255,11 +333,22 @@ class Speaker:
         self.model = model
         self.enabled = engine is not None
         self._process: subprocess.Popen | None = None
+        self._media_path: str = ""
+        """A synthesized audio file still being played (edge-tts). Removed
+        when she is stopped or replaced, so temp files do not pile up."""
         self.last_error = ""
 
     def stop(self) -> None:
         """Cut her off. Ctrl-C should silence her, not just the model."""
+        import os as _os
+
         process, self._process = self._process, None
+        if self._media_path:
+            try:
+                _os.unlink(self._media_path)
+            except OSError:
+                pass
+            self._media_path = ""
         if process and process.poll() is None:
             try:
                 process.terminate()
@@ -281,6 +370,9 @@ class Speaker:
         if not spoken:
             return False
 
+        if self.engine.name == "edge-tts":
+            return self._say_edge_tts(spoken)
+
         argv = command(self.engine, spoken, self.voice, self.rate, self.model)
         if argv is None:
             return False
@@ -300,6 +392,57 @@ class Speaker:
                 self._process.stdin.write(spoken.encode("utf-8"))
                 self._process.stdin.close()
         except OSError as exc:
+            self.last_error = str(exc)
+            self.enabled = False
+            return False
+        return True
+
+    def _say_edge_tts(self, text: str) -> bool:
+        """Synthesise with edge-tts, then play the file it wrote.
+
+        edge-tts (Microsoft's neural voices) writes an audio file rather
+        than speaking directly, so this is two steps: synth to a temp file,
+        then hand it to a quiet player. The file lives for the length of
+        the utterance and is removed when she is stopped or replaced.
+        """
+        player = _player()
+        if player is None:
+            self.last_error = "no audio player found (ffplay, mpv, afplay)"
+            self.enabled = False
+            return False
+
+        fd, path = tempfile.mkstemp(suffix=".mp3")
+        os.close(fd)
+        argv = command(self.engine, text, self.voice, self.rate, self.model)
+        if argv is None:
+            os.unlink(path)
+            return False
+        argv = argv + [path]
+        try:
+            synth = subprocess.run(argv, capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as exc:
+            os.unlink(path)
+            self.last_error = str(exc)
+            self.enabled = False
+            return False
+        if synth.returncode != 0:
+            os.unlink(path)
+            detail = synth.stderr.decode("utf-8", "replace").strip()[:200]
+            self.last_error = f"edge-tts failed ({synth.returncode}): {detail}"
+            self.enabled = False
+            return False
+
+        self.stop()
+        try:
+            self._process = subprocess.Popen(
+                player + [path],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            self._media_path = path
+        except OSError as exc:
+            os.unlink(path)
             self.last_error = str(exc)
             self.enabled = False
             return False
