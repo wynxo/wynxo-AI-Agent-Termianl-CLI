@@ -213,8 +213,10 @@ class CommandCompleter(Completer):
     rather than helpful.
     """
 
-    def __init__(self, workspace_getter=None):
+    def __init__(self, workspace_getter=None, model_names_getter=None):
         self._workspace = workspace_getter
+        self._model_names = []
+        self._model_names_getter = model_names_getter
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
@@ -232,7 +234,17 @@ class CommandCompleter(Completer):
                     display_meta="directory" if path.endswith("/") else "file")
             return
 
-        if not text.startswith("/") or " " in text:
+        if not text.startswith("/"):
+            return
+        if text.startswith("/model "):
+            prefix = text.split(None, 1)[1]
+            names = self._model_names_getter() if self._model_names_getter else self._model_names
+            for model in names:
+                if model.startswith(prefix):
+                    yield Completion(model, start_position=-len(prefix), display=model,
+                                     display_meta="installed model")
+            return
+        if " " in text:
             return
 
         seen: set[str] = set()
@@ -752,6 +764,7 @@ class Repl:
         self.project_info = self.discovery.scan()
         self.agent = Agent(self.client, config, self.policy, workspace, self.callbacks,
                            boundary=self.boundary, memory=self.memory)
+        self._model_names: list[str] = []
         self.agent.permissions.mode = mode
         self.agent.refresh_system_prompt()
         self._task: asyncio.Task | None = None
@@ -1647,8 +1660,8 @@ class Repl:
         session = self.agent.session
         limit = min(self.policy.max_iterations, self.config.max_tool_iterations)
         self.ui.info(
-            f"state {self.agent.task_state.state.value}  "
-            f"project {self.project_info.summary()}\n"
+            f"state {getattr(getattr(self.agent, 'task_state', None), 'state', TaskState.IDLE).value}  "
+            f"project {self.project_info.summary() if hasattr(self, 'project_info') else 'unknown project'}\n"
             f"session {session.session_id}  model {self.config.model}  "
             f"workspace {self.ui.shorten_path(str(self.workspace))}\n"
             f"tools {len(self.agent.tools)}  iteration limit {limit}  "
@@ -1676,7 +1689,21 @@ class Repl:
         if not diff.strip():
             self.ui.info("no " + ("staged " if args else "unstaged ") + "changes")
             return True
-        self.ui.diff(diff)
+        files = []
+        additions = deletions = 0
+        for line in diff.splitlines():
+            if line.startswith("diff --git "):
+                files.append(line.rsplit(" b/", 1)[-1])
+            elif line.startswith("+") and not line.startswith("+++"):
+                additions += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                deletions += 1
+        self.ui.info(f"{len(files)} file(s) changed  +{additions} -{deletions}")
+        if files:
+            self.ui.table(["file"], [(f,) for f in files[:100]], title="changed files")
+        self.ui.diff(diff[:100_000])
+        if len(diff) > 100_000:
+            self.ui.info("diff truncated visually; use git diff for the complete patch")
         return True
 
     async def cmd_test(self, args: list[str]) -> bool:
@@ -1964,9 +1991,11 @@ class Repl:
         try:
             with self.ui.status("asking the server what it has..."):
                 models = await self.client.list_models()
+            self._model_names = [model.name for model in models]
         except ProviderError as exc:
             self.ui.error(str(exc))
             return True
+        self._model_names = [model.name for model in models]
         if not models:
             self.ui.warn("that server has no models installed")
             return True

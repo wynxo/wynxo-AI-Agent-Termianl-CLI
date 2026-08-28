@@ -61,7 +61,8 @@ class Glob(Tool):
 
 
 class GrepInput(Schema):
-    pattern = Field(str, "Regular expression to search for.")
+    pattern = Field(str, "Text or regular expression to search for.")
+    literal = Field(bool, "Treat pattern literally instead of as regex.", default=False)
     path = Field(str, "Directory or file to search in.", default=".")
     glob = Field(str, "Only search files matching this pattern, e.g. '*.py'.", default="")
     ignore_case = Field(bool, "Case-insensitive search.", default=False)
@@ -83,7 +84,7 @@ class Grep(Tool):
             return ToolResult.failure(f"{self.relative(target)} does not exist.")
         try:
             flags = re.IGNORECASE if args.ignore_case else 0
-            regex = re.compile(args.pattern, flags)
+            regex = re.compile(re.escape(args.pattern) if args.literal else args.pattern, flags)
         except re.error as exc:
             return ToolResult.failure(f"Invalid regex {args.pattern!r}: {exc}")
 
@@ -103,7 +104,10 @@ class Grep(Tool):
         return ToolResult.success(
             body,
             display=f"grep {args.pattern} -> {len(hits)} matches"
-                    + (f", {masked} masked" if masked else ""))
+                    + (f", {masked} masked" if masked else ""),
+            matches=len(hits), scanned=scanned, literal=args.literal,
+            truncated=len(hits) > MAX_MATCHES,
+        )
 
     def _scan(self, target: Path, regex: re.Pattern, glob: str, context: int):
         files = [target] if target.is_file() else self._candidates(target, glob)

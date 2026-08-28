@@ -164,6 +164,9 @@ class Session:
         return self.messages[:cut], self.messages[cut:]
 
     def apply_compaction(self, summary: str, kept: list[dict]) -> None:
+        # Preserve the objective and a compact audit trail even when the model
+        # returns an overly terse summary. Recent exact messages remain intact.
+        summary = summary.strip() or "No summary was returned; preserve the recent conversation below."
         self.messages = [
             {
                 "role": "user",

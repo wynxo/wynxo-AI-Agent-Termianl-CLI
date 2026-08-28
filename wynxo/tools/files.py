@@ -123,6 +123,9 @@ class ReadInput(Schema):
     path = Field(str, "File path, relative to the project root.")
     offset = Field(int, "First line to read (0-indexed).", default=0, ge=0)
     limit = Field(int, "How many lines to read.", default=2000, gt=0, le=5000)
+    start_line = Field(int, "Optional one-based first line; takes precedence over offset.", default=0, ge=0)
+    end_line = Field(int, "Optional one-based inclusive last line.", default=0, ge=0)
+    max_bytes = Field(int, "Maximum encoded result size.", default=0, ge=0, le=2_000_000)
 
 
 class ReadFile(Tool):
@@ -169,6 +172,10 @@ class ReadFile(Tool):
             )
 
         lines = _read_text(path).splitlines()
+        if args.start_line:
+            args.offset = args.start_line - 1
+        if args.end_line:
+            args.limit = max(1, args.end_line - args.offset)
         if args.offset >= len(lines) and lines:
             return ToolResult.failure(
                 f"offset {args.offset} is past the end of {rel} ({len(lines)} lines)."
@@ -195,13 +202,19 @@ class ReadFile(Tool):
             note += (f"\n\n[{masked} credential{'s' if masked != 1 else ''} "
                      f"in this file were masked before it reached you. The "
                      f"code is unchanged on disk.]")
+        encoded = (body + note).encode("utf-8", "replace")
+        byte_truncated = False
+        if args.max_bytes and len(encoded) > args.max_bytes:
+            body = encoded[:args.max_bytes].decode("utf-8", "ignore")
+            note = f"\n\n[output truncated at {args.max_bytes} bytes]"
+            byte_truncated = True
         return ToolResult.success(
             body + note,
             display=f"read {rel} ({len(window)} lines)"
                     + (f", {masked} masked" if masked else ""),
-            path=rel,
-            lines=len(lines),
-            masked=masked,
+            path=rel, lines=len(lines), masked=masked,
+            truncated=truncated or byte_truncated,
+            bytes=len(encoded), max_bytes=args.max_bytes or None,
         )
 
     def _suggest(self, path: Path) -> str | None:
