@@ -4,7 +4,6 @@ from __future__ import annotations
 def install() -> None:
     from . import projectmap
 
-    # These are project configuration directories, not generated build noise.
     projectmap.SKIP_DIRS.discard(".vscode")
     projectmap.SKIP_DIRS.discard(".devcontainer")
     projectmap.SKIP_DIRS.discard(".github")
@@ -24,6 +23,8 @@ def install() -> None:
             except OSError:
                 continue
             for entry in entries:
+                if entry.is_symlink():
+                    continue
                 if entry.name.startswith(".") and entry.name not in allowed_hidden:
                     continue
                 if entry.is_dir():
@@ -38,7 +39,6 @@ def install() -> None:
     walk._wynxo_config_dirs = True
     projectmap.walk = walk
 
-    # Honor max_age when a caller explicitly requests a bounded cache lifetime.
     original_load = projectmap.load
     if getattr(original_load, "_wynxo_max_age", False):
         return
