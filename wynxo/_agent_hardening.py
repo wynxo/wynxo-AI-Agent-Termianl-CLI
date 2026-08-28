@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 async def _stream_test_output(callback, line: str) -> None:
-    """Forward automatic verification output without creating orphaned coroutines."""
+    """Forward automatic verification output without orphaned coroutines."""
     try:
         result = callback("shell", line)
         if result is not None:
@@ -14,17 +14,20 @@ async def _stream_test_output(callback, line: str) -> None:
 def install() -> None:
     from .agent import Agent
 
-    original_turn = Agent.turn
-    if not getattr(original_turn, "_wynxo_turn_hardening", False):
-        async def turn(self, text):
+    # The public turn entry point is Agent.run(), not Agent.turn(). Guard the
+    # lookup so importing this optional hardening module never crashes merely
+    # because the core API was refactored.
+    original_run = getattr(Agent, "run", None)
+    if original_run is not None and not getattr(original_run, "_wynxo_run_hardening", False):
+        async def run(self, request):
             self._warned_over_window = False
-            return await original_turn(self, text)
+            return await original_run(self, request)
 
-        turn._wynxo_turn_hardening = True
-        Agent.turn = turn
+        run._wynxo_run_hardening = True
+        Agent.run = run
 
-    original_verify = Agent._verify_with_tests
-    if getattr(original_verify, "_wynxo_stream_tests", False):
+    original_verify = getattr(Agent, "_verify_with_tests", None)
+    if original_verify is None or getattr(original_verify, "_wynxo_stream_tests", False):
         return
 
     async def verify_with_tests(self):
