@@ -9,7 +9,7 @@ import pytest
 from rich.cells import cell_len
 
 from wynxo.pet import (ACTIVITY_MOODS, FACES, FACES_ASCII, Mood, Pet,
-                       face_width)
+                       REMARKS_MOMMY, face_width)
 from wynxo.prompts import VOICES, build_system_prompt
 from wynxo.ui import UI, ActivityBar
 
@@ -172,6 +172,52 @@ class TestVoice:
             for forbidden in ("skip", "don't bother", "no need to check",
                               "shorter answer is fine"):
                 assert forbidden not in lowered
+
+    def test_mommy_is_a_voice(self):
+        assert "mommy" in VOICES
+        flat = " ".join(VOICES["mommy"].split()).lower()
+        # The whole point of the voice: the user is her goodboy and she is
+        # his mommy -- but the engineering floor is untouched.
+        assert "goodboy" in flat
+        assert "mommy" in flat
+        assert "sugar-coating a failure" in flat
+
+    def test_mommy_keeps_flourishes_out_of_machine_readable_text(self):
+        flat = " ".join(VOICES["mommy"].split()).lower()
+        for target in ("code", "file paths", "commit messages"):
+            assert target in flat
+
+    def test_mommy_voice_carries_the_honesty_floor(self):
+        from pathlib import Path
+
+        from wynxo.effort import resolve
+
+        prompt = build_system_prompt(Path("."), resolve("low"), voice="mommy")
+        flat = " ".join(prompt.split())
+        assert "never soften a failure" in flat
+        assert "never imply something worked when it did not" in flat
+
+    def test_mommy_remarks_exist_for_every_event(self):
+        from wynxo.pet import REMARKS
+
+        assert set(REMARKS) == set(REMARKS_MOMMY)
+        for event, lines in REMARKS_MOMMY.items():
+            assert lines, event
+            # The voice is for the user, not for the transcript noise:
+            # remarks stay short enough for one line.
+            assert all(len(line) < 60 for line in lines), event
+
+    def test_mommy_pet_speaks_like_mommy(self):
+        pet = Pet()
+        pet.style_name = "mommy"
+        greet = pet.remark("greet")
+        assert greet
+        assert "goodboy" in greet or "mommy" in greet
+
+    def test_mommy_pet_uses_the_round_face_set(self):
+        pet = Pet()
+        pet.style_name = "mommy"
+        assert pet.faces()[Mood.IDLE][0] == "₍ᐢ•ﻌ•ᐢ₎"
 
 
 class TestConfig:

@@ -134,6 +134,15 @@ REMARKS_KAWAII: dict[str, list[str]] = {
     "interrupted": ["stopped~", "okay, dropping it", "understood~ ♡"],
 }
 
+REMARKS_MOMMY: dict[str, list[str]] = {
+    "greet": ["there's my goodboy~ what are we building?", "ready when you are, goodboy", "mommy's listening~", "let's do our best, goodboy ♡"],
+    "done": ["goodboy, it's done~", "there we go, goodboy", "finished~ mommy's proud of you", "all done, goodboy ✨"],
+    "denied": ["okay, leaving it then", "as you say, goodboy~", "fine, we'll leave it ♡"],
+    "error": ["that didn't work, goodboy", "hit a wall -- let's look together", "no worries, goodboy, we'll fix it", "hmm, that one slipped -- try again~"],
+    "long": ["still going, goodboy", "this one's slow, hang on", "almost there, goodboy", "patience, goodboy~ ✨"],
+    "interrupted": ["stopped, goodboy", "okay, dropping it then", "as you say~ ♡"],
+}
+
 
 def face_width(text: str) -> int:
     """Display cells, not codepoints.
@@ -167,7 +176,9 @@ class Pet:
     def faces(self) -> dict[Mood, list[str]]:
         if not self.unicode:
             return FACES_ASCII
-        return FACES_KAWAII if self.style_name == "kawaii" else FACES
+        if self.style_name in ("kawaii", "mommy"):
+            return FACES_KAWAII
+        return FACES
 
     def face(self, advance: bool = True) -> str:
         """The current frame. ``advance`` steps the animation.
@@ -227,7 +238,11 @@ class Pet:
         """One short line for an event, or "" when the pet is off."""
         if not self.enabled:
             return ""
-        table = REMARKS_KAWAII if self.style_name == "kawaii" else REMARKS
+        table = REMARKS
+        if self.style_name == "kawaii":
+            table = REMARKS_KAWAII
+        elif self.style_name == "mommy":
+            table = REMARKS_MOMMY
         options = table.get(event)
         return random.choice(options) if options else ""
 

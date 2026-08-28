@@ -196,6 +196,69 @@ class TestTheLayout:
         chat_with_header.flush()
         assert "qwen3" in str(chat_with_header._header_fragments().value)
 
+    def test_the_header_truncates_instead_of_wrapping(self):
+        """The header is one row, always. A line that reaches the terminal
+        width used to wrap, and the pinned row kept only the wrapped tail --
+        on a narrow window the header said "127.0.0.1:11434" and nothing
+        else, "wynxo" itself pushed off. The identity must survive and the
+        least-important tail give way instead."""
+        import re
+        from pathlib import Path
+
+        from wynxo.config import Config
+
+        import wynxo.cli as cli
+
+        class _U:
+            g = type("G", (), {"dot": "·", "caret": "❯"})()
+
+            def shorten_path(self, p):
+                return "~\\wynxo-AI-Agent-Termianl-CLI"
+
+        class Stub:
+            config = Config(voice="mommy")
+            chat = ChatUI(status=lambda: "")
+            ui = _U()
+            policy = type("P", (), {"name": "medium"})()
+            workspace = Path("C:/x")
+
+        s = Stub()
+        h = re.sub(r"\x1b\[[0-9;]*m", "", cli.Repl._chat_header(s))
+        assert h.startswith("  wynxo")          # identity kept
+        assert "127.0.0.1:11434" not in h       # tail gave way
+        assert len(h) < 80                       # and it fits
+
+    def test_the_voice_shows_in_the_pinned_identity_line(self):
+        """Switching to mommy (or kawaii) is visible in the pinned header,
+        not just in the model's delivery."""
+        from pathlib import Path
+
+        from wynxo.config import Config
+
+        import wynxo.cli as cli
+
+        class _U:
+            g = type("G", (), {"dot": "·", "caret": "❯"})()
+
+            def shorten_path(self, p):
+                return "~\\wynxo"
+
+        class Stub:
+            config = Config(voice="mommy")
+            chat = ChatUI(status=lambda: "")
+            ui = _U()
+            policy = type("P", (), {"name": "medium"})()
+            workspace = Path("C:/x")
+
+        import re
+
+        s = Stub()
+        h = re.sub(r"\x1b\[[0-9;]*m", "", cli.Repl._chat_header(s))
+        assert "mommy" in h
+        s.config = Config(voice="plain")
+        h = re.sub(r"\x1b\[[0-9;]*m", "", cli.Repl._chat_header(s))
+        assert "mommy" not in h
+
     def test_a_short_conversation_hugs_the_bottom(self, chat):
         """A chat window puts three lines just above the composer, not
         stranded at the top of an empty screen."""

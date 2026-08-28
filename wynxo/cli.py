@@ -159,6 +159,7 @@ def _voice_summary(voice: str) -> str:
         "mentor": "explains the reasoning behind decisions",
         "blunt": "the fewest words that say what happened",
         "kawaii": "cheerful and affectionate, same engineering underneath",
+        "mommy": "warm and doting -- your goodboy, her mommy -- same engineering underneath",
     }.get(voice, "")
 
 
@@ -764,7 +765,9 @@ class Repl:
             animate=config.animations,
             unicode=ui.g.unicode,
         )
-        self.pet.style_name = "kawaii" if config.voice == "kawaii" else "default"
+        self.pet.style_name = ("kawaii" if config.voice == "kawaii"
+                                else "mommy" if config.voice == "mommy"
+                                else "default")
         self.pet.set_pace(self.policy.name)
         self._last_elapsed = 0.0
         from .motion import MotionScheduler
@@ -962,8 +965,23 @@ class Repl:
         parts = [f"[bold {ACCENT}]wynxo[/]", self.config.model,
                  self.policy.name, self.ui.shorten_path(str(self.workspace)),
                  endpoint]
+        # The voice is part of who you are talking to: mommy, kawaii, ...
+        # Show it next to the name so switching is visible in the pinned
+        # line, not just in the model's delivery.
+        if self.config.voice != "plain":
+            parts.insert(1, f"[{MUTED}]{self.config.voice}[/]")
         line = f"  {f'  {dot}  '.join(parts)}"
-        return tui.render_to_ansi(Text.from_markup(line), width)
+        text = Text.from_markup(line)
+        # The header is one row, always. Left alone, a line that reaches the
+        # terminal width wraps, and render_to_ansi keeps only the wrapped
+        # tail -- so on a narrow window the line said "127.0.0.1:11434" and
+        # nothing else, "wynxo" itself pushed off. Truncate from the tail
+        # instead: the identity (name, voice, model, effort, workspace)
+        # stays, and the least-important part -- the endpoint -- is what
+        # gives way.
+        text.truncate(max_width=max(tui.MIN_WIDTH, width - 2),
+                      overflow="ellipsis")
+        return tui.render_to_ansi(text, width)
 
     def _chat_status(self) -> str:
         """The one footer row: activity while a turn runs, else status.
@@ -3422,9 +3440,14 @@ class Repl:
                 return True
             self.config.voice = choice
             self.config.save()
-            self.pet.style_name = "kawaii" if choice == "kawaii" else "default"
+            self.pet.style_name = ("kawaii" if choice == "kawaii"
+                                   else "mommy" if choice == "mommy"
+                                   else "default")
             self.agent.refresh_system_prompt()
             self.ui.success(f"voice: {choice} -- {_voice_summary(choice)}")
+            if self.chat is not None:
+                self.chat.notify(f"✦ voice: {choice} -- {_voice_summary(choice)}")
+                self.chat.refocus()
             return True
 
         self.ui.warn("usage: /pet [on|off|still|animate|show <mood>|name <x>|voice <x>]")
