@@ -59,29 +59,31 @@ def _atomic_write_back(path: Path, text: str, source=None) -> str:
 
 
 def windows_hard_refusal(command: str) -> str:
-    """Return a reason for destructive PowerShell/CMD commands, if any."""
+    """Return a reason only for irreversible/high-blast-radius Windows commands."""
     low = command.strip().lower()
-    destructive = (
-        (r"\bremove-item\b", "a PowerShell file/directory removal"),
-        (r"\bdel(?:\.exe)?\b", "a Windows file deletion"),
-        (r"\brmdir(?:\.exe)?\b|\brd(?:\.exe)?\b", "a Windows directory deletion"),
-        (r"\bclear-content\b", "clearing file contents"),
-        (r"\bset-content\b|\badd-content\b|\bout-file\b", "writing file contents"),
-        (r"\bmove-item\b|\brename-item\b|\bcopy-item\b", "changing filesystem entries"),
-        (r"\bformat-(?:volume|disk|partition)\b|\bformat(?:\.exe)?\b", "formatting a drive/filesystem"),
-        (r"\bclear-disk\b|\bremove-partition\b|\binitialize-disk\b|\bset-disk\b", "rewriting disk state"),
-        (r"\bstop-computer\b|\brestart-computer\b|\bshutdown(?:\.exe)?\b|\brestart(?:\.exe)?\b", "shutting down or restarting the machine"),
-        (r"\bstop-process\b|\bstop-service\b|\brestart-service\b", "stopping or restarting a process/service"),
+
+    # Ordinary Remove-Item/Set-Content/etc. are *not* hard-refused: they must
+    # flow into the normal permission system so legitimate project edits still
+    # work. Only whole-drive/system destructive forms are blocked outright.
+    whole_drive_remove = re.search(
+        r"\bremove-item\b.*(?:-recurse\b.*)?\b(?:[a-z]:\\?$|[a-z]:/??$|\$home(?:\\|/)?$)",
+        low,
+        re.IGNORECASE,
     )
-    for pattern, reason in destructive:
-        if re.search(pattern, low, re.IGNORECASE):
-            if re.search(
-                r"(?:remove-item\s+.*(?:-recurse|-force|/s).*\b(?:[a-z]:[\\/]|\$home)\b|(?:format|format-volume|format-disk).*\b[a-z]:?\b)",
-                low,
-                re.IGNORECASE,
-            ):
-                return "destructive Windows drive operation"
-            return reason
+    if whole_drive_remove or re.search(
+        r"\b(?:format-volume|format-disk|format-partition|clear-disk|initialize-disk|remove-partition|set-disk)\b",
+        low,
+        re.IGNORECASE,
+    ):
+        return "destructive Windows drive operation"
+    if re.search(r"\bdiskpart(?:\.exe)?\b", low, re.IGNORECASE):
+        return "disk partition management"
+    if re.search(
+        r"\b(?:stop-computer|restart-computer|shutdown(?:\.exe)?|restart(?:\.exe)?|halt(?:\.exe)?)\b",
+        low,
+        re.IGNORECASE,
+    ):
+        return "shutting down or restarting the machine"
     return ""
 
 
@@ -90,12 +92,19 @@ _POWERSHELL_SAFE = {
     "pwd", "get-item", "gi", "get-command", "gcm", "where.exe", "where",
     "test-path", "select-string", "sls", "get-date", "get-process", "gps",
     "get-service", "get-variable", "get-alias", "get-history", "write-output",
-    "echo", "type", "python", "py", "node", "git", "npm", "pip", "cargo",
+    "echo", "type",
+}
+
+_SAFE_SUBCOMMANDS = {
+    "git": {"status", "log", "diff", "show", "branch", "remote", "config", "rev-parse", "ls-files", "blame", "describe", "stash"},
+    "npm": {"ls", "list", "view", "outdated"},
+    "pip": {"list", "show", "freeze"},
+    "cargo": {"tree", "metadata"},
 }
 
 
 def windows_is_read_only_command(command: str) -> bool:
-    """Conservative PowerShell/CMD read-only classifier for permissions."""
+    """Conservative Windows read-only classifier for permission decisions."""
     text = command.strip()
     if not text:
         return False
@@ -103,10 +112,18 @@ def windows_is_read_only_command(command: str) -> bool:
         return False
     if windows_hard_refusal(text):
         return False
-    head = re.split(r"\s+", text, maxsplit=1)[0].lower()
-    if head.startswith("&"):
-        return False
-    return head in _POWERSHELL_SAFE
+
+    parts = re.split(r"\s+", text)
+    head = parts[0].lower()
+    args = parts[1:]
+
+    if head in _POWERSHELL_SAFE:
+        return True
+    if head in _SAFE_SUBCOMMANDS and args:
+        return args[0].lower() in _SAFE_SUBCOMMANDS[head]
+    if head in {"python", "py", "node"}:
+        return len(args) == 1 and args[0].lower() in {"--version", "-v", "-version"}
+    return False
 
 
 def _visible_path_parts(path: Path) -> list[str]:
@@ -205,10 +222,7 @@ def install() -> None:
                 return len(out) >= files_mod.MAX_ENTRIES
             try:
                 entries = sorted(
-                    (
-                        e for e in directory.iterdir()
-                        if e.name not in ignored
-                    ),
+                    (e for e in directory.iterdir() if e.name not in ignored),
                     key=lambda e: (e.is_file(), e.name.lower()),
                 )
             except PermissionError:
