@@ -186,6 +186,8 @@ COMMANDS = {
     "/new": "start a new chat: fresh history, screen and log",
     "/resume": "pick up an earlier conversation where it stopped",
     "/commit": "write a commit message from the staged diff, then commit",
+    "/diff": "show uncommitted changes (or /diff staged)",
+    "/test": "run the project's detected test command",
     "/clear": "start a fresh conversation",
     "/compact": "summarise the conversation to reclaim context",
     "/stats": "tokens, speed, context use",
@@ -1517,6 +1519,12 @@ class Repl:
         if name == "/commit":
             return await self.cmd_commit(args)
 
+        if name == "/diff":
+            return self.cmd_diff(args)
+
+        if name == "/test":
+            return await self.cmd_test(args)
+
         if name == "/map":
             return self.cmd_map(args)
 
@@ -1543,6 +1551,56 @@ class Repl:
             return True
 
         self.ui.warn(f"unknown command {name}. /help for the list.")
+        return True
+
+    def cmd_diff(self, args: list[str]) -> bool:
+        """Show a read-only Git diff without involving the model."""
+        from .repo import run_git
+
+        if args and args != ["staged"]:
+            self.ui.warn("usage: /diff [staged]")
+            return True
+        ok, _ = run_git(["rev-parse", "--git-dir"], cwd=self.workspace, timeout=10)
+        if not ok:
+            self.ui.warn("not a git repository")
+            return True
+        command = ["diff", "--staged"] if args else ["diff"]
+        ok, diff = run_git(command, cwd=self.workspace, timeout=60)
+        if not ok:
+            self.ui.warn(f"could not read the diff: {_first(diff)}")
+            return True
+        if not diff.strip():
+            self.ui.info("no " + ("staged " if args else "unstaged ") + "changes")
+            return True
+        self.ui.diff(diff)
+        return True
+
+    async def cmd_test(self, args: list[str]) -> bool:
+        """Run only the test command the project itself makes unambiguous."""
+        if args:
+            self.ui.warn("usage: /test")
+            return True
+        from . import testing
+
+        runner = testing.detect(self.workspace)
+        if runner is None:
+            self.ui.warn("could not identify this project's test command")
+            return True
+        shell = self.agent.tools.get("shell")
+        if shell is None:
+            self.ui.warn("the shell tool is disabled; enable it to run tests")
+            return True
+        await self.callbacks.on_stage("testing", runner.command)
+        result = await shell.invoke(
+            {"command": runner.command, "timeout": testing.DEFAULT_TIMEOUT},
+            timeout=testing.DEFAULT_TIMEOUT + 30,
+        )
+        if result.ok:
+            self.ui.success(f"tests passed: {runner.command}")
+        else:
+            self.ui.error(f"tests failed: {runner.command}")
+        if result.output.strip():
+            self.ui.code(result.output, language="text")
         return True
 
     async def cmd_commit(self, args: list[str]) -> bool:

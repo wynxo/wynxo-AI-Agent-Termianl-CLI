@@ -156,6 +156,10 @@ class TestCommandAbbreviations:
         for short in ALIASES:
             assert short not in COMMANDS, f"{short} is both a command and an alias"
 
+    def test_coding_workflow_commands_are_listed(self):
+        assert "/diff" in COMMANDS
+        assert "/test" in COMMANDS
+
 
 class TestQuietStart:
     def test_connect_only_prints_problems(self):
