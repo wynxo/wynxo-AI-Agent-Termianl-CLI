@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 
+async def _stream_test_output(callback, line: str) -> None:
+    """Forward automatic verification output without creating orphaned coroutines."""
+    try:
+        result = callback("shell", line)
+        if result is not None:
+            await result
+    except Exception:
+        pass
+
+
 def install() -> None:
     from .agent import Agent
 
     original_turn = Agent.turn
     if not getattr(original_turn, "_wynxo_turn_hardening", False):
         async def turn(self, text):
-            # The agent documents this warning as per-turn state, but the
-            # original field was only reset in __init__, so later overflowing
-            # turns stayed silent forever.
             self._warned_over_window = False
             return await original_turn(self, text)
 
@@ -26,7 +33,11 @@ def install() -> None:
             return await original_verify(self)
 
         previous = shell.on_output
-        shell.on_output = lambda line: self.cb.on_tool_output("shell", line)
+
+        async def forward(line):
+            await _stream_test_output(self.cb.on_tool_output, line)
+
+        shell.on_output = forward
         try:
             return await original_verify(self)
         finally:
