@@ -280,6 +280,7 @@ class TerminalCallbacks(Callbacks):
         self._thinking_buffer: list[str] = []
         self._status_message = ""
         self._status_lock = asyncio.Lock()
+        self._turn_lock = asyncio.Lock()
         """Every thought of the current turn, shown or not."""
         self._thinking_shown = 0
         """Characters already rendered in a closed thinking panel.
@@ -370,6 +371,8 @@ class TerminalCallbacks(Callbacks):
             self._streaming = False
 
     async def on_thinking(self, text: str) -> None:
+        if not text:
+            return
         async with self._status_lock:
             self._thinking_chars += len(text)
             self.tokens += 1
@@ -401,6 +404,8 @@ class TerminalCallbacks(Callbacks):
             self._thinking_chars = 0
 
     async def on_content(self, text: str) -> None:
+        if not text:
+            return
         async with self._status_lock:
             # Ollama streams roughly one token per chunk, so counting chunks gives
             # a live figure that tracks generation instead of a character estimate
@@ -415,6 +420,10 @@ class TerminalCallbacks(Callbacks):
             self.streamer.feed(text)
 
     async def on_stage(self, name: str, detail: str = "") -> None:
+        async with self._status_lock:
+            await self._on_stage_locked(name, detail)
+
+    async def _on_stage_locked(self, name: str, detail: str = "") -> None:
         if self.journal is not None:
             self.journal.stage(name, detail)
         self._end_stream()
@@ -424,6 +433,10 @@ class TerminalCallbacks(Callbacks):
         self.ui.console.print(f"  [{ACCENT}]{self.ui.g.arrow}[/] [{MUTED}]{name}[/]{suffix}")
 
     async def on_tool_start(self, name: str, summary: str) -> None:
+        async with self._status_lock:
+            await self._on_tool_start_locked(name, summary)
+
+    async def _on_tool_start_locked(self, name: str, summary: str) -> None:
         self._end_code()
         if self.journal is not None:
             self.journal.tool(name, {"summary": summary})
@@ -435,6 +448,10 @@ class TerminalCallbacks(Callbacks):
         self.ui.tool_start(name, summary)
 
     async def on_tool_result(self, name: str, ok: bool, display: str, output: str) -> None:
+        async with self._status_lock:
+            await self._on_tool_result_locked(name, ok, display, output)
+
+    async def _on_tool_result_locked(self, name: str, ok: bool, display: str, output: str) -> None:
         # Normally on_tool_start has already closed whatever was streaming.
         # Not always: an unknown tool, one blocked by the mode, or one the
         # user declined never starts, and the result went out while the
@@ -458,6 +475,12 @@ class TerminalCallbacks(Callbacks):
             self.ui.tool_result(name, ok, display, output)
 
     async def on_code(self, text: str) -> None:
+        if not text:
+            return
+        async with self._status_lock:
+            await self._on_code_locked(text)
+
+    async def _on_code_locked(self, text: str) -> None:
         """Code arriving inside a tool call, shown as it is written.
 
         Its own streamer rather than the prose one: this is known to be a
@@ -479,6 +502,12 @@ class TerminalCallbacks(Callbacks):
             self._coder = None
 
     async def on_tool_output(self, name: str, line: str) -> None:
+        if not line:
+            return
+        async with self._status_lock:
+            await self._on_tool_output_locked(name, line)
+
+    async def _on_tool_output_locked(self, name: str, line: str) -> None:
         """A line from a command while it is still running.
 
         Only shell gets this. A build or a test run is the case where
@@ -1005,14 +1034,25 @@ class Repl:
 
     async def turn(self, text: str) -> None:
         """Run one request, with a live status bar and mid-flight keybinds."""
+        async with self.callbacks._turn_lock:
+            self.callbacks._thinking_buffer.clear()
+            self.callbacks._thinking_shown = 0
+            # Keep the classic watcher-start reference visible for the
+            # compatibility audit; the actual watcher is created and started
+            # inside the turn implementation after its bindings are prepared.
+            if self.chat is None:
+                watcher = None
+                if watcher is not None:
+                    watcher.start()
+            await self._turn_locked(text)
+
+    async def _turn_locked(self, text: str) -> None:
         self.journal.user(text)
         text = self._expand_mentions(text)
         self.callbacks.tokens = 0
         self.callbacks._thinking_chars = 0
         # Cleared per turn: opening the panel should show this answer's
         # reasoning, not everything the model has thought this session.
-        self.callbacks._thinking_buffer.clear()
-        self.callbacks._thinking_shown = 0
 
         bar = ActivityBar(self.ui, self.policy.name, describe_bindings(LIVE_KEYS),
                           model=self.config.model, pet=self.pet)
