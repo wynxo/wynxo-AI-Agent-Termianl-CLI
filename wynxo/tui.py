@@ -36,6 +36,7 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import (Float, FloatContainer, HSplit,
                                    Layout, Window)
+from prompt_toolkit.layout.containers import VSplit
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
@@ -165,6 +166,8 @@ class ChatUI:
     """
 
     HEADER_ROWS = 2        # the identity line, and a rule under it
+    TODO_WIDTH = 38        # fixed top-right todo panel width on wide screens
+    TODO_MAX_ROWS = 10
     COMPOSER_ROWS = 3      # top border, the line you type on, bottom border
     STATUS_ROWS = 1        # the floor: the activity bar on its own
     MAX_STATUS_ROWS = 14
@@ -210,6 +213,9 @@ class ChatUI:
         text for this pane can be told too."""
         self._last_width = 0
         self._status_lines = 1
+        self.todo_rendered = ""
+        self.todo_frame = 0
+        self._todo_last_tick = 0.0
         """Rows the pinned block took last time it was drawn."""
         self.typed: "asyncio.Future[str] | None" = None
         """Set while a line of free text is being read, by prompt()."""
@@ -310,6 +316,34 @@ class ChatUI:
             lines = [""] * (rows - len(lines)) + lines
         return ANSI("\n".join(lines[-rows:]))
 
+    def _todo_fragments(self):
+        """Render the live todo plan in a top-right pinned overlay."""
+        if not self.todo_rendered:
+            return []
+        lines = [line for line in self.todo_rendered.splitlines() if line.strip()]
+        if not lines:
+            return []
+        lines = lines[: self.TODO_MAX_ROWS - 2]
+        done = sum(line.lstrip().startswith("[x]") for line in lines)
+        title = f"♡ plan {done}/{len(lines)} ♡"
+        body = [title]
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("[x]"):
+                marker = "✓"
+            elif stripped.startswith("[>]"):
+                marker = ("✧", "⋆", "✦", "♡")[self.todo_frame % 4]
+            else:
+                marker = "·"
+            label = stripped[3:].strip() if stripped.startswith(("[x]", "[>]") ) else stripped
+            body.append(f"{marker} {label}")
+        return body
+
+    def set_todos(self, rendered: str) -> None:
+        self.todo_rendered = rendered or ""
+        self.todo_frame += 1
+        self.invalidate()
+
     def _header_fragments(self):
         """The identity line, kept on screen.
 
@@ -381,9 +415,16 @@ class ChatUI:
             composer,
             Window(content=FormattedTextControl(self._edge(False)), height=1),
         ])
-        body = HSplit([
+        header = VSplit([
             Window(content=FormattedTextControl(self._header_fragments),
-                   height=1),
+                   dont_extend_width=True),
+            Window(content=FormattedTextControl(self._todo_fragments),
+                   width=Dimension(min=0, preferred=self.TODO_WIDTH, max=self.TODO_WIDTH),
+                   dont_extend_width=False,
+                   wrap_lines=True),
+        ])
+        body = HSplit([
+            header,
             Window(content=FormattedTextControl(self._rule_fragments),
                    height=1),
             transcript,

@@ -493,9 +493,15 @@ class TerminalCallbacks(Callbacks):
         it ticks itself off and leaves when the work is done.
         """
         if self.bar is None:
-            self.ui.todos(rendered)      # non-interactive: print it once
+            if self.chat is not None:
+                self.chat.set_todos(rendered)
+            else:
+                self.ui.todos(rendered)
             return
+
         self.bar.set_plan(rendered)
+        if self.chat is not None:
+            self.chat.set_todos(rendered)
         if self.bar.plan_is_complete():
             await self.bar.finish_plan()
 
@@ -1444,7 +1450,11 @@ class Repl:
         if name == "/plan":
             todo = self.agent.tools.get("todo_write")
             rendered = todo.render() if todo and hasattr(todo, "render") else ""
-            self.ui.todos(rendered) if rendered else self.ui.info("no plan yet")
+            if self.chat is not None:
+                self.chat.set_todos(rendered)
+                self.chat.invalidate()
+            else:
+                self.ui.todos(rendered) if rendered else self.ui.info("no plan yet")
             return True
 
         if name == "/clear":
