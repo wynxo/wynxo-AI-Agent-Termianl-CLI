@@ -147,9 +147,10 @@ def install() -> None:
         guarded_run._wynxo_hardened = True
         cls.run = guarded_run
 
-    # 3) Hidden does not mean ignorable. Keep .github/.vscode/.devcontainer,
-    # while skipping repositories, environments and generated dependency trees.
+    # 3) Hidden does not mean ignorable. Preserve real project config while
+    # skipping repositories, environments and generated dependency trees.
     ignored = set(getattr(files_mod, "IGNORED", set()))
+    ignored.difference_update({".github", ".vscode", ".devcontainer", ".husky"})
     ignored.update({
         ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
         ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build", ".tox",
@@ -196,6 +197,41 @@ def install() -> None:
             return out
         candidates._wynxo_hardened = True
         search_mod.Grep._candidates = candidates
+
+    original_walk = files_mod.ListDir._walk
+    if not getattr(original_walk, "_wynxo_hardened", False):
+        def walk(self, directory, depth, prefix, out):
+            if depth <= 0 or len(out) >= files_mod.MAX_ENTRIES:
+                return len(out) >= files_mod.MAX_ENTRIES
+            try:
+                entries = sorted(
+                    (
+                        e for e in directory.iterdir()
+                        if e.name not in ignored
+                    ),
+                    key=lambda e: (e.is_file(), e.name.lower()),
+                )
+            except PermissionError:
+                out.append(f"{prefix}[permission denied]")
+                return False
+            for i, entry in enumerate(entries):
+                if len(out) >= files_mod.MAX_ENTRIES:
+                    return True
+                last = i == len(entries) - 1
+                branch = "`-- " if last else "|-- "
+                if entry.is_symlink():
+                    out.append(
+                        f"{prefix}{branch}{entry.name}"
+                        f"{'/' if entry.is_dir() else ''} -> {self._target(entry)}"
+                    )
+                    continue
+                out.append(f"{prefix}{branch}{entry.name}{'/' if entry.is_dir() else ''}")
+                if entry.is_dir():
+                    if walk(self, entry, depth - 1, prefix + ("    " if last else "|   "), out):
+                        return True
+            return False
+        walk._wynxo_hardened = True
+        files_mod.ListDir._walk = walk
 
     # 4) Secret-looking shell output is masked before it reaches UI/model.
     original_stream = shell_mod.Shell._stream
