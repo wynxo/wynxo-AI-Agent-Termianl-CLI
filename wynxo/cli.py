@@ -27,6 +27,7 @@ from . import fullscreen
 from . import logo
 from . import tui
 from .agent import Agent, Callbacks, Interrupted
+from .events import ToolEvent
 from .config import Config, Endpoint, data_dir, is_configured, load, normalise_url
 from .doctor import run_doctor
 from .effort import ORDER, resolve
@@ -437,11 +438,11 @@ class TerminalCallbacks(Callbacks):
         suffix = f" [{MUTED}]{detail}[/]" if detail else ""
         self.ui.console.print(f"  [{ACCENT}]{self.ui.g.arrow}[/] [{MUTED}]{name}[/]{suffix}")
 
-    async def on_tool_start(self, name: str, summary: str) -> None:
+    async def on_tool_start(self, name: str, summary: str, event: ToolEvent | None = None) -> None:
         async with self._status_lock:
-            await self._on_tool_start_locked(name, summary)
+            await self._on_tool_start_locked(name, summary, event)
 
-    async def _on_tool_start_locked(self, name: str, summary: str) -> None:
+    async def _on_tool_start_locked(self, name: str, summary: str, event: ToolEvent | None = None) -> None:
         self._end_code()
         if self.journal is not None:
             self.journal.tool(name, {"summary": summary})
@@ -453,11 +454,11 @@ class TerminalCallbacks(Callbacks):
         if self.chat is None:
             self.ui.tool_start(name, summary)
 
-    async def on_tool_result(self, name: str, ok: bool, display: str, output: str) -> None:
+    async def on_tool_result(self, name: str, ok: bool, display: str, output: str, event: ToolEvent | None = None) -> None:
         async with self._status_lock:
-            await self._on_tool_result_locked(name, ok, display, output)
+            await self._on_tool_result_locked(name, ok, display, output, event)
 
-    async def _on_tool_result_locked(self, name: str, ok: bool, display: str, output: str) -> None:
+    async def _on_tool_result_locked(self, name: str, ok: bool, display: str, output: str, event: ToolEvent | None = None) -> None:
         # Normally on_tool_start has already closed whatever was streaming.
         # Not always: an unknown tool, one blocked by the mode, or one the
         # user declined never starts, and the result went out while the
@@ -475,7 +476,8 @@ class TerminalCallbacks(Callbacks):
         if name == "todo_write" and ok and self.bar is not None:
             return
         if self.chat is not None and self.bar is not None:
-            self.bar.update(activity=_ACTIVITY.get(name, name), detail=("done" if ok else "failed"))
+            detail = event.compact() if event is not None else ("done" if ok else "failed")
+            self.bar.update(activity=_ACTIVITY.get(name, name), detail=detail)
             return
         if self.verbose_tools and output.strip():
             self.ui.tool_result(name, ok, "", "")

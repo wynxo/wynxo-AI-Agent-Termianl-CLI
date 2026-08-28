@@ -45,6 +45,7 @@ from . import testing
 from .secrets import Shield
 from .tools import Registry, build_registry
 from .tools.base import ToolResult
+from .events import ToolEvent
 
 VERIFIED = "VERIFIED"
 
@@ -177,8 +178,8 @@ class Callbacks:
     async def on_thinking(self, text: str) -> None: ...
     async def on_content(self, text: str) -> None: ...
     async def on_stage(self, name: str, detail: str = "") -> None: ...
-    async def on_tool_start(self, name: str, summary: str) -> None: ...
-    async def on_tool_result(self, name: str, ok: bool, display: str, output: str) -> None: ...
+    async def on_tool_start(self, name: str, summary: str, event: ToolEvent | None = None) -> None: ...
+    async def on_tool_result(self, name: str, ok: bool, display: str, output: str, event: ToolEvent | None = None) -> None: ...
     async def on_tool_output(self, name: str, line: str) -> None: ...
     async def on_code(self, text: str) -> None: ...
     async def on_todos(self, rendered: str) -> None: ...
@@ -523,8 +524,16 @@ class Agent:
                 result = ToolResult.failure(
                     f"{call.name} raised {type(result).__name__}: {result}")
             self.session.usage.tool_calls += 1
-            await self.cb.on_tool_result(call.name, result.ok, result.display,
-                                         result.output)
+            event = ToolEvent(call.name, summarise_call(call.name, call.arguments, self.workspace))
+            event.start()
+            if isinstance(result, ToolResult):
+                event.finish(result.ok, output=result.output, error=result.error,
+                             display=result.display, **result.metadata)
+                await self.cb.on_tool_result(call.name, result.ok, result.display,
+                                             result.output, event=event)
+            else:
+                event.finish(False, error=str(result))
+                await self.cb.on_tool_result(call.name, False, str(result), str(result), event=event)
             self.session.add_tool_result(
                 call.name, self._trim_output(result.output), call.call_id)
 
@@ -556,9 +565,16 @@ class Agent:
             return True
 
         summary = summarise_call(call.name, call.arguments, self.workspace)
+        event = ToolEvent(call.name, summary)
+        event.start()
+        # Keep the execution identity in the model-visible metadata too. This
+        # makes parallel/sequential calls distinguishable in journals and
+        # lets a late UI callback be ignored by consumers that track events.
+        execution_id = event.execution_id
 
         if refusal := self.permissions.blocked(call.name, tool.mutating, tool.internal):
-            await self.cb.on_tool_result(call.name, False, refusal, refusal)
+            event.finish(False, error=refusal)
+            await self.cb.on_tool_result(call.name, False, refusal, refusal, event=event)
             self.session.add_tool_result(call.name, f"ERROR: {refusal}", call.call_id)
             return True
 
@@ -583,7 +599,10 @@ class Agent:
             if decision is Decision.ALLOW_ALWAYS:
                 self.permissions.remember(call.name, call.arguments)
 
-        await self.cb.on_tool_start(call.name, summary)
+        try:
+            await self.cb.on_tool_start(call.name, summary, event=event)
+        except TypeError:
+            await self.cb.on_tool_start(call.name, summary)
         self._checkpoint(tool, call)
         # Long-running tools report as they go. Cleared afterwards so a
         # tool object reused for a later call cannot write into a line
@@ -592,12 +611,21 @@ class Agent:
         tool.context_left = self._context_left()
         try:
             result = await tool.invoke(call.arguments)
+        except asyncio.CancelledError:
+            event.cancel("cancelled")
+            raise
         finally:
             tool.on_output = None
             tool.context_left = 0
         self.session.usage.tool_calls += 1
 
-        await self.cb.on_tool_result(call.name, result.ok, result.display, result.output)
+        event.finish(result.ok, output=result.output, error=result.error,
+                     display=result.display, execution_id=execution_id,
+                     **result.metadata)
+        try:
+            await self.cb.on_tool_result(call.name, result.ok, result.display, result.output, event=event)
+        except TypeError:
+            await self.cb.on_tool_result(call.name, result.ok, result.display, result.output)
         self.session.add_tool_result(
             call.name, self._trim_output(result.output), call.call_id)
 

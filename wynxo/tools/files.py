@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 from pathlib import Path
 from typing import NamedTuple
 
@@ -297,6 +298,7 @@ class WriteFile(Tool):
 
 class EditInput(Schema):
     path = Field(str, "File path, relative to the project root.")
+    expected_hash = Field(str, "Optional SHA-256 of the file as last read; rejects external drift.", default="")
     old_text = Field(str, "Exact text to replace, including indentation. Must appear "
                           "in the file exactly once unless replace_all is true.")
     new_text = Field(str, "Replacement text.")
@@ -338,6 +340,14 @@ class EditFile(Tool):
 
         source = _decode(path)
         before = source.text
+        if args.expected_hash:
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+            if actual.lower() != args.expected_hash.strip().lower():
+                return ToolResult.failure(
+                    f"{rel} changed since it was read (expected {args.expected_hash}, found {actual}). "
+                    "Re-read the file before editing; no changes were applied.",
+                    stale=True, expected_hash=args.expected_hash, actual_hash=actual,
+                )
         count = before.count(args.old_text)
 
         if count == 0:
@@ -362,6 +372,7 @@ class EditFile(Tool):
             f"({count if args.replace_all else 1} replacement(s)){note}",
             display=make_diff(before, after, rel),
             path=rel,
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         )
 
     @staticmethod

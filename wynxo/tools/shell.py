@@ -15,6 +15,7 @@ from ..schema import Field, Schema
 from .base import Tool, ToolResult
 
 MAX_OUTPUT = 30_000
+
 TAIL_LINES = 200
 """How much of the end to keep when a command is very chatty. The tail is
 what matters -- a failing build says why on its last lines."""
@@ -233,7 +234,8 @@ class Shell(Tool):
                 f"Command timed out after {args.timeout}s and was killed: "
                 f"{command}\n\nOutput before it was killed:\n"
                 f"{output or '(none)'}",
-                command=command, timed_out=True,
+                command=command, timed_out=True, cancelled=False,
+                stdout=output, stderr="", exit_code=None,
             )
         await process.wait()
 
@@ -250,14 +252,17 @@ class Shell(Tool):
             return ToolResult.success(
             output or "(no output)",
             display=f"$ {command}",
-            exit_code=0,
+            command=command, stdout=output, stderr="", exit_code=0,
+            timed_out=False, cancelled=False,
         )
         return ToolResult(
             ok=False,
             output=f"exit code {code}\n{output or '(no output)'}",
             display=f"$ {command}",
             error=f"exit code {code}",
-            metadata={"exit_code": code, "command": command},
+            metadata={"exit_code": code, "command": command,
+                      "stdout": output, "stderr": "", "timed_out": False,
+                      "cancelled": False},
         )
 
     async def _stream(self, process, timeout: int) -> tuple[str, bool]:
