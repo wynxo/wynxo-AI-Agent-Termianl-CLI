@@ -308,15 +308,27 @@ def _validate_forgivingly(data: dict[str, Any]) -> Config:
         try:
             return Config.validate(data)
         except ValidationError as exc:
-            bad = [loc for loc, _msg in exc.error_list if loc in data]
+            # Extract top-level keys from error locations, including nested ones.
+            # "endpoints[0].url" should mark "endpoints" for deletion.
+            bad = set()
+            for loc, _msg in exc.error_list:
+                if loc in data:
+                    bad.add(loc)
+                else:
+                    # Extract top-level key from nested paths like "endpoints[0].url"
+                    top_level = loc.split("[")[0].split(".")[0]
+                    if top_level in data:
+                        bad.add(top_level)
+            
             if not bad:
                 break
-            for loc, message in exc.error_list:
-                if loc in data:
-                    LOAD_PROBLEMS.append(
-                        f"{loc}={data[loc]!r} in your settings is not usable "
-                        f"({message}); using the default instead")
-                    del data[loc]
+            for loc in bad:
+                message = next(msg for l, msg in exc.error_list 
+                              if l == loc or l.startswith(loc + "[") or l.startswith(loc + "."))
+                LOAD_PROBLEMS.append(
+                    f"{loc}={data[loc]!r} in your settings is not usable "
+                    f"({message}); using the default instead")
+                del data[loc]
         except Exception:
             break
     # Nothing salvageable, or a shape that is not settings at all.

@@ -7,6 +7,7 @@ holds the only copy of their work. Those are what most of this covers.
 
 import importlib.util
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -175,6 +176,7 @@ class TestRemoval:
         assert uninstall.remove_tree(tmp_path / "nope", dry_run=False) is False
         assert uninstall.remove_file(tmp_path / "nope", dry_run=False) is False
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Symlinks require admin on Windows")
     def test_a_broken_symlink_launcher_is_still_removed(self, tmp_path):
         """A launcher pointing at an already-deleted venv is the most likely
         thing to be left behind, so exists() alone is not enough to test."""
