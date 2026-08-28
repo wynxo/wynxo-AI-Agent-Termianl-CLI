@@ -192,6 +192,7 @@ COMMANDS = {
     "/clear": "start a fresh conversation",
     "/compact": "summarise the conversation to reclaim context",
     "/stats": "tokens, speed, context use",
+    "/session": "show current session, model, tools, and context",
     "/doctor": "check the server and model for problems",
     "/yolo": "stop asking permission for this session",
     "/sessions": "list recent sessions",
@@ -1535,6 +1536,9 @@ class Repl:
             self.ui.success(f"{before} -> {after} tokens")
             return True
 
+        if name in ("/status", "/session"):
+            return self.cmd_session()
+
         if name == "/stats":
             return self.cmd_stats()
 
@@ -1626,6 +1630,18 @@ class Repl:
             return True
 
         self.ui.warn(f"unknown command {name}. /help for the list.")
+        return True
+
+    def cmd_session(self) -> bool:
+        session = self.agent.session
+        limit = min(self.policy.max_iterations, self.config.max_tool_iterations)
+        self.ui.info(
+            f"session {session.session_id}  model {self.config.model}  "
+            f"workspace {self.ui.shorten_path(str(self.workspace))}\n"
+            f"tools {len(self.agent.tools)}  iteration limit {limit}  "
+            f"context {session.token_estimate()}/{self.config.num_ctx} tokens  "
+            f"requests {session.usage.requests}  tool calls {session.usage.tool_calls}"
+        )
         return True
 
     def cmd_diff(self, args: list[str]) -> bool:

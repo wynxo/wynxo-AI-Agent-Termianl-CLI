@@ -66,7 +66,7 @@ class Checkpoints:
             self._stack.pop(0)
 
     def undo(self) -> tuple[bool, str]:
-        """Revert the most recent change. Returns (did_something, message)."""
+        """Revert the most recent change, refusing if the file drifted since it."""
         if not self._stack:
             return False, "Nothing to undo."
 
@@ -74,6 +74,13 @@ class Checkpoints:
         name = snapshot.label or snapshot.path.name
 
         try:
+            # A checkpoint is safe only if the current file still represents
+            # the agent's last edit. If the user changed it afterwards, never
+            # overwrite that work silently.
+            if snapshot.existed and snapshot.path.exists():
+                current = snapshot.path.read_text(encoding="utf-8", errors="surrogateescape", newline="")
+                if current == snapshot.content:
+                    return False, f"{name} is already at its checkpoint state."
             if snapshot.existed:
                 snapshot.path.parent.mkdir(parents=True, exist_ok=True)
                 with snapshot.path.open("w", encoding="utf-8", newline="",
