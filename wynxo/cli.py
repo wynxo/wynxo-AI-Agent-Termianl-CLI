@@ -28,6 +28,8 @@ from . import logo
 from . import tui
 from .agent import Agent, Callbacks, Interrupted
 from .events import ToolEvent
+from .task_state import TaskState
+from .discovery import Discovery
 from .config import Config, Endpoint, data_dir, is_configured, load, normalise_url
 from .doctor import run_doctor
 from .effort import ORDER, resolve
@@ -449,6 +451,8 @@ class TerminalCallbacks(Callbacks):
         self._end_stream()
         if self.bar is not None:
             self.bar.update(activity=_ACTIVITY.get(name, name), detail=summary)
+            if event is not None:
+                self.bar.record_tool_event(event)
             if name == "todo_write":
                 return       # the pinned plan is the announcement
         if self.chat is None:
@@ -477,6 +481,8 @@ class TerminalCallbacks(Callbacks):
             return
         if self.chat is not None and self.bar is not None:
             detail = event.compact() if event is not None else ("done" if ok else "failed")
+            if event is not None:
+                self.bar.record_tool_event(event)
             self.bar.update(activity=_ACTIVITY.get(name, name), detail=detail)
             return
         if self.verbose_tools and output.strip():
@@ -661,6 +667,7 @@ class Repl:
         self.boundary = resolve_scope(workspace, scope)
         self.mode = mode
         self.memory = Memory(workspace)
+        self.discovery = Discovery(workspace)
         self.journal = Journal.open(
             self.agent_session_id(), enabled=config.log)
         self.pending = Pending()
@@ -742,6 +749,7 @@ class Repl:
         silence_cpr_warning(self.prompt_session.app)
         self.callbacks = TerminalCallbacks(ui, self.prompt_session)
         self.callbacks.journal = self.journal
+        self.project_info = self.discovery.scan()
         self.agent = Agent(self.client, config, self.policy, workspace, self.callbacks,
                            boundary=self.boundary, memory=self.memory)
         self.agent.permissions.mode = mode
@@ -1523,6 +1531,7 @@ class Repl:
 
         if name == "/clear":
             self.agent.session = Session(workspace=self.workspace)
+            self.agent.task_state.reset()
             self.agent.refresh_system_prompt()
             self.ui.info("conversation cleared")
             return True
@@ -1638,6 +1647,8 @@ class Repl:
         session = self.agent.session
         limit = min(self.policy.max_iterations, self.config.max_tool_iterations)
         self.ui.info(
+            f"state {self.agent.task_state.state.value}  "
+            f"project {self.project_info.summary()}\n"
             f"session {session.session_id}  model {self.config.model}  "
             f"workspace {self.ui.shorten_path(str(self.workspace))}\n"
             f"tools {len(self.agent.tools)}  iteration limit {limit}  "
@@ -2151,6 +2162,8 @@ class Repl:
         from . import projectmap
 
         try:
+            self.discovery.workspace = self.workspace.resolve()
+            self.project_info = self.discovery.scan(force=True)
             self.agent.project_map = projectmap.load(self.workspace)
         except Exception as exc:
             self.agent.project_map = ""

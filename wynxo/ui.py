@@ -1225,6 +1225,8 @@ class ActivityBar:
         self.plan_done_frame = 0
         """Non-zero while the completion animation is playing."""
         self.lead: Text | None = None
+        self.tool_events: list = []
+        self.max_tool_events = 6
         """A half-written line of the answer, drawn just above the strip.
 
         Streamed prose cannot be written to the terminal while the bar owns
@@ -1396,6 +1398,11 @@ class ActivityBar:
     PLAN_DONE_FRAMES = 8
     """Long enough to register at 12fps, short enough not to be in the way."""
 
+    def record_tool_event(self, event) -> None:
+        """Keep a compact recent activity history in the pinned region."""
+        self.tool_events = [*self.tool_events, event][-self.max_tool_events:]
+        self.refresh()
+
     def set_plan(self, rendered: str) -> None:
         self.plan = rendered or ""
         self.plan_done_frame = 0
@@ -1477,6 +1484,11 @@ class ActivityBar:
         """The pinned block: plan on top, then the line being written, then
         the status strip. Everything here is redrawn in place."""
         parts = []
+        if self.tool_events:
+            history = Text()
+            for event in self.tool_events:
+                history.append(event.compact()[:120] + "\n", style=BAR_DIM)
+            parts.append(history)
         if (panel := self._plan_panel()) is not None:
             parts.append(panel)
         if self.lead is not None and self.lead.plain:

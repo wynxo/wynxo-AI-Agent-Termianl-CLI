@@ -46,6 +46,7 @@ from .secrets import Shield
 from .tools import Registry, build_registry
 from .tools.base import ToolResult
 from .events import ToolEvent
+from .task_state import TaskState, TaskStateMachine
 
 VERIFIED = "VERIFIED"
 
@@ -236,6 +237,7 @@ class Agent:
         starts inside the block. Remembering it lets every turn after the
         first stream the answer cleanly instead of the reasoning."""
 
+        self.task_state = TaskStateMachine()
         self._model_info = None
         """Cached from the last detect_capabilities() call, so set_effort()
         can re-apply the same thinking downgrade without a network round
@@ -393,6 +395,7 @@ class Agent:
         if self.policy.plan in ("none", "inline"):
             return ""
 
+        self.task_state.transition(TaskState.PLANNING)
         await self.cb.on_stage("planning")
 
         base = self.session.wire() + [{"role": "user", "content": PLAN_PROMPT}]
@@ -782,6 +785,7 @@ class Agent:
         if shell is None:
             return 0        # the user disabled it, so this is not ours to do
 
+        self.task_state.transition(TaskState.TESTING)
         await self.cb.on_stage("testing", runner.command)
         previous_output = shell.on_output
 
@@ -966,6 +970,8 @@ class Agent:
 
     async def run(self, request: str) -> TurnResult:
         started = time.monotonic()
+        self.task_state.reset()
+        self.task_state.transition(TaskState.THINKING)
         # Where this turn began, so the test pass can tell whether anything
         # was actually changed. A turn that only answered a question has
         # nothing new to break.
@@ -1041,6 +1047,7 @@ class Agent:
                     if final:
                         result.content = final
         except ProviderError as exc:
+            self.task_state.transition(TaskState.FAILED)
             partial = self._last_substantive()
             return TurnResult(
                 content=partial,
@@ -1048,8 +1055,10 @@ class Agent:
                 errors=[str(exc)],
             )
         except asyncio.CancelledError:
+            self.task_state.transition(TaskState.CANCELLED)
             raise Interrupted from None
 
+        self.task_state.transition(TaskState.COMPLETED)
         result.elapsed = time.monotonic() - started
         self.session.save()
         return result
