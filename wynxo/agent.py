@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -49,6 +50,32 @@ from .events import ToolEvent
 from .task_state import TaskState, TaskStateMachine
 
 VERIFIED = "VERIFIED"
+
+
+def _fingerprint(call) -> str:
+    """A canonical identity for a tool call, stable under formatting noise.
+
+    A model rarely repeats its JSON byte-for-byte: key order, spacing and
+    quoting all drift between calls. Fingerprinting the raw string would
+    miss the repeats that matter and flag the ones that do not.
+    """
+    args = call.arguments
+    if isinstance(args, dict):
+        try:
+            args = json.dumps(args, sort_keys=True, default=str,
+                              separators=(",", ":"))
+        except (TypeError, ValueError):
+            args = str(sorted(args.items()))
+    return f"{call.name}:{args}"
+
+# Shown to the model once when it answers with nothing at all -- no text, no
+# tool call. The single retry costs one model call, not a loop, and turns
+# what would otherwise be a dead turn into a second chance.
+EMPTY_ANSWER_NUDGE = (
+    "Your previous reply came back empty -- no text and no tool call. "
+    "Answer the user's request directly, or call a tool if the task needs "
+    "one. If the conversation no longer fits your context window, say so."
+)
 
 # Things people say that are not work. Anchored and whole-string: "hi" is a
 # greeting, "hi, now fix the parser" is a task with a greeting stuck on it.
@@ -170,6 +197,7 @@ class TurnResult:
     elapsed: float = 0.0
     interrupted: bool = False
     compacted: bool = False
+    empty_retried: bool = False
     errors: list[str] = field(default_factory=list)
 
 
@@ -568,8 +596,10 @@ class Agent:
             return True
 
         summary = summarise_call(call.name, call.arguments, self.workspace)
-        if not self.task_state.record_action(f"{call.name}:{call.arguments}"):
-            await self.cb.on_warning(f"Repeated tool action detected: {call.name}. Reconsider the approach.")
+        repeated = not self.task_state.record_action(_fingerprint(call))
+        if repeated:
+            await self.cb.on_warning(
+                f"Repeated tool action detected: {summary}. Reconsider the approach.")
         path = call.arguments.get("path") if isinstance(call.arguments, dict) else None
         if path:
             self.task_state.add_file(str(path), changed=tool.mutating)
@@ -634,8 +664,18 @@ class Agent:
             await self.cb.on_tool_result(call.name, result.ok, result.display, result.output, event=event)
         except TypeError:
             await self.cb.on_tool_result(call.name, result.ok, result.display, result.output)
-        self.session.add_tool_result(
-            call.name, self._trim_output(result.output), call.call_id)
+        model_output = self._trim_output(result.output)
+        if repeated:
+            # The UI warning alone reaches only the user. The model is the
+            # one stuck in the loop, so the repeat has to be visible in the
+            # conversation it reads next.
+            model_output = (
+                "\u26a0 This exact action was already performed earlier in "
+                "this task and is being flagged as a repeat. If it gave you "
+                "no new information, change strategy instead of doing it "
+                "again.\n\n" + model_output
+            )
+        self.session.add_tool_result(call.name, model_output, call.call_id)
         if result.ok:
             self.task_state.record_success(f"{call.name}: {result.display or 'completed'}")
             if call.name == "read_file" and path:
@@ -871,6 +911,14 @@ class Agent:
             self.session.add_assistant(turn.content, _wire_calls(turn))
 
             if not turn.tool_calls:
+                if not turn.content.strip() and not result.empty_retried:
+                    # Nothing at all came back. Local models drop replies
+                    # for transient reasons -- a swallowed stop token, a
+                    # one-off glitch -- and one explicit nudge fixes most
+                    # of them. Guarded by the flag so it never loops.
+                    result.empty_retried = True
+                    self.session.add_user(EMPTY_ANSWER_NUDGE)
+                    continue
                 await self._warn_if_nothing_came_back(turn)
                 result.content = turn.content
                 return result
@@ -1012,6 +1060,18 @@ class Agent:
                                   errors=[str(exc)])
             except asyncio.CancelledError:
                 raise Interrupted from None
+            if not turn.content.strip():
+                # Same one-chance recovery as the tool loop: a greeting that
+                # comes back empty should not die on the spot.
+                self.session.add_user(EMPTY_ANSWER_NUDGE)
+                try:
+                    turn = await self._call_model()
+                except ProviderError as exc:
+                    return TurnResult(content="",
+                                      elapsed=time.monotonic() - started,
+                                      errors=[str(exc)])
+                except asyncio.CancelledError:
+                    raise Interrupted from None
             await self._warn_if_nothing_came_back(turn)
             self.session.add_assistant(turn.content)
             self.session.save()

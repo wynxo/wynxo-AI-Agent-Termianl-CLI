@@ -144,20 +144,41 @@ def python_command(root: Path) -> str:
             candidate = root / directory / relative
             if candidate.is_file():
                 return _runnable(candidate)
-    # Prefer the interpreter running Wynxo only when it is not a test-mocked
-    # environment. Keeping the platform-name fallback preserves callers that
-    # use `shutil.which` to model PATH behavior.
+
+    # The interpreter actually running Wynxo is the environment the user
+    # chose -- a venv they activated, a conda base -- and its site-packages
+    # are where the project's dependencies live. It wins over whatever
+    # `python` happens to be on PATH, which on Windows is frequently the
+    # Microsoft Store alias: a zero-byte reparse point that opens the Store
+    # instead of running anything. A non-empty executable is evidence of a
+    # real interpreter; an alias is not.
     current = Path(sys.executable)
+    if os.name == "nt" and _real_interpreter(current):
+        return _runnable(current)
+
     if shutil.which("python3") is not None or shutil.which("python") is not None:
         for name in ("python3", "python"):
             if shutil.which(name):
                 return name
-    if current.is_file() and os.name == "nt":
+    if current.is_file():
         return _runnable(current)
     for name in ("python3", "python"):
         if shutil.which(name):
             return name
     return "python3"
+
+
+def _real_interpreter(path: Path) -> bool:
+    """A real executable, not a Windows Store app-execution alias.
+
+    Store aliases under %LOCALAPPDATA%\\Microsoft\\WindowsApps are zero-byte
+    reparse points; launching one opens the Microsoft Store. A genuine
+    python.exe is always larger than that.
+    """
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def _runnable(path: Path) -> str:

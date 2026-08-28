@@ -232,23 +232,75 @@ class TestWhichInterpreterTheTestsRunUnder:
         assert "my project" in command
         assert command != str(venv / "python")      # quoted somehow
 
-    def test_no_virtualenv_falls_back_to_the_platform(self, tmp_path):
+    def test_no_virtualenv_falls_back_to_the_platform(self, tmp_path,
+                                                     monkeypatch):
         """On Debian and Ubuntu `python` is not a command at all unless
         somebody installed python-is-python3."""
+        import sys
+
         from wynxo.testing import python_command
 
+        # Whatever interpreter Wynxo itself runs under is not a usable
+        # candidate for this project, so the platform name must be chosen.
+        monkeypatch.setattr(sys, "executable",
+                            str(tmp_path / "no-such-python"))
         assert python_command(tmp_path) in ("python3", "python")
 
     def test_it_never_names_a_command_that_is_not_there(self, tmp_path,
                                                         monkeypatch):
         import shutil
+        import sys
 
         from wynxo import testing
 
         monkeypatch.setattr(shutil, "which",
                             lambda name: "/usr/bin/python3"
                             if name == "python3" else None)
+        # sys.executable must not leak into the decision on any platform.
+        monkeypatch.setattr(sys, "executable",
+                            str(tmp_path / "no-such-python"))
         assert testing.python_command(tmp_path) == "python3"
+
+    def test_the_active_environment_wins_over_path_python(self, tmp_path,
+                                                          monkeypatch):
+        """The interpreter running Wynxo is the environment the user chose;
+        a differently-named python on PATH must not override it."""
+        import shutil
+        import sys
+
+        from wynxo.testing import python_command
+
+        real = tmp_path / "real-env" / "python.exe"
+        real.parent.mkdir(parents=True)
+        real.write_bytes(b"MZ\x90\x00" * 100)   # non-empty, like a real exe
+
+        monkeypatch.setattr(sys, "executable", str(real))
+        monkeypatch.setattr("wynxo.testing.os.name", "nt")
+        monkeypatch.setattr(shutil, "which", lambda name: "python")
+
+        command = python_command(tmp_path)
+        assert str(real) in command
+        assert "python.exe" in command
+
+    def test_a_store_stub_is_not_the_active_environment(self, tmp_path,
+                                                        monkeypatch):
+        """A zero-byte WindowsApps alias is not an interpreter, so PATH
+        wins rather than inheriting the alias into the test command."""
+        import shutil
+        import sys
+
+        from wynxo.testing import python_command
+
+        stub = tmp_path / "WindowsApps" / "python.exe"
+        stub.parent.mkdir(parents=True)
+        stub.write_bytes(b"")   # Store aliases are zero-byte reparse points
+
+        monkeypatch.setattr(sys, "executable", str(stub))
+        monkeypatch.setattr("wynxo.testing.os.name", "nt")
+        monkeypatch.setattr(shutil, "which",
+                            lambda name: "python" if name == "python" else None)
+
+        assert python_command(tmp_path) == "python"
 
     def test_the_runner_uses_it(self, tmp_path):
         from wynxo.testing import detect

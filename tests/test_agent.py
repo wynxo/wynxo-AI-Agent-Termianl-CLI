@@ -812,14 +812,28 @@ class TestAnswerNeverGoesMissing:
         await agent.client.aclose()
 
     async def test_a_thought_only_response_never_leaks_as_an_answer(self, tmp_path):
-        """Reasoning is not a user-visible fallback for a missing answer."""
+        """Reasoning is not a user-visible fallback for a missing answer.
+        The empty answer gets its one nudge, then warns as before."""
         agent, _, cb = make_agent(tmp_path, [
             {"content": "", "thinking": "The capital is Paris."},
+            {"content": "", "thinking": "It is Paris."},
         ])
         result = await agent.run("capital of france")
         assert result.content == ""
         assert "Paris" not in "".join(cb.content)
         assert any("empty answer" in warning for warning in cb.warnings)
+        await agent.client.aclose()
+
+    async def test_a_thought_only_response_recovers_when_the_retry_answers(self, tmp_path):
+        """A nudge after empty content gets a real answer, and the reasoning
+        still never leaks into it."""
+        agent, _, cb = make_agent(tmp_path, [
+            {"content": "", "thinking": "The capital is Paris."},
+            {"content": "The capital of France is Paris."},
+        ])
+        result = await agent.run("capital of france")
+        assert result.content == "The capital of France is Paris."
+        assert not any("empty answer" in warning for warning in cb.warnings)
         await agent.client.aclose()
 
     async def test_a_normal_answer_is_unaffected(self, tmp_path):
@@ -1007,20 +1021,22 @@ class TestAnEmptyAnswerIsNotSilence:
 
     @pytest.mark.asyncio
     async def test_it_says_so_when_the_answer_is_empty(self, tmp_path):
-        agent, _, cb = make_agent(tmp_path, [{"content": ""}])
+        agent, _, cb = make_agent(
+            tmp_path, [{"content": ""}, {"content": ""}])
         await agent.run("add retries to the fetch helper")
         assert any("empty answer" in w for w in cb.warnings), cb.warnings
 
     @pytest.mark.asyncio
     async def test_it_says_so_for_whitespace_too(self, tmp_path):
-        agent, _, cb = make_agent(tmp_path, [{"content": "   \n\t  \n"}])
+        agent, _, cb = make_agent(
+            tmp_path, [{"content": "   \n\t  \n"}, {"content": "   \n\t  \n"}])
         await agent.run("add retries to the fetch helper")
         assert any("empty answer" in w for w in cb.warnings), cb.warnings
 
     @pytest.mark.asyncio
     async def test_small_talk_gets_the_same_warning(self, tmp_path):
         # Greetings never reach the tool loop, so they need their own guard.
-        agent, _, cb = make_agent(tmp_path, [{"content": ""}])
+        agent, _, cb = make_agent(tmp_path, [{"content": ""}, {"content": ""}])
         await agent.run("hello")
         assert any("empty answer" in w for w in cb.warnings), cb.warnings
 
@@ -1033,13 +1049,98 @@ class TestAnEmptyAnswerIsNotSilence:
     @pytest.mark.asyncio
     async def test_a_thought_only_response_warns_about_the_missing_answer(self, tmp_path):
         agent, _, cb = make_agent(
-            tmp_path, [{"content": "", "thinking": "The file already retries."}])
+            tmp_path, [{"content": "", "thinking": "The file already retries."},
+                       {"content": "", "thinking": "It already retries."}])
         await agent.run("does the fetch helper retry?")
         assert any("empty answer" in w for w in cb.warnings), cb.warnings
 
     @pytest.mark.asyncio
     async def test_the_warning_says_what_to_do_about_it(self, tmp_path):
-        agent, _, cb = make_agent(tmp_path, [{"content": ""}])
+        agent, _, cb = make_agent(
+            tmp_path, [{"content": ""}, {"content": ""}])
         await agent.run("add retries to the fetch helper")
         said = " ".join(cb.warnings)
         assert "/doctor" in said and "/compact" in said
+
+
+class TestAnEmptyAnswerRecovers:
+    """Before answering "nothing", the agent gives the model one explicit
+    nudge. A single glitched reply should not kill the turn."""
+
+    @pytest.mark.asyncio
+    async def test_a_single_empty_answer_recovers(self, tmp_path):
+        agent, fake, cb = make_agent(tmp_path, [{"content": ""}])
+        result = await agent.run("add retries to the fetch helper")
+        assert result.content == "Done."          # the retry answered
+        assert not any("empty answer" in w for w in cb.warnings), cb.warnings
+        assert len(fake.requests) == 2            # the nudge cost one retry
+        await agent.client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_the_nudge_is_visible_to_the_model(self, tmp_path):
+        agent, fake, _ = make_agent(tmp_path, [{"content": ""}])
+        await agent.run("add retries to the fetch helper")
+        second = fake.requests[1]["messages"]
+        assert any("came back empty" in str(m.get("content", ""))
+                   for m in second), second
+        await agent.client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_it_never_nudges_twice(self, tmp_path):
+        agent, fake, cb = make_agent(
+            tmp_path, [{"content": ""}, {"content": ""}, {"content": ""}])
+        await agent.run("add retries to the fetch helper")
+        assert any("empty answer" in w for w in cb.warnings), cb.warnings
+        assert len(fake.requests) == 2            # one retry, then warn
+        await agent.client.aclose()
+
+
+class TestRepeatedActionsReachTheModel:
+    """A repeat warning that only the UI sees cannot stop a loop, because
+    the model is the one stuck in it. The repeat must be visible in the
+    conversation the model reads next."""
+
+    async def _run_two_reads(self, tmp_path, first, second):
+        (tmp_path / "a.txt").write_text("one\n")
+        agent, fake, _ = make_agent(tmp_path, [
+            {"tool_calls": [{"function": {"name": "read_file",
+                                          "arguments": first}}]},
+            {"tool_calls": [{"function": {"name": "read_file",
+                                          "arguments": second}}]},
+            {"content": "Done."},
+        ])
+        await agent.run("read a.txt")
+        return agent, fake
+
+    @pytest.mark.asyncio
+    async def test_an_identical_action_is_flagged_in_the_conversation(self, tmp_path):
+        agent, fake = await self._run_two_reads(
+            tmp_path, {"path": "a.txt"}, {"path": "a.txt"})
+        tool_msgs = [m for m in fake.requests[-1]["messages"]
+                     if m.get("role") == "tool"]
+        assert any("already performed" in m.get("content", "")
+                   for m in tool_msgs), tool_msgs
+        await agent.client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_formatting_noise_still_counts_as_a_repeat(self, tmp_path):
+        # Same action, different key order and quoting: the raw string would
+        # miss it, the canonical fingerprint must not.
+        agent, fake = await self._run_two_reads(
+            tmp_path, {"path": "a.txt", "offset": 1},
+            {"offset": 1, "path": "a.txt"})
+        tool_msgs = [m for m in fake.requests[-1]["messages"]
+                     if m.get("role") == "tool"]
+        assert any("already performed" in m.get("content", "")
+                   for m in tool_msgs), tool_msgs
+        await agent.client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_a_different_action_is_not_flagged(self, tmp_path):
+        agent, fake = await self._run_two_reads(
+            tmp_path, {"path": "a.txt"}, {"path": "a.txt", "offset": 5})
+        tool_msgs = [m for m in fake.requests[-1]["messages"]
+                     if m.get("role") == "tool"]
+        assert not any("already performed" in m.get("content", "")
+                       for m in tool_msgs), tool_msgs
+        await agent.client.aclose()
