@@ -17,7 +17,6 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # A newer push makes the previous run's answer irrelevant.
   group: tests-${{ github.ref }}
   cancel-in-progress: true
 
@@ -26,17 +25,11 @@ jobs:
     name: ${{ matrix.os }} / py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     strategy:
-      # One platform failing should not hide the others -- knowing whether a
-      # break is Windows-only or everywhere is most of the diagnosis.
       fail-fast: false
       matrix:
-        # Linux and Windows only. macOS is not a target for this project.
         os: [ubuntu-latest, windows-latest]
-        python: ["3.10", "3.13"]
+        python: ["3.10", "3.13", "3.14"]
         include:
-          # The oldest and newest supported Python on every OS is more
-          # matrix than this project needs; the ends are where breakage
-          # lives, and Linux carries the middle.
           - os: ubuntu-latest
             python: "3.11"
 
@@ -54,17 +47,12 @@ jobs:
           python -m pip install -e ".[dev]"
 
       - name: Import on a clean interpreter
-        # Catches a missing dependency that the test run would mask by
-        # importing something else first.
         run: python -c "import wynxo, wynxo.cli, wynxo.agent, wynxo.provider"
 
       - name: Tests
         run: python -m pytest -q
 
       - name: Where it hung
-        # A hung suite is killed by the watchdog in tests/conftest.py, which
-        # writes every thread's stack here. Without this the log shows a job
-        # that stopped and nothing else.
         if: failure()
         shell: bash
         run: |
@@ -76,14 +64,9 @@ jobs:
           fi
 
       - name: The CLI actually starts
-        # --version goes through argparse and every module-level import,
-        # which is where a platform difference tends to surface first.
         run: wynxo --version
 
   no-compiled-dependencies:
-    # wynxo has to install on Termux, where anything needing a Rust or C
-    # toolchain has no wheel and will not build. This is the check that
-    # keeps a casual `pip install pydantic` from quietly ending that.
     name: pure python only
     runs-on: ubuntu-latest
     steps:
