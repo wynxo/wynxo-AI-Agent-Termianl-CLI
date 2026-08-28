@@ -44,18 +44,29 @@ class Glob(Tool):
 
     def _collect(self, root: Path, pattern: str) -> list[str]:
         out: list[str] = []
+        normalized_pattern = str(pattern).replace("\\", "/")
         for path in root.rglob("*"):
             if len(out) > MAX_MATCHES * 4:
                 break
             if not path.is_file():
                 continue
-            if any(part in IGNORED or part.startswith(".") for part in path.parts):
+            rel = self.relative(path).replace("\\", "/")
+            # Dotfiles are first-class project files. In particular, patterns
+            # like **/* must discover .github/.vscode/.devcontainer rather than
+            # silently treating every hidden directory as generated junk.
+            parts = rel.split("/")
+            if any(part in IGNORED and part not in {".github", ".vscode", ".devcontainer", ".husky"}
+                   for part in parts):
                 continue
-            rel = self.relative(path)
-            if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(path.name, pattern):
+            if normalized_pattern in {"*", "**", "**/*"}:
+                matched = True
+            else:
+                matched = (
+                    fnmatch.fnmatch(rel, normalized_pattern)
+                    or fnmatch.fnmatch(path.name, normalized_pattern)
+                )
+            if matched:
                 out.append(rel)
-        # Most-recently-modified first: when a model is hunting for the file it
-        # just changed, that is nearly always the one it wants.
         out.sort(key=lambda r: -(root.joinpath(r).stat().st_mtime if (root / r).exists() else 0))
         return out
 
@@ -115,9 +126,6 @@ class Grep(Tool):
             if _looks_binary(path):
                 continue
             if self.shield.blocks(path):
-                # A grep is a read with extra steps. Matching inside a
-                # credentials file would hand over the secret a line at a
-                # time, which is the same leak in a shape nobody checks.
                 continue
             try:
                 lines = _read_text(path).splitlines()
@@ -140,12 +148,19 @@ class Grep(Tool):
 
     def _candidates(self, root: Path, glob: str) -> list[Path]:
         out = []
+        normalized_glob = str(glob).replace("\\", "/") if glob else ""
         for path in root.rglob("*"):
             if not path.is_file():
                 continue
-            if any(part in IGNORED or part.startswith(".") for part in path.parts):
+            rel = self.relative(path).replace("\\", "/")
+            parts = rel.split("/")
+            if any(part in IGNORED and part not in {".github", ".vscode", ".devcontainer", ".husky"}
+                   for part in parts):
                 continue
-            if glob and not (fnmatch.fnmatch(path.name, glob) or fnmatch.fnmatch(self.relative(path), glob)):
+            if normalized_glob and not (
+                fnmatch.fnmatch(path.name, normalized_glob)
+                or fnmatch.fnmatch(rel, normalized_glob)
+            ):
                 continue
             out.append(path)
         return out
