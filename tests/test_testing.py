@@ -147,22 +147,20 @@ class TestWhenItRuns:
         return Agent(client=MagicMock(), config=config,
                      policy=resolve("medium"), workspace=tmp_path)
 
-    def _ran(self, agent) -> bool:
+    def _ran(self, agent, changed=None) -> bool:
+        """Whether _verify_with_tests actually invoked the shell."""
         import asyncio
+        from unittest.mock import AsyncMock, MagicMock
 
-        called = []
-        agent.checkpoints.changes_since = lambda _mark: called or [object()]
-        original = agent.tools.get
-
-        def spy(name):
-            if name == "shell":
-                called.append(name)
-                return None
-            return original(name)
-
-        agent.tools.get = spy
+        if changed is None:
+            changed = [type("S", (), {"path": agent.workspace / "app.py"})()]
+        agent.checkpoints.changes_since = lambda _mark: changed
+        shell = MagicMock()
+        shell.invoke = AsyncMock(return_value=type("R", (), {
+            "ok": True, "output": "", "metadata": {}})())
+        agent.tools.get = lambda name: shell if name == "shell" else None
         asyncio.run(agent._verify_with_tests())
-        return bool(called)
+        return shell.invoke.called
 
     def test_it_does_not_run_when_the_setting_is_off(self, tmp_path):
         project(tmp_path, {"pytest.ini": "[pytest]\n"})
@@ -193,8 +191,16 @@ class TestWhenItRuns:
         assert self._ran(self._agent(tmp_path)) is True
 
     def test_it_does_not_run_without_a_detectable_runner(self, tmp_path):
+        """No runner and no Python change: nothing to validate."""
         project(tmp_path, {"README.md": "# nothing to run\n"})
-        assert self._ran(self._agent(tmp_path)) is False
+        changed = [type("S", (), {"path": tmp_path / "README.md"})()]
+        assert self._ran(self._agent(tmp_path), changed) is False
+
+    def test_without_a_runner_a_python_change_gets_a_syntax_gate(self, tmp_path):
+        """No runner, but a changed .py file: the cheap compileall gate runs
+        so a broken edit cannot sail through verification."""
+        project(tmp_path, {"README.md": "# nothing to run\n"})
+        assert self._ran(self._agent(tmp_path)) is True
 
 
 class TestWhichInterpreterTheTestsRunUnder:

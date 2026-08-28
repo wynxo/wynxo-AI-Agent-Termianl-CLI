@@ -60,10 +60,12 @@ PROBE_PROMPT = "How big is the file README.md? Use the tool."
 
 
 class Doctor:
-    def __init__(self, client: OllamaClient, config: Config, ui: UI):
+    def __init__(self, client: OllamaClient, config: Config, ui: UI,
+                 workspace: Path | None = None):
         self.client = client
         self.config = config
         self.ui = ui
+        self.workspace = workspace
         self.checks: list[Check] = []
 
     async def run(self) -> int:
@@ -86,11 +88,12 @@ class Doctor:
             self.report()
             return 1
         self.checks.extend([
-            Check("python", Status.PASS, f"{sys.version.split()[0]} at {sys.executable}"),
             Check("git", Status.PASS if shutil.which("git") else Status.WARN,
                   shutil.which("git") or "not found"),
             Check("installation", Status.PASS, str(Path(__file__).resolve().parent)),
         ])
+        if self.workspace:
+            self.checks.extend(await self._python_checks())
         if not await self.check_model_present():
             self.report()
             return 1
@@ -102,6 +105,74 @@ class Doctor:
         await self.check_tool_calling(info)
 
         return self.report()
+
+    # -- python environment checks ----------------------------------------
+
+    async def _python_checks(self) -> list[Check]:
+        """What the active Python environment looks like for this project.
+
+        The interpreter Wynxo would actually run tests under -- not the one
+        running Wynxo, which may be a different environment entirely -- plus
+        whether the tooling the project's tests need is installed there.
+        """
+        from . import testing
+        env = testing.environment_info(self.workspace)
+        checks: list[Check] = []
+
+        interpreter = env.interpreter
+        if "WindowsApps" in interpreter:
+            checks.append(Check(
+                "python interpreter", Status.FAIL, interpreter,
+                fix="The resolved interpreter is the Microsoft Store alias, "
+                    "which opens the Store instead of running. Activate a "
+                    "real environment (e.g. .venv) and restart wynxo from it."))
+        elif "virtualenv" in env.environment or "conda" in env.environment:
+            checks.append(Check("python interpreter", Status.PASS, interpreter))
+        else:
+            checks.append(Check(
+                "python interpreter", Status.WARN,
+                f"{interpreter} ({env.environment})",
+                fix="No virtualenv detected for this project. A venv keeps "
+                    "dependencies where the project can find them."))
+
+        checks.append(Check(
+            "python version",
+            Status.PASS if env.version else Status.WARN,
+            env.version or "unknown"))
+        checks.append(Check("python environment", Status.PASS, env.environment))
+        checks.append(Check("package manager", Status.PASS, env.package_manager))
+
+        if env.pytest_installed is False:
+            checks.append(Check(
+                "pytest", Status.FAIL,
+                "not installed in the active environment",
+                fix=f"pip: {testing.pip_command(self.workspace)} install pytest"))
+        else:
+            checks.append(Check(
+                "pytest",
+                Status.PASS if env.pytest_installed else Status.WARN,
+                "installed" if env.pytest_installed else "not checked",
+                facts=(["tests run with: " + env.test_runner]
+                       if env.test_runner else [])))
+
+        if env.async_tests:
+            if env.pytest_asyncio_installed is False:
+                checks.append(Check(
+                    "pytest-asyncio", Status.FAIL,
+                    "async tests present but the plugin is not installed",
+                    fix=f"pip: {testing.pip_command(self.workspace)} "
+                        "install pytest-asyncio"))
+            else:
+                checks.append(Check(
+                    "pytest-asyncio",
+                    Status.PASS if env.pytest_asyncio_installed else Status.WARN,
+                    "installed" if env.pytest_asyncio_installed else "not checked"))
+
+        checks.append(Check(
+            "project config",
+            Status.PASS if env.config_files else Status.WARN,
+            ", ".join(env.config_files) or "none found"))
+        return checks
 
     # -- individual checks -------------------------------------------------
 

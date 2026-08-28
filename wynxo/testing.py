@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -232,3 +234,450 @@ def summarise(output: str, limit: int = TAIL_LINES) -> str:
     omitted = len(lines) - limit
     return f"... [{omitted} earlier lines omitted] ...\n" + \
         "\n".join(lines[-limit:])
+
+
+# -- structured failure analysis -----------------------------------------
+
+
+@dataclass(frozen=True)
+class Failure:
+    kind: str
+    """Exception type: AssertionError, ModuleNotFoundError, ..."""
+    message: str
+    file: str = ""
+    line: int = 0
+    test: str = ""
+    """The pytest node id when known (tests/test_x.py::test_y)."""
+    frames: tuple[str, ...] = ()
+
+
+_FRAME = re.compile(r"^(.+?\.py):(\d+): in (.+)$")
+# pytest 8+/9 prints the raise site as ``file.py:line: ExceptionType``
+# (no `` in func``), distinct from _FRAME.
+_LOC = re.compile(r"^(.+?\.py):(\d+):\s+([A-Za-z_][\w.]*)$")
+_E = re.compile(r"^E\s+([^:]+?)(?::\s*(.*))?$")
+_SUMMARY = re.compile(r"^(FAILED|ERROR)\s+(\S+)(?:\s+-\s+(.*))?$")
+_SECTION = re.compile(r"^_{5,}\s*(.*?)\s*_+$")
+_PY_FRAME = re.compile(r'^\s*File "(.+)", line (\d+)(?:, in (\S+))?')
+_EXC = re.compile(r"^([\w.]+):\s*(.*)$")
+
+
+def parse_failures(output: str) -> list[Failure]:
+    """Structured failure records from pytest or plain Python output.
+
+    Handles both of pytest's shapes -- the full ``E   Type: message``
+    traceback sections (with ``file.py:line: in func`` frames) and the
+    ``FAILED nodeid - Type: message`` summary lines at the end -- plus a
+    plain ``Traceback (most recent call last):`` block. The raise site is
+    the frame printed directly above each exception line.
+    """
+    failures: list[Failure] = []
+    seen: set[tuple] = set()
+    tests_seen: set[str] = set()
+    frames: list[tuple[str, int, str]] = []
+    current_test = ""
+    traceback_mode = False
+    pending_e: list[str] = []
+    """Assertion-detail E lines ("assert -1 == 5", "+ where ...") waiting
+    for the location line that names their exception type."""
+
+    def add(kind: str, message: str, file: str = "", line: int = 0,
+            test: str = "") -> None:
+        key = (kind, file, line, test)
+        if key in seen:
+            return
+        seen.add(key)
+        if test:
+            tests_seen.add(test.rsplit("::", 1)[-1])
+        failures.append(Failure(
+            kind=kind, message=message.strip(), file=file, line=line,
+            test=test, frames=tuple(f"{f}:{l} in {fn}"
+                                     for f, l, fn in frames[-4:])))
+
+    for raw in (output or "").splitlines():
+        s = raw.rstrip()
+        line = s.strip()
+        if not line:
+            continue
+
+        section = _SECTION.match(line)
+        if section:
+            head = section.group(1).strip()
+            current_test = head.split()[-1] if head else ""
+            frames = []
+            traceback_mode = False
+            pending_e = []
+            continue
+
+        frame = _FRAME.match(line)
+        if frame:
+            frames.append((frame.group(1), int(frame.group(2)), frame.group(3)))
+            pending_e = []
+            continue
+
+        location = _LOC.match(line)
+        if location:
+            file = location.group(1)
+            lineno = int(location.group(2))
+            kind = location.group(3)
+            frames.append((file, lineno, ""))
+            message = pending_e[0] if pending_e else ""
+            add(kind, message, file, lineno, current_test)
+            pending_e = []
+            continue
+
+        exc = _E.match(line)
+        if exc:
+            kind = exc.group(1).strip()
+            message = exc.group(2) or ""
+            if message:
+                file, lineno, _ = frames[-1] if frames else ("", 0, "")
+                add(kind, message, file, lineno, current_test)
+            else:
+                # "E   assert -1 == 5" -- assertion detail with no type;
+                # its type arrives on the location line below.
+                pending_e.append(kind)
+            continue
+
+        if line == "Traceback (most recent call last):":
+            traceback_mode = True
+            frames = []
+            continue
+        if traceback_mode:
+            py_frame = _PY_FRAME.match(line)
+            if py_frame:
+                frames.append((py_frame.group(1), int(py_frame.group(2)),
+                               py_frame.group(3) or ""))
+                continue
+            if raw.startswith((" ", "\t")):
+                continue          # source lines between frames
+            plain = _EXC.match(line)
+            if plain and frames:
+                add(plain.group(1), plain.group(2), frames[-1][0],
+                    frames[-1][1], current_test)
+                frames = []
+                traceback_mode = False
+                continue
+            traceback_mode = False  # traceback over; other lines may follow
+
+        summary = _SUMMARY.match(line)
+        if summary:
+            kind = "error" if summary.group(1) == "ERROR" else "failure"
+            node = summary.group(2)
+            rest = summary.group(3) or ""
+            if " " in node:      # "ERROR collecting test_x.py" style
+                continue
+            if rest and ":" in rest:
+                exc_kind, _, msg = rest.partition(":")
+                exc_kind = exc_kind.strip() or kind
+            else:
+                exc_kind, msg = kind, rest
+            if node.rsplit("::", 1)[-1] in tests_seen:
+                continue          # already captured with file/line above
+            add(exc_kind, msg, test=node)
+    return failures
+
+
+ENV_TOOLS = (
+    "pytest", "pytest_asyncio", "pytest-asyncio", "pytest_cov",
+    "pytest-cov", "ruff", "black", "mypy", "pyright", "flake8",
+    "coverage", "tox", "nox", "pre-commit", "setuptools", "wheel",
+    "pip", "hypothesis",
+)
+"""Tools whose absence is an environment problem, not a code problem."""
+
+# Module name as imported -> package name as pip installs it.
+_PIP_NAME = {"pytest_asyncio": "pytest-asyncio", "pytest_cov": "pytest-cov"}
+
+
+def classify_failure(failure: Failure, root: Path) -> tuple[str, str]:
+    """(category, reason) for a failure: environment, structure, code, test.
+
+    The category steers the next move: an environment problem must be fixed
+    by installing into the active environment, never by editing source;
+    a structure problem is about package layout and import paths.
+    """
+    kind = failure.kind
+    message = (failure.message or "").lower()
+
+    if kind in ("ModuleNotFoundError", "ImportError"):
+        # Longest first: "pytest_asyncio" must beat "pytest" as a substring.
+        for tool in sorted(ENV_TOOLS, key=len, reverse=True):
+            if tool.lower() in message:
+                package = _PIP_NAME.get(tool, tool)
+                return ("environment",
+                        f"{package} is not installed in the active environment. "
+                        "Install it there -- do not edit application source "
+                        f"to paper over it. ({pip_command(root)} install {package})")
+        return ("structure",
+                "a module cannot be imported. Check the package layout "
+                "(src/ vs flat), __init__.py files, and that the package is "
+                "importable in the active environment (e.g. an editable "
+                "install), before editing code.")
+
+    if kind in ("SyntaxError", "IndentationError", "TabError"):
+        return ("code", "the file does not parse -- a syntax error at the "
+                "reported line.")
+
+    if kind == "ModuleNotFoundError":
+        return ("structure", "the import path does not resolve.")
+
+    if failure.file and _is_test_path(failure.file, root):
+        return ("test", "the failure is inside test code -- the test's "
+                "expectation or setup is wrong, or the change broke what "
+                "the test asserts.")
+
+    if kind == "AssertionError":
+        return ("code", "an assertion failed in project code (or the change "
+                "broke a behavioral contract).")
+
+    if kind == "TimeoutError" or "timed out" in message:
+        return ("code", "the test timed out -- likely an infinite loop or a "
+                "hang introduced by the change.")
+
+    if kind in ("NameError", "AttributeError", "TypeError", "KeyError",
+                "IndexError", "ValueError", "RecursionError", "ZeroDivisionError",
+                "FileNotFoundError", "PermissionError", "OSError", "RuntimeError"):
+        return ("code", f"{kind} raised while the code ran; read the failing "
+                "frame and the value it was given.")
+
+    return ("unknown", "no strong signal; read the failure context.")
+
+
+def _is_test_path(path: str, root: Path) -> bool:
+    """Whether a failure location is inside test code."""
+    name = Path(path).name.lower()
+    if name.startswith("test_") or name.endswith("_test.py"):
+        return True
+    try:
+        rel = str(Path(path).resolve().relative_to(root.resolve()))
+    except (ValueError, OSError):
+        return False
+    return rel.split(os.sep)[0] in ("tests", "test", "spec")
+
+
+def failure_report(output: str, root: Path) -> str:
+    """The structured, classified version of a test run, for the model.
+
+    Appends to the raw tail the things the model can act on directly:
+    exception type, file:line, test node id, and what kind of problem it is
+    (environment vs code vs test) with the right next move.
+    """
+    failures = parse_failures(output)
+    if not failures:
+        return ""
+    lines = ["", "[structured failure analysis]"]
+    for failure in failures[:6]:
+        where = f"{failure.file}:{failure.line}" if failure.file else "?"
+        lines.append(f"\u2022 {failure.kind}: {failure.message or '(no message)'}")
+        if failure.test:
+            lines.append(f"  test: {failure.test}")
+        lines.append(f"  at {where}")
+        category, reason = classify_failure(failure, root)
+        lines.append(f"  \u2192 {category}: {reason}")
+    if len(failures) > 6:
+        lines.append(f"  \u2026 and {len(failures) - 6} more failures")
+    return "\n".join(lines)
+
+
+# -- the project's Python environment -------------------------------------
+
+
+_IMPORT_CACHE: dict[str, bool | None] = {}
+_VERSION_CACHE: dict[str, str] = {}
+
+
+def _interpreter_argv(interpreter: str) -> list[str]:
+    """The interpreter as an argv, tolerating every quoting style
+    python_command() can produce (bare name, quoted path, `& "..."`).
+
+    Never shlex a Windows path: backslashes are shlex escapes on POSIX
+    mode, so ``.venv\\Scripts\\python.exe`` would collapse into one token
+    with the separators eaten. An unquoted token with no spaces is always
+    safe to pass through as-is."""
+    if interpreter.startswith("& "):
+        return [interpreter[2:].strip().strip('"')]
+    if " " not in interpreter:
+        return [interpreter]
+    try:
+        return shlex.split(interpreter)
+    except ValueError:
+        return [interpreter]
+
+
+def _run_interpreter(interpreter: str, code: str) -> str:
+    """Run a snippet in the resolved interpreter; empty on any failure."""
+    argv = _interpreter_argv(interpreter) + ["-c", code]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (proc.stdout or proc.stderr or "").strip()
+
+
+def _module_importable(root: Path, module: str) -> bool | None:
+    """Whether the module imports in the project's active interpreter.
+    None when it cannot be determined (e.g. the interpreter is missing)."""
+    interpreter = python_command(root)
+    key = f"{interpreter}\x00{module}"
+    if key in _IMPORT_CACHE:
+        return _IMPORT_CACHE[key]
+    out = _run_interpreter(
+        interpreter,
+        f"import importlib.util,sys; "
+        f"sys.stdout.write(str(importlib.util.find_spec('{module}') is not None))",
+    )
+    result: bool | None = out.lower() == "true" if out else None
+    _IMPORT_CACHE[key] = result
+    return result
+
+
+def pytest_installed(root: Path) -> bool | None:
+    """Whether pytest imports in the active interpreter; None if unknown."""
+    return _module_importable(root, "pytest")
+
+
+def pytest_asyncio_installed(root: Path) -> bool | None:
+    """Whether pytest-asyncio imports in the active interpreter."""
+    return _module_importable(root, "pytest_asyncio")
+
+
+_ASYNC_TEST = re.compile(r"^\s*async\s+def\s+test", re.MULTILINE)
+
+
+def async_tests_present(root: Path) -> bool:
+    """Whether the project's tests contain async tests (without importing
+    anything). Scans a bounded number of files so a huge tree cannot stall."""
+    bases = [root / "tests"] if (root / "tests").is_dir() else [root]
+    scanned = 0
+    for base in bases:
+        for path in base.rglob("test_*.py"):
+            scanned += 1
+            if scanned > 400:
+                return False
+            try:
+                if _ASYNC_TEST.search(
+                        path.read_text(encoding="utf-8", errors="replace")):
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def pytest_asyncio_configured(root: Path) -> bool:
+    """Whether the project's config asks for pytest-asyncio behaviour."""
+    if "asyncio_mode" in _read(root / "pyproject.toml") or \
+            "asyncio" in _read(root / "pyproject.toml"):
+        return True
+    return any("asyncio_mode" in _read(root / name)
+               for name in ("pytest.ini", "setup.cfg", "tox.ini"))
+
+
+def pip_command(root: Path) -> str:
+    """pip through the project's own interpreter, never a stray PATH pip."""
+    return f"{python_command(root)} -m pip"
+
+
+def quote_arg(text: str) -> str:
+    """Quote one command argument for the shell this machine runs."""
+    if " " not in text:
+        return text
+    if os.name == "nt":
+        return '"' + text.replace('"', '\\"') + '"'
+    return shlex.quote(text)
+
+
+@dataclass(frozen=True)
+class PythonEnvironment:
+    interpreter: str
+    version: str
+    environment: str
+    package_manager: str
+    config_files: tuple[str, ...]
+    pytest_installed: bool | None
+    pytest_asyncio_installed: bool | None
+    async_tests: bool
+    test_runner: str | None
+
+
+_CONFIG_FILES = (
+    "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
+    "requirements-dev.txt", "requirements-dev.in", "Pipfile", "poetry.lock",
+    "uv.lock", "tox.ini", "noxfile.py", "pytest.ini", ".python-version",
+    "MANIFEST.in", "environment.yml", "conda-env.yml",
+)
+
+
+def environment_info(root: Path) -> PythonEnvironment:
+    """Everything /doctor and the agent need to know about the project's
+    Python environment, from the files that are actually there."""
+    root = Path(root)
+    interpreter = python_command(root)
+
+    version = _VERSION_CACHE.get(interpreter, "")
+    if not version:
+        version = _run_interpreter(
+            interpreter, "import sys; print('%d.%d.%d' % sys.version_info[:3])")
+        _VERSION_CACHE[interpreter] = version
+
+    interp_text = interpreter.lower()
+    environment = "system"
+    if "windowsapps" in interp_text:
+        environment = "windows-store-alias (broken)"
+    elif any(marker in interp_text for marker in (
+            ".venv\\", "/.venv/", "/.venv\\", "\\venv\\", "/venv/",
+            "/venv\\", "\\env\\", "/env/", "\\envs\\", "/envs/")):
+        environment = "virtualenv"
+    elif "conda" in interp_text or os.environ.get("CONDA_PREFIX"):
+        environment = "conda"
+    elif (root / "poetry.lock").is_file():
+        environment = "poetry"
+    elif (root / "uv.lock").is_file():
+        environment = "uv"
+    elif (root / "Pipfile").is_file():
+        environment = "pipenv"
+
+    if (root / "uv.lock").is_file():
+        package_manager = "uv"
+    elif (root / "poetry.lock").is_file():
+        package_manager = "poetry"
+    elif (root / "Pipfile").is_file():
+        package_manager = "pipenv"
+    elif (root / "environment.yml").is_file():
+        package_manager = "conda"
+    else:
+        package_manager = "pip"
+
+    config_files = tuple(name for name in _CONFIG_FILES
+                         if (root / name).is_file())
+
+    runner = detect(root)
+    return PythonEnvironment(
+        interpreter=interpreter,
+        version=version,
+        environment=environment,
+        package_manager=package_manager,
+        config_files=config_files,
+        pytest_installed=pytest_installed(root),
+        pytest_asyncio_installed=pytest_asyncio_installed(root),
+        async_tests=async_tests_present(root),
+        test_runner=runner.name if runner else None,
+    )
+
+
+def focused_command(root: Path, changed: list[Path]) -> str | None:
+    """A pytest command limited to test files plausibly affected by the
+    changed files, when the project runs pytest. None when there is nothing
+    focused to run -- the caller should fall back to the full suite."""
+    runner = detect(root)
+    if runner is None or runner.name != "pytest":
+        return None
+    tests_root = root / "tests" if (root / "tests").is_dir() else root
+    from .navigation import affected_tests
+    files = affected_tests([Path(c) for c in changed], tests_root)
+    if not files:
+        return None
+    parts = [f"{python_command(root)} -m pytest"]
+    parts.extend(quote_arg(str(f.relative_to(root))) for f in files)
+    return " ".join(parts)

@@ -1682,7 +1682,8 @@ class Repl:
 
         if name == "/doctor":
             from .doctor import Doctor
-            await Doctor(self.client, self.config, self.ui).run()
+            await Doctor(self.client, self.config, self.ui,
+                         workspace=self.workspace).run()
             return True
 
         if name == "/mode":

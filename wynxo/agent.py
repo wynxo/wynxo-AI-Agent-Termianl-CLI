@@ -242,6 +242,9 @@ class Agent:
         self._turn_mark = 0
         self._warned_over_window = False
         """Said once per turn: it is the same news on every iteration."""
+        self._failure_signatures: list[tuple] = []
+        """Failure signatures from test runs, so the same failure twice in a
+        task is flagged as no-progress instead of silently re-attempted."""
         self.shield = Shield(workspace, enabled=config.protect_secrets)
         self.tools = registry or build_registry(
             workspace, allow_shell=config.allow_shell,
@@ -830,19 +833,76 @@ class Agent:
             return 0
         if self.permissions.mode is Mode.PLAN:
             return 0        # read-only means read-only, tests included
-        if not self.checkpoints.changes_since(self._turn_mark):
+        changed = self.checkpoints.changes_since(self._turn_mark)
+        if not changed:
             return 0
 
         runner = testing.detect(self.workspace)
         if runner is None:
-            return 0
+            # No test runner the project asked for. A cheap syntax gate is
+            # still worth it when Python files changed -- it catches a
+            # broken edit before the user does -- and nothing at all for
+            # non-Python changes.
+            py_changed = [snapshot.path for snapshot in changed
+                          if str(snapshot.path).endswith(".py")]
+            if not py_changed:
+                return 0
+            shell = self.tools.get("shell")
+            if shell is None:
+                return 0
+            return await self._syntax_gate(py_changed, shell)
 
         shell = self.tools.get("shell")
         if shell is None:
             return 0        # the user disabled it, so this is not ours to do
 
+        async def run_tests(command: str):
+            """One test run with output forwarded, returning the result."""
+            self.task_state.transition(TaskState.TESTING)
+            await self.cb.on_stage("testing", command)
+            previous_output = shell.on_output
+
+            async def forward_output(line: str) -> None:
+                await _stream_test_output(self.cb.on_tool_output, line)
+
+            shell.on_output = forward_output
+            try:
+                return await shell.invoke(
+                    {"command": command, "timeout": testing.DEFAULT_TIMEOUT},
+                    timeout=testing.DEFAULT_TIMEOUT + 30,
+                )
+            finally:
+                shell.on_output = previous_output
+
+        # Focused first: the tests most likely to know whether this change
+        # broke something, before spending minutes on the whole suite. A
+        # focused failure is the news worth reporting -- the full suite would
+        # only add noise around it.
+        focused = testing.focused_command(
+            self.workspace, [snapshot.path for snapshot in changed])
+        if focused:
+            result = await run_tests(focused)
+            if not result.ok:
+                return await self._report_test_failure(focused, result)
+
+        result = await run_tests(runner.command)
+        if result.ok:
+            self.task_state.record_success(f"tests passed: {runner.command}")
+            self.task_state.record_verification(runner.command)
+            await self.cb.on_tool_result(
+                "tests", True, TESTS_PASSED_NOTE.format(command=runner.command), "")
+            return 0
+
+        return await self._report_test_failure(runner.command, result)
+
+    async def _syntax_gate(self, py_changed, shell) -> int:
+        """Cheap validation when the project has no test runner: a Python
+        edit that does not parse is caught here rather than by the user."""
+        command = (f"{testing.python_command(self.workspace)} -m compileall -q "
+                   + " ".join(testing.quote_arg(str(p.relative_to(self.workspace)))
+                              for p in py_changed[:12]))
         self.task_state.transition(TaskState.TESTING)
-        await self.cb.on_stage("testing", runner.command)
+        await self.cb.on_stage("syntax check", "compileall")
         previous_output = shell.on_output
 
         async def forward_output(line: str) -> None:
@@ -851,26 +911,50 @@ class Agent:
         shell.on_output = forward_output
         try:
             result = await shell.invoke(
-                {"command": runner.command, "timeout": testing.DEFAULT_TIMEOUT},
+                {"command": command, "timeout": testing.DEFAULT_TIMEOUT},
                 timeout=testing.DEFAULT_TIMEOUT + 30,
             )
         finally:
             shell.on_output = previous_output
-        code = result.metadata.get("exit_code", 0 if result.ok else 1)
-
         if result.ok:
-            self.task_state.record_success(f"tests passed: {runner.command}")
-            self.task_state.record_verification(runner.command)
+            self.task_state.record_success("syntax check passed")
             await self.cb.on_tool_result(
-                "tests", True, TESTS_PASSED_NOTE.format(command=runner.command), "")
+                "tests", True, "syntax check passed (compileall)", "")
             return 0
-
         body = testing.summarise(result.output)
-        self.task_state.record_failure(f"tests failed: {runner.command}")
-        await self.cb.on_tool_result(
-            "tests", False, f"tests failed ({runner.command})", body)
+        self.task_state.record_failure(f"syntax check failed: {command}")
+        await self.cb.on_tool_result("tests", False, "syntax check failed", body)
         self.session.add_user(TESTS_FAILED_PROMPT.format(
-            command=runner.command, code=code, output=body))
+            command=command,
+            code=result.metadata.get("exit_code", 1),
+            output=body + testing.failure_report(result.output, self.workspace)))
+        return 1
+
+    async def _report_test_failure(self, command: str, result) -> int:
+        """Turn a failed test run into the model's next instruction."""
+        code = result.metadata.get("exit_code", 0 if result.ok else 1)
+        body = testing.summarise(result.output)
+        body += testing.failure_report(result.output, self.workspace)
+
+        signature = tuple((f.kind, f.file, f.line)
+                          for f in testing.parse_failures(result.output))
+        if signature and signature in self._failure_signatures[-2:]:
+            body = (
+                "\u26a0 No meaningful progress: this run failed with the same "
+                "failure signature as an earlier run. Reconsider the approach "
+                "-- repeating the same edit will produce the same failure.\n\n"
+                + body
+            )
+        if signature:
+            self._failure_signatures.append(signature)
+            if len(self._failure_signatures) > 8:
+                self._failure_signatures.pop(0)
+
+        self.task_state.record_failure(f"tests failed: {command}")
+        await self.cb.on_tool_result(
+            "tests", False, f"tests failed ({command})", body)
+        self.session.add_user(TESTS_FAILED_PROMPT.format(
+            command=command, code=code, output=body))
 
         # One pass to fix what broke. Not a loop: a model that cannot fix it
         # in one go is usually making it worse, and the user is better served
