@@ -16,5 +16,6 @@ from . import _memory_hardening as _memory_hardening  # noqa: F401,E402
 from . import _testing_hardening as _testing_hardening  # noqa: F401,E402
 from . import _symlink_hardening as _symlink_hardening  # noqa: F401,E402
 from . import _projectmap_hardening as _projectmap_hardening  # noqa: F401,E402
+from . import _speech_hardening as _speech_hardening  # noqa: F401,E402
 
 __all__ = ["__version__"]
