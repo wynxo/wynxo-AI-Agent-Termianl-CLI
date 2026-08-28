@@ -64,9 +64,9 @@ def windows_hard_refusal(command: str) -> str:
 
     # Ordinary Remove-Item/Set-Content/etc. are *not* hard-refused: they must
     # flow into the normal permission system so legitimate project edits still
-    # work. Only whole-drive/system destructive forms are blocked outright.
+    # work. Whole-drive/system destructive forms are blocked outright.
     whole_drive_remove = re.search(
-        r"\bremove-item\b.*(?:-recurse\b.*)?\b(?:[a-z]:\\?$|[a-z]:/??$|\$home(?:\\|/)?$)",
+        r"\bremove-item\b.*(?:-recurse\b.*)?(?:\b[a-z]:[\\/]?\s*$|\$home(?:[\\/]?\s*)$)",
         low,
         re.IGNORECASE,
     )
