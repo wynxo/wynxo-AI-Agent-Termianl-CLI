@@ -486,6 +486,8 @@ class TestOneBadSettingDoesNotCostYouTheRest:
     @pytest.fixture
     def where(self, tmp_path, monkeypatch):
         monkeypatch.setattr("wynxo.config.config_dir", lambda: tmp_path)
+        monkeypatch.delenv("OLLAMA_HOST", raising=False)
+        monkeypatch.delenv("WYNXO_ENDPOINT", raising=False)
         return tmp_path
 
     GOOD = {

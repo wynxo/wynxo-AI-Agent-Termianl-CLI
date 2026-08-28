@@ -333,6 +333,7 @@ class TestALinkIsNotADirectory:
         return tmp_path
 
     async def test_the_loop_is_not_walked(self, tmp_path):
+        pytest.skip("Symlinks require admin on Windows", allow_module_level=False) if sys.platform == "win32" else None
         self._tangle(tmp_path)
         result = await ListDir(tmp_path).invoke({"path": ".", "depth": 5})
         assert result.ok
@@ -340,11 +341,13 @@ class TestALinkIsNotADirectory:
         assert "to_a/" not in result.output.replace("to_a/ ->", "")
 
     async def test_a_link_says_where_it_goes(self, tmp_path):
+        pytest.skip("Symlinks require admin on Windows", allow_module_level=False) if sys.platform == "win32" else None
         self._tangle(tmp_path)
         result = await ListDir(tmp_path).invoke({"path": ".", "depth": 5})
         assert "->" in result.output
 
     async def test_the_real_tree_is_still_listed(self, tmp_path):
+        pytest.skip("Symlinks require admin on Windows", allow_module_level=False) if sys.platform == "win32" else None
         self._tangle(tmp_path)
         result = await ListDir(tmp_path).invoke({"path": ".", "depth": 5})
         assert "app.py" in result.output
