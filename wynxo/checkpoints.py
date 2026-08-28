@@ -1,13 +1,10 @@
-"""Undo for file changes.
-
-Every write is snapshotted before it happens, so a bad edit is one ``/undo``
-away rather than a question of what the file used to look like. Snapshots are
-in memory and per-session: this is an undo button, not a backup system, and
-pretending otherwise would invite people to rely on it for the wrong thing.
-"""
+"""Undo for file changes, preserving the exact bytes on disk."""
 
 from __future__ import annotations
 
+import os
+import stat
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,14 +17,16 @@ MAX_FILE_BYTES = 2_000_000
 class Snapshot:
     path: Path
     content: str | None
-    """None means the file did not exist, so undoing means deleting it."""
+    """Best-effort text view kept for diffs and backwards compatibility."""
     tool: str
     when: float = field(default_factory=time.time)
     label: str = ""
+    raw_bytes: bytes | None = None
+    mode: int | None = None
 
     @property
     def existed(self) -> bool:
-        return self.content is not None
+        return self.raw_bytes is not None or self.content is not None
 
 
 class Checkpoints:
@@ -38,35 +37,40 @@ class Checkpoints:
         return len(self._stack)
 
     def capture(self, path: Path, tool: str, label: str = "") -> None:
-        """Record what ``path`` looks like right now, before it is changed."""
+        """Record the exact pre-change bytes and mode, without re-encoding."""
         try:
             if path.exists():
-                if path.stat().st_size > MAX_FILE_BYTES:
-                    return   # too big to hold; better no undo than an OOM
-                # newline="" so nothing is translated on the way in. The
-                # default translates CRLF to LF, and undo writes back
-                # untranslated -- so undoing an edit to a CRLF file
-                # converted the whole file to LF, which inside a git repo
-                # is every line of it showing as changed.
-                #
-                # surrogateescape is what makes the rest of it exact: a byte
-                # that is not valid UTF-8 becomes a lone surrogate and comes
-                # back as the same byte, so a cp1252 or UTF-16 file is
-                # restored to what it was rather than to a re-encoding of it.
-                with path.open("r", encoding="utf-8",
-                               errors="surrogateescape", newline="") as handle:
-                    content = handle.read()
+                if path.is_dir() or path.stat().st_size > MAX_FILE_BYTES:
+                    return
+                raw = path.read_bytes()
+                mode = stat.S_IMODE(path.stat().st_mode)
+                # Keep a decoded representation for existing callers and UI
+                # diffs. UTF-8 with surrogateescape is lossless for bytes that
+                # are not valid UTF-8, while BOM-aware decodes make common
+                # UTF-16/UTF-8-sig project files readable in review output.
+                if raw.startswith((b"\\xff\\xfe", b"\\xfe\\xff")):
+                    encoding = "utf-16"
+                elif raw.startswith(b"\\xef\\xbb\\xbf"):
+                    encoding = "utf-8-sig"
+                else:
+                    encoding = "utf-8"
+                content = raw.decode(encoding, errors="surrogateescape")
             else:
+                raw = None
+                mode = None
                 content = None
-        except OSError:
+        except (OSError, UnicodeError):
             return
 
-        self._stack.append(Snapshot(path=path, content=content, tool=tool, label=label))
+        self._stack.append(
+            Snapshot(path=path, content=content, tool=tool, label=label,
+                     raw_bytes=raw, mode=mode)
+        )
         if len(self._stack) > MAX_SNAPSHOTS:
             self._stack.pop(0)
 
     def undo(self) -> tuple[bool, str]:
-        """Revert the most recent change. Returns (did_something, message)."""
+        """Revert the most recent change, preserving the original bytes/mode."""
         if not self._stack:
             return False, "Nothing to undo."
 
@@ -76,9 +80,31 @@ class Checkpoints:
         try:
             if snapshot.existed:
                 snapshot.path.parent.mkdir(parents=True, exist_ok=True)
-                with snapshot.path.open("w", encoding="utf-8", newline="",
-                                        errors="surrogateescape") as fh:
-                    fh.write(snapshot.content or "")
+                data = snapshot.raw_bytes
+                if data is None:
+                    data = (snapshot.content or "").encode("utf-8", "surrogateescape")
+                fd, temp_name = tempfile.mkstemp(
+                    prefix=f".{snapshot.path.name}.",
+                    suffix=".undo.tmp",
+                    dir=str(snapshot.path.parent),
+                )
+                try:
+                    with os.fdopen(fd, "wb") as fh:
+                        fh.write(data)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    if snapshot.mode is not None:
+                        try:
+                            os.chmod(temp_name, snapshot.mode)
+                        except OSError:
+                            pass
+                    os.replace(temp_name, snapshot.path)
+                except Exception:
+                    try:
+                        os.unlink(temp_name)
+                    except OSError:
+                        pass
+                    raise
                 return True, f"Reverted {name} to its state before {snapshot.tool}."
             if snapshot.path.exists():
                 snapshot.path.unlink()
@@ -88,15 +114,9 @@ class Checkpoints:
             return False, f"Could not undo {name}: {exc}"
 
     def mark(self) -> int:
-        """A position to measure a turn's changes from."""
         return len(self._stack)
 
     def changes_since(self, mark: int) -> list[Snapshot]:
-        """The earliest snapshot per file taken after ``mark``.
-
-        Earliest, not latest: three edits to one file during a turn should
-        read as one change from how it started, not three overlapping ones.
-        """
         seen: dict[str, Snapshot] = {}
         for snapshot in self._stack[mark:]:
             key = str(snapshot.path)
@@ -105,11 +125,6 @@ class Checkpoints:
         return list(seen.values())
 
     def revert_since(self, mark: int) -> tuple[int, list[str]]:
-        """Undo everything after ``mark``. Returns (reverted, problems).
-
-        Newest first, so a file written and then edited again lands back on
-        what it held before the turn rather than halfway through it.
-        """
         problems: list[str] = []
         reverted = 0
         while len(self._stack) > mark:
