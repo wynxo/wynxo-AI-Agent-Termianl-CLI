@@ -19,6 +19,8 @@ from . import _projectmap_hardening as _projectmap_hardening  # noqa: F401,E402
 from . import _speech_hardening as _speech_hardening  # noqa: F401,E402
 from . import _schema_hardening as _schema_hardening  # noqa: F401,E402
 from . import _journal_hardening as _journal_hardening  # noqa: F401,E402
+from . import _journal_permissions_hardening as _journal_permissions_hardening  # noqa: F401,E402
 from . import _mentions_hardening as _mentions_hardening  # noqa: F401,E402
+from . import _discovery_hardening as _discovery_hardening  # noqa: F401,E402
 
 __all__ = ["__version__"]
