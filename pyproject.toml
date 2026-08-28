@@ -15,7 +15,7 @@ dependencies = [
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [project.scripts]
-wynxo = "wynxo.cli:main"
+wynxo = "wynxo.bootstrap:main"
 
 [build-system]
 requires = ["setuptools>=68"]
