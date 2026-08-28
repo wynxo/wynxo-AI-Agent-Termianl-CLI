@@ -326,6 +326,8 @@ class TerminalCallbacks(Callbacks):
         # transition line into the transcript. The legacy non-chat stream
         # keeps one marker for compatibility; chat mode remains silent.
         self._status_message = "Thinking..." if self.ui.show_thinking else ""
+        if self.chat is not None:
+            self.chat.set_activity(self._status_message)
         if self.bar is not None:
             self.bar.update(detail=self._status_message)
         elif self.chat is None:
@@ -383,6 +385,8 @@ class TerminalCallbacks(Callbacks):
     def _note(self, message: str) -> None:
         """Update the transient status without adding transcript noise."""
         self._status_message = message
+        if self.chat is not None:
+            self.chat.set_activity(message)
         if self.bar is not None:
             self.bar.update(detail=message)
 
@@ -449,6 +453,9 @@ class TerminalCallbacks(Callbacks):
             await self._on_stage_locked(name, detail)
 
     async def _on_stage_locked(self, name: str, detail: str = "") -> None:
+        if self.chat is not None:
+            self.chat.set_activity(f"{self.ui.g.arrow} {name}"
+                                   + (f" · {detail}" if detail else ""))
         if self.journal is not None:
             self.journal.stage(name, detail)
         self._end_stream()
@@ -478,6 +485,8 @@ class TerminalCallbacks(Callbacks):
         pet = getattr(self, "pet", None)
         if pet is not None:
             pet.set_activity(_ACTIVITY.get(name, name))
+        if self.chat is not None:
+            self.chat.set_activity(f"{self.ui.g.arrow} {name} · {summary}")
         if self.bar is not None:
             self.bar.update(activity=_ACTIVITY.get(name, name), detail=summary)
             if event is not None:
@@ -513,6 +522,12 @@ class TerminalCallbacks(Callbacks):
             if event is not None:
                 self.bar.record_tool_event(event)
             self.bar.update(activity=_ACTIVITY.get(name, name), detail=detail)
+            if self.chat is not None:
+                self.chat.set_activity((self.ui.g.tick if ok else self.ui.g.cross)
+                                       + f" {name} · {detail}", ok=ok)
+                self.chat.notify((self.ui.g.tick if ok else self.ui.g.cross)
+                                 + f" {name} {'completed' if ok else 'failed'}",
+                                 ok=ok)
             return
         if self.verbose_tools and output.strip():
             self.ui.tool_result(name, ok, "", "")
@@ -816,6 +831,23 @@ class Repl:
     def _pet_moving(self) -> bool:
         return self.pet.animate and not self.motion.reduced
 
+    def _chrome(self) -> dict[str, str]:
+        """The prompt_toolkit style classes for the live chrome, from the
+        current palette -- kept in one place so /theme can repaint the
+        borders, toasts, plan panel and activity markers live."""
+        p = self.ui.palette
+        return {
+            "edge": p.faint,
+            "toast-ok": p.good,
+            "toast-fail": p.bad,
+            "pet": "",
+            "todo": "",
+            "todo-title": f"bold {p.accent}",
+            "ok": p.good,
+            "fail": p.bad,
+            "active": p.accent,
+        }
+
     def use_chat_layout(self) -> "tui.ChatUI":
         """Switch rendering into the chat layout.
 
@@ -835,6 +867,7 @@ class Repl:
             pet_state=self._pet_mood,
             pet_enabled=self._pet_on,
             pet_animate=self._pet_moving,
+            chrome=self._chrome(),
         )
         self.chat = chat
         self._dictation_state = ""
@@ -1202,6 +1235,11 @@ class Repl:
             result = await self._task
         except (asyncio.CancelledError, Interrupted):
             self.pet.react(Mood.IDLE)
+            if self.chat is not None:
+                self.chat.set_activity("")
+            self.callbacks._status_message = ""
+            if self.callbacks.bar is not None:
+                self.callbacks.bar.update(activity="idle", detail="")
             self.ui.console.print()
             self.ui.warn("Interrupted. The conversation is intact; ask me something else.")
             return
@@ -1221,8 +1259,13 @@ class Repl:
             # Whatever happened -- answer, tool, error, cancellation -- the
             # composer gets the caret back. Typing must work immediately.
             if self.chat is not None:
+                self.chat.set_activity("")
                 self.chat.refocus()
                 self.chat.invalidate()
+            # Stages are transient. Never leave a terminal-level status or
+            # pet activity behind after the live bar is disposed.
+            self.callbacks._status_message = ""
+            self.pet.react(Mood.IDLE)
 
         if result.errors:
             self.pet.react(Mood.SAD)
@@ -2241,6 +2284,7 @@ class Repl:
         self.ui.success(f"model: {target}")
         if self.chat is not None:
             self.chat.notify(f"✦ model: {target}")
+            self.chat.refocus()
         self.journal.note("model switched", model=target)
         if warning := await check_context(self.client, self.config):
             self.ui.warn(warning)
@@ -2378,6 +2422,9 @@ class Repl:
         self.agent.permissions.mode = mode
         self.agent.refresh_system_prompt()
         self.ui.success(f"mode: {mode.value} -- {mode.describe()}")
+        if self.chat is not None:
+            self.chat.notify(f"{self.ui.g.tick} mode: {mode.value}")
+            self.chat.refocus()
         if mode is Mode.YOLO:
             self.ui.warn("Nothing will ask for approval from here on.")
         return True
@@ -2854,9 +2901,14 @@ class Repl:
         apply_palette(self.ui.palette)
         self.ui.code_theme = self.ui.palette.code_theme
         self.pet.style_name = self.pet.style_name   # keep the face set
+        if self.chat is not None:
+            # Live chrome first, so the borders/toasts/plan repaint with the
+            # new palette rather than only the transcript text that follows.
+            self.chat.apply_theme(self._chrome())
         self.ui.success(f"theme: {choice}")
         if self.chat is not None:
             self.chat.notify(f"✦ theme: {choice}")
+            self.chat.refocus()
         self._preview_theme()
         return True
 

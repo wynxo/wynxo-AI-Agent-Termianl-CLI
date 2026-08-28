@@ -155,19 +155,35 @@ def python_command(root: Path) -> str:
     # instead of running anything. A non-empty executable is evidence of a
     # real interpreter; an alias is not.
     current = Path(sys.executable)
-    if os.name == "nt" and _real_interpreter(current):
+    if _real_interpreter(current) and _belongs_to_project_environment(current, root) \
+            and not (os.name == "nt" and current.parent.name.lower() == "global"):
+        # Prefer Wynxo's interpreter when it is the active/project environment,
+        # but keep the historical PATH fallback for an unrelated system
+        # interpreter. This avoids running a test suite with Wynxo's packages
+        # merely because the CLI itself was launched globally.
         return _runnable(current)
 
-    if shutil.which("python3") is not None or shutil.which("python") is not None:
-        for name in ("python3", "python"):
-            if shutil.which(name):
-                return name
-    if current.is_file():
-        return _runnable(current)
+    # Prefer PATH when it provides a candidate; the active interpreter is
+    # only selected above when it is demonstrably this project's environment.
     for name in ("python3", "python"):
-        if shutil.which(name):
+        candidate = shutil.which(name)
+        if candidate:
             return name
+    # No conventional candidate was found. Return the platform spelling;
+    # callers should treat it as a command name, not as proof it exists.
     return "python3"
+
+
+def _belongs_to_project_environment(path: Path, root: Path) -> bool:
+    """Whether the active interpreter is plausibly this project's environment."""
+    try:
+        path = path.resolve()
+        root = root.resolve()
+    except OSError:
+        return False
+    parts = {part.lower() for part in path.parts}
+    return any(marker in parts for marker in (".venv", "venv", ".env", "env")) \
+        or root in path.parents
 
 
 def _real_interpreter(path: Path) -> bool:

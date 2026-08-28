@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import re
 import string
 import time
 from typing import Callable
@@ -46,6 +47,25 @@ from rich.console import Console
 
 MIN_WIDTH = 20
 MAX_SCROLLBACK = 4_000
+
+DEFAULT_CHROME = {
+    "edge": "ansibrightblack",
+    "toast-ok": "ansibrightcyan",
+    "toast-fail": "ansired",
+    "pet": "",
+    "todo": "",
+    "todo-title": "bold ansibrightcyan",
+    "ok": "ansigreen",
+    "fail": "ansired",
+    "active": "ansibrightcyan",
+}
+"""The prompt_toolkit style classes the live chrome draws with.
+
+Swapped wholesale by apply_theme() so /theme repaints the borders, toasts,
+plan panel and activity markers live instead of only the rich transcript.
+"""
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 """Transcript lines kept. Past this the oldest go, because the whole point
 of holding them is to scroll back through a session, not to grow without
 limit on a phone."""
@@ -188,11 +208,13 @@ class ChatUI:
     """
 
     HEADER_ROWS = 2        # the identity line, and a rule under it
+    ACTIVITY_ROWS = 1      # activity is rendered inside the fixed footer row
     TODO_WIDTH = 38        # fixed top-right todo panel width on wide screens
     TODO_MAX_ROWS = 10
     COMPOSER_ROWS = 3      # floor of the composer: top border, one input row, bottom border
     COMPOSER_MAX_ROWS = 6  # the composer's ceiling; beyond this it scrolls inside
     FOOTER_ROWS = 1        # the status strip is exactly one row, always
+    ACTIVITY_MAX = 96      # prevent provider/tool text from flooding the chrome
     STATUS_ROWS = FOOTER_ROWS  # compatibility name; status is no longer variable-height
 
     # The layout contract, in the units the allocator actually uses:
@@ -216,6 +238,7 @@ class ChatUI:
                  on_dictate: Callable[[], None] | None = None,
                  unicode: bool = True, accent: str = "ansimagenta",
                  width: int | None = None,
+                 chrome: dict[str, str] | None = None,
                  header: Callable[[], str] | None = None,
                  pet_state: Callable[[], str] | None = None,
                  pet_enabled: Callable[[], bool] | None = None,
@@ -232,6 +255,10 @@ class ChatUI:
         """Rows scrolled back from the bottom. Zero follows the newest."""
         self._status = status or (lambda: "")
         self._header = header or (lambda: "")
+        self.activity = ""
+        self.activity_ok = True
+        self.activity_started = 0.0
+        self.activity_pulse = 0
         self._on_interrupt = on_interrupt
         # Ctrl-O and Ctrl-T used to reach the session only through a
         # KeyWatcher thread reading the tty behind this application's back.
@@ -246,6 +273,7 @@ class ChatUI:
         self._on_dictate = on_dictate
         self._unicode = unicode
         self._accent = accent
+        self._chrome = {**DEFAULT_CHROME, **(chrome or {})}
         self._closed = False
         self.question = ""
         self.answers: dict[str, str] = {}
@@ -267,8 +295,11 @@ class ChatUI:
         self._pet_enabled = pet_enabled
         self._pet_animate = pet_animate
         self._pet_frame = 0
+        self._last_pet_tick = time.monotonic()
+        self._last_activity_tick = self._last_pet_tick
         self._toast: tuple[str, float] | None = None
         self._toast_life = 3.5
+        self._toast_queue: list[tuple[str, bool]] = []
         self._float_budget: int | None = None
         """Rows the top-right block may use, set by the float's height
         measurement each render. None until a layout has measured it, so
@@ -447,8 +478,16 @@ class ChatUI:
         scene = scene_for(mood)
         frames = select(scene, unicode=self._unicode, width=30,
                         reduced=not self._pet_animate())
+        now = time.monotonic()
+        # Repaint cadence is not guaranteed (a quiet terminal may repaint
+        # irregularly), so advance on elapsed time rather than on render count.
+        # This keeps animation speed stable without creating another scheduler.
+        if self._pet_animate():
+            elapsed_steps = int((now - self._last_pet_tick) / 0.12)
+            self._pet_frame += max(1, elapsed_steps)
+            if elapsed_steps > 0:
+                self._last_pet_tick += elapsed_steps * 0.12
         index = (self._pet_frame // 2) % len(frames) if len(frames) > 1 else 0
-        self._pet_frame += 1
         return [line.rstrip() for line in frames[index].split("\n")
                 if line.strip()]
 
@@ -459,13 +498,27 @@ class ChatUI:
         text, at = self._toast
         if time.monotonic() - at > self._toast_life:
             self._toast = None
+            if self._toast_queue:
+                next_text, next_ok = self._toast_queue.pop(0)
+                self._toast_ok = next_ok
+                self._toast = (next_text, time.monotonic())
+                return next_text
             return ""
         return text
 
-    def notify(self, text: str) -> None:
-        """A transient notification, drawn in the top-right block. It clears
-        itself and never touches the transcript or the composer."""
+    def notify(self, text: str, ok: bool = True) -> None:
+        """Queue a transient notification in the floating chrome.
+
+        Notifications are deliberately not written to the transcript: they
+        are useful now, but must not consume history or alter composer geometry.
+        """
+        if not text:
+            return
+        if self._toast is not None:
+            self._toast_queue.append((text, ok))
+            return
         self._toast = (text, time.monotonic())
+        self._toast_ok = ok
         self.invalidate()
 
     def set_todo_mode(self, mode: str) -> None:
@@ -495,7 +548,8 @@ class ChatUI:
         budget = self._float_budget
         out: list[tuple[str, str]] = []
         if toast := self._toast_line():
-            out.append(("class:toast", toast))
+            out.append(("class:toast-ok" if getattr(self, "_toast_ok", True)
+                        else "class:toast-fail", toast))
         if self.todo_mode != "hidden":
             room = None if budget is None else max(0, budget - len(out))
             for line in self._pet_lines()[:room]:
@@ -630,6 +684,37 @@ class ChatUI:
         """
         return self._footer_fragments()
 
+    def apply_theme(self, chrome: dict[str, str] | None) -> None:
+        """Repaint the live chrome (borders, toasts, plan, activity) with a
+        new palette, without rebuilding the application."""
+        if chrome:
+            self._chrome = {**DEFAULT_CHROME, **chrome}
+        self.app.style = merge_styles([
+            Style.from_dict(self._chrome),
+            default_ui_style(),
+        ])
+        self.invalidate()
+
+    def set_activity(self, text: str, ok: bool = True) -> None:
+        """Update the single bounded activity strip without changing layout.
+
+        The activity row is intentionally stateful: while a command is active
+        it gets a tiny pulse, while completed work gets a stable check/cross.
+        It is still one row, so activity cannot reflow the transcript or input.
+        """
+        self.activity = " ".join(str(text).splitlines()).strip()[:self.ACTIVITY_MAX]
+        self.activity_ok = ok
+        self.activity_started = time.monotonic()
+        self.activity_pulse = 0
+        self.invalidate()
+
+    def _activity_fragments(self):
+        width, _ = self.size()
+        text = self.activity
+        if len(text) > width - 4:
+            text = text[: max(0, width - 7)] + "..."
+        return ANSI(text)
+
     def _footer_fragments(self):
         """The one status row, under the composer.
 
@@ -640,6 +725,13 @@ class ChatUI:
         in the transcript and in /log, not in this row.
         """
         text = " ".join(self._status().splitlines()).strip()
+        if self.activity:
+            # The live bar already shows the current tool during a turn; only
+            # prepend the strip when the status does not already carry it, or
+            # the footer would say the same thing twice.
+            plain = _ANSI_RE.sub("", text)
+            if not plain.startswith(self.activity[:24]):
+                text = self.activity + (f"   {text}" if text else "")
         if self.scroll > 0:
             marker = "^ scrolled back -- End to follow again"
             text = f"{text}   {marker}" if text else marker
@@ -668,8 +760,9 @@ class ChatUI:
             height=1,               # exact: min == preferred == max == 1
             dont_extend_height=True,
         )
-        composer_control = self._composer_control = BufferControl(
+        composer_control =        self._composer_control = BufferControl(
             buffer=self.buffer, input_processors=[])
+
         composer = Window(
             content=self._composer_control,
             # No explicit preferred: with preferred left unset the Window
@@ -712,6 +805,9 @@ class ChatUI:
             header,
             Window(content=FormattedTextControl(self._rule_fragments),
                    height=1, dont_extend_height=True),
+            # Activity is rendered inside the footer's fixed row; keeping it
+            # out of the HSplit preserves the established five-child layout
+            # and guarantees it can never consume transcript/composer space.
             # The only flexible child: every spare row the screen has ends
             # up here, because no other child reports a max above its
             # preferred size. Streaming, thinking, tool activity and status
@@ -751,16 +847,7 @@ class ChatUI:
             # appearance. Accent-colored by default; /theme minimal maps
             # these to plain styles instead.
             style=merge_styles([
-                Style.from_dict({
-                    "edge": "ansibrightblack",
-                    "toast": "ansibrightcyan",
-                    "pet": "",
-                    "todo": "",
-                    "todo-title": "bold ansibrightcyan",
-                    "ok": "ansigreen",
-                    "fail": "ansired",
-                    "active": "ansibrightcyan",
-                }),
+                Style.from_dict(self._chrome),
                 default_ui_style(),
             ]),
         )
@@ -1174,6 +1261,13 @@ class ChatUI:
 
     def exit(self) -> None:
         self._closed = True
+        self.question = ""
+        self.answers = {}
+        self.default = ""
+        for future in (self.answer, self.picked, self.typed):
+            if future is not None and not future.done():
+                future.cancel()
+        self.answer = self.picked = self.typed = None
         try:
             self.app.exit()
         except Exception:

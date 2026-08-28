@@ -238,6 +238,21 @@ class TestWhichInterpreterTheTestsRunUnder:
         assert "my project" in command
         assert command != str(venv / "python")      # quoted somehow
 
+    def test_an_unrelated_active_interpreter_does_not_override_project_path(self, tmp_path, monkeypatch):
+        """A globally installed Wynxo must not force its own Python onto a
+        different project when PATH provides that project's interpreter."""
+        import shutil
+        import sys
+
+        from wynxo.testing import python_command
+
+        active = tmp_path / "global" / "python.exe"
+        active.parent.mkdir()
+        active.write_bytes(b"MZ\x90\x00")
+        monkeypatch.setattr(sys, "executable", str(active))
+        monkeypatch.setattr(shutil, "which", lambda name: "project-python")
+        assert python_command(tmp_path) == "python3"
+
     def test_no_virtualenv_falls_back_to_the_platform(self, tmp_path,
                                                      monkeypatch):
         """On Debian and Ubuntu `python` is not a command at all unless

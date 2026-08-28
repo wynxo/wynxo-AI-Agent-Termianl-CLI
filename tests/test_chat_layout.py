@@ -125,6 +125,51 @@ class TestTheLayout:
     def chat_with_header(self):
         return ChatUI(status=lambda: "", header=lambda: "wynxo · qwen3 · medium")
 
+    def test_apply_theme_swaps_the_chrome_and_keeps_defaults(self, chat):
+        from wynxo.tui import DEFAULT_CHROME
+
+        chat.apply_theme({"edge": "#123456", "ok": "#00ff00"})
+        assert chat._chrome["edge"] == "#123456"
+        assert chat._chrome["ok"] == "#00ff00"
+        assert chat._chrome["todo-title"] == DEFAULT_CHROME["todo-title"]
+
+    def test_apply_theme_with_nothing_keeps_the_current_chrome(self, chat):
+        chat.apply_theme({"edge": "#123456"})
+        chat.apply_theme(None)
+        assert chat._chrome["edge"] == "#123456"
+
+    def test_the_footer_does_not_duplicate_live_activity(self, chat):
+        """The bar already renders the current tool during a turn; the
+        activity strip must not repeat it on the same row."""
+        chat.set_activity("-> read_file x.py")
+        chat._status = lambda: "\x1b[31m-> read_file x.py\x1b[0m   tokens"
+        out = str(chat._footer_fragments().value)
+        assert out.count("read_file") == 1
+
+    def test_the_footer_prepends_activity_when_the_status_differs(self, chat):
+        chat.set_activity("-> thinking")
+        chat._status = lambda: "idle"
+        out = str(chat._footer_fragments().value)
+        assert "thinking" in out and "idle" in out
+
+    def test_notifications_are_queued_and_do_not_change_geometry(self, chat):
+        chat.notify("ok", ok=True)
+        chat.notify("failed", ok=False)
+        before = chat.transcript_rows()
+        assert "ok" in str(chat._todo_fragments())
+        assert chat.transcript_rows() == before
+        chat._toast = ("ok", 0.0)
+        chat._toast_life = -1
+        assert "failed" in chat._toast_line()
+
+    def test_activity_is_a_fixed_bounded_row(self, chat):
+        chat.set_activity("-> testing " + "x" * 200)
+        assert chat.ACTIVITY_ROWS == 1
+        assert "\n" not in str(chat._activity_fragments().value)
+        before = chat.transcript_rows()
+        chat.set_activity("-> reading")
+        assert chat.transcript_rows() == before
+
     def test_the_transcript_gets_the_rows_the_furniture_does_not(self, chat):
         """Header, status row and composer are pinned; the conversation gets
         whatever is left."""
@@ -215,6 +260,28 @@ class TestTheLayout:
                 binding.handler(None)
         assert interrupted == [True]
         assert not chat.app.is_done
+
+    def test_pet_frame_uses_elapsed_time_not_render_count(self, monkeypatch):
+        from wynxo.tui import ChatUI
+
+        now = [100.0]
+        monkeypatch.setattr("wynxo.tui.time.monotonic", lambda: now[0])
+        chat = ChatUI(pet_state=lambda: "coding", pet_enabled=lambda: True,
+                      pet_animate=lambda: True)
+        first = chat._pet_lines()
+        now[0] += 0.5
+        second = chat._pet_lines()
+        assert first != second
+
+    def test_exit_cancels_pending_interaction_futures(self, chat):
+        async def go():
+            pending = asyncio.create_task(chat.ask("?", {"y": "yes"}))
+            await asyncio.sleep(0)
+            chat.exit()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+
+        asyncio.run(go())
 
     def test_rendering_drains_without_being_asked(self, chat):
         """Nothing rich writes may be stranded in the buffer waiting for a
