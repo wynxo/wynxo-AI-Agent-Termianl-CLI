@@ -36,7 +36,6 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import (Float, FloatContainer, HSplit,
                                    Layout, Window)
-from prompt_toolkit.layout.containers import VSplit
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
@@ -335,7 +334,7 @@ class ChatUI:
                 marker = ("✧", "⋆", "✦", "♡")[self.todo_frame % 4]
             else:
                 marker = "·"
-            label = stripped[3:].strip() if stripped.startswith(("[x]", "[>]") ) else stripped
+            label = stripped[3:].strip() if stripped.startswith(("[x]", "[>]")) else stripped
             body.append(f"{marker} {label}")
         return body
 
@@ -415,14 +414,18 @@ class ChatUI:
             composer,
             Window(content=FormattedTextControl(self._edge(False)), height=1),
         ])
-        header = VSplit([
-            Window(content=FormattedTextControl(self._header_fragments),
-                   dont_extend_width=True),
-            Window(content=FormattedTextControl(self._todo_fragments),
-                   width=Dimension(min=0, preferred=self.TODO_WIDTH, max=self.TODO_WIDTH),
-                   dont_extend_width=False,
-                   wrap_lines=True),
-        ])
+        header = FloatContainer(
+            content=Window(content=FormattedTextControl(self._header_fragments),
+                           height=1),
+            floats=[Float(
+                right=0,
+                top=0,
+                width=Dimension(min=0, preferred=self.TODO_WIDTH, max=self.TODO_WIDTH),
+                height=Dimension(min=0, max=self.TODO_MAX_ROWS),
+                content=Window(content=FormattedTextControl(self._todo_fragments),
+                               wrap_lines=True),
+            )],
+        )
         body = HSplit([
             header,
             Window(content=FormattedTextControl(self._rule_fragments),

@@ -278,6 +278,8 @@ class TerminalCallbacks(Callbacks):
         self._coder: CodeStreamer | None = None
         """The file currently being written, while a tool call streams."""
         self._thinking_buffer: list[str] = []
+        self._status_message = ""
+        self._status_lock = asyncio.Lock()
         """Every thought of the current turn, shown or not."""
         self._thinking_shown = 0
         """Characters already rendered in a closed thinking panel.
@@ -294,7 +296,14 @@ class TerminalCallbacks(Callbacks):
         # Announced before the panel opens, not after: the note is a line of
         # its own, and printing it once the backlog is streaming drops it
         # into the middle of a sentence.
-        self._note(f"thinking {'shown' if self.ui.show_thinking else 'hidden'}")
+        # The status bar already reflects this state; do not print a second
+        # transition line into the transcript. The legacy non-chat stream
+        # keeps one marker for compatibility; chat mode remains silent.
+        self._status_message = "Thinking..." if self.ui.show_thinking else ""
+        if self.bar is not None:
+            self.bar.update(detail=self._status_message)
+        elif self.chat is None:
+            self.ui.info("thinking shown" if self.ui.show_thinking else "thinking hidden")
         if self.ui.show_thinking:
             self._open_thinking()
         else:
@@ -341,14 +350,15 @@ class TerminalCallbacks(Callbacks):
 
     def toggle_verbose(self) -> None:
         self.verbose_tools = not self.verbose_tools
-        self._note(f"tool output {'full' if self.verbose_tools else 'summarised'}")
+        self._status_message = "Tool output: full" if self.verbose_tools else ""
+        if self.bar is not None:
+            self.bar.update(detail=self._status_message)
 
     def _note(self, message: str) -> None:
-        """Surface a toggle without disturbing whatever is streaming."""
+        """Update the transient status without adding transcript noise."""
+        self._status_message = message
         if self.bar is not None:
             self.bar.update(detail=message)
-        else:
-            self.ui.info(message)
 
     def _end_stream(self) -> None:
         """Close whichever transient block is open, so the next starts clean."""
@@ -360,28 +370,29 @@ class TerminalCallbacks(Callbacks):
             self._streaming = False
 
     async def on_thinking(self, text: str) -> None:
-        self._thinking_chars += len(text)
-        self.tokens += 1
-        # Kept whether or not it is being shown. Collapsed is a display
-        # state, not a decision to throw the reasoning away -- without this
-        # buffer, opening the panel part-way through could only ever show
-        # what came after the keypress, and the thought you wanted to read
-        # was the one that had already gone by.
-        self._thinking_buffer.append(text)
-        if self.bar is not None:
-            self.bar.update(activity="thinking", tokens=self.tokens,
-                            detail=self._thinking_note())
+        async with self._status_lock:
+            self._thinking_chars += len(text)
+            self.tokens += 1
+            # Kept whether or not it is being shown. Collapsed is a display
+            # state, not a decision to throw the reasoning away -- without this
+            # buffer, opening the panel part-way through could only ever show
+            # what came after the keypress, and the thought you wanted to read
+            # was the one that had already gone by.
+            self._thinking_buffer.append(text)
+            if self.bar is not None:
+                self.bar.update(activity="thinking", tokens=self.tokens,
+                                detail=self._thinking_note())
 
-        if not self.ui.show_thinking:
-            return
-        if self._streaming:
-            self._end_stream()
-        if self._thinker is None:
-            self.ui.console.print()
-            self.ui.console.print(Text("  thinking", style=f"bold {MUTED}"))
-            self._thinker = ThoughtStreamer(self.ui)
-        self._thinker.feed(text)
-        self._thinking_shown = len("".join(self._thinking_buffer))
+            if not self.ui.show_thinking:
+                return
+            if self._streaming:
+                self._end_stream()
+            if self._thinker is None:
+                self.ui.console.print()
+                self.ui.console.print(Text("  thinking", style=f"bold {MUTED}"))
+                self._thinker = ThoughtStreamer(self.ui)
+            self._thinker.feed(text)
+            self._thinking_shown = len("".join(self._thinking_buffer))
 
     def _end_thinking(self) -> None:
         if self._thinker is not None:
@@ -390,17 +401,18 @@ class TerminalCallbacks(Callbacks):
             self._thinking_chars = 0
 
     async def on_content(self, text: str) -> None:
-        # Ollama streams roughly one token per chunk, so counting chunks gives
-        # a live figure that tracks generation instead of a character estimate
-        # that lurches. The exact count arrives with the final chunk.
-        self.tokens += 1
-        if not self._streaming:
-            self._end_stream()
-            self.streamer = CodeStreamer(self.ui)
-            self._streaming = True
-        if self.bar is not None:
-            self.bar.update(activity="writing", detail="", tokens=self.tokens)
-        self.streamer.feed(text)
+        async with self._status_lock:
+            # Ollama streams roughly one token per chunk, so counting chunks gives
+            # a live figure that tracks generation instead of a character estimate
+            # that lurches. The exact count arrives with the final chunk.
+            self.tokens += 1
+            if not self._streaming:
+                self._end_stream()
+                self.streamer = CodeStreamer(self.ui)
+                self._streaming = True
+            if self.bar is not None:
+                self.bar.update(activity="writing", detail="", tokens=self.tokens)
+            self.streamer.feed(text)
 
     async def on_stage(self, name: str, detail: str = "") -> None:
         if self.journal is not None:
