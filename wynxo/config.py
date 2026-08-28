@@ -89,9 +89,9 @@ class Config(Schema):
                                   "and out of the session log. .env files and "
                                   "private keys are refused; keys found inside "
                                   "ordinary files are masked.", default=True)
-    theme = Field(str, "Colour palette: purple, sakura, midnight, ember or plain.",
-                  default="purple",
-                  choices=("purple", "sakura", "midnight", "ember", "plain"))
+    theme = Field(str, "Colour palette: purple, sakura, kawaii, midnight, ember or plain.",
+                   default="purple",
+                   choices=("purple", "sakura", "kawaii", "midnight", "ember", "plain"))
     clear_on_start = Field(bool, "Clear the terminal when wynxo opens.", default=True)
     logo = Field(str, "Which start-up logo to show, or 'off' for none.",
                  default="wyn")

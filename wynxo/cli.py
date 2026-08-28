@@ -138,6 +138,7 @@ def _theme_summary(name: str) -> str:
     return {
         "purple": "deep violet (default)",
         "sakura": "pink and violet, turned up",
+        "kawaii": "soft candy pink with sparkles",
         "midnight": "cool blue",
         "ember": "warm orange",
         "plain": "your terminal's own 16 colours",

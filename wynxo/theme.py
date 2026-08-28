@@ -93,6 +93,26 @@ SAKURA = Palette(
     code_theme="material",
 )
 
+# Soft candy pink with lavender highlights. Unlike sakura's saturated neon,
+# this keeps the low-contrast, cosy look of a handheld game UI while retaining
+# enough separation for errors and tool output to stay legible.
+KAWAII = Palette(
+    name="kawaii",
+    accent="#ff9fce",
+    accent_dim="#c77aa9",
+    text="#fff2fa",
+    muted="#d7b4cf",
+    faint="#936f8c",
+    good="#a8f0c0",
+    warn="#ffe18a",
+    bad="#ff7898",
+    bar_bg="#42233e",
+    bar_text="#fff2fa",
+    bar_dim="#e3bddd",
+    bar_accent="#ffc0e3",
+    code_theme="material",
+)
+
 EMBER = Palette(
     name="ember",
     accent="#ff9d5c",
@@ -130,7 +150,7 @@ PLAIN = Palette(
 )
 
 PALETTES: dict[str, Palette] = {
-    p.name: p for p in (PURPLE, SAKURA, MIDNIGHT, EMBER, PLAIN)
+    p.name: p for p in (PURPLE, SAKURA, KAWAII, MIDNIGHT, EMBER, PLAIN)
 }
 DEFAULT = "purple"
 

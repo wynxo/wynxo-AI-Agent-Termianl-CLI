@@ -24,6 +24,10 @@ class TestTheme:
         assert theme.resolve("").name == theme.DEFAULT
         assert theme.resolve(None).name == theme.DEFAULT
 
+    def test_kawaii_theme_is_available(self):
+        assert theme.resolve("kawaii").name == "kawaii"
+        assert "kawaii" in theme.names()
+
     def test_every_palette_defines_every_colour(self):
         reference = set(theme.PURPLE.as_dict())
         for name, palette in theme.PALETTES.items():

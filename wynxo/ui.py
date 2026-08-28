@@ -1318,6 +1318,9 @@ class ActivityBar:
             frames = self.SPINNER if self.ui.g.unicode else self.SPINNER_ASCII
             left.append(f" {frames[self._frame % len(frames)]} ",
                         style=f"bold {BAR_ACCENT}")
+        if self.ui.palette.name == "kawaii" and self.animate and self.ui.g.unicode:
+            sparkle = ("✦", "✧", "⋆", "·")[self._frame % 4]
+            left.append(sparkle + " ", style=f"bold {BAR_ACCENT}")
         left.append_text(self._activity_text())
         if self.queued:
             # What you are typing beats what the agent is doing: you need to
