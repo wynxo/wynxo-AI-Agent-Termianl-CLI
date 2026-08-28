@@ -6,24 +6,14 @@ import sys
 
 
 def main():
-    """Start the CLI with a platform-safe terminal mode.
+    """Start the CLI.
 
-    Windows terminals vary in their full-screen prompt-toolkit support. The
-    classic scrolling renderer is the safe default there; ``--chat`` opts into
-    the full-screen interface explicitly. Other platforms keep their normal
-    chat-layout behavior.
+    The chat layout -- composer pinned to the bottom, conversation flowing
+    above it -- is the product's default wherever the terminal can host it,
+    Windows included. ``--classic`` opts out to the scrolling prompt; that
+    decision belongs to cli.apply_flags with the rest of the run flags, so
+    bootstrap has no business overriding it for one platform.
     """
-    if sys.platform == "win32" and "--chat" not in sys.argv[1:]:
-        from . import tui
-
-        original = tui.usable
-        tui.usable = lambda: False
-        try:
-            from .cli import main as cli_main
-            return cli_main()
-        finally:
-            tui.usable = original
-
     from .cli import main as cli_main
     return cli_main()
 

@@ -337,6 +337,19 @@ class TestWhereItIsUsed:
         assert parser.parse_args(["--classic"]).classic is True
         assert parser.parse_args(["--chat"]).chat is True
 
+    def test_classic_and_chat_flags_flip_the_saved_layout(self):
+        """--classic and --chat decide the layout through apply_flags, so
+        the same flags work on every platform including Windows."""
+        from wynxo.cli import apply_flags, build_parser
+        from wynxo.config import Config
+
+        config = Config()
+        config.chat_layout = True
+        apply_flags(config, build_parser().parse_args(["--classic"]))
+        assert config.chat_layout is False
+        apply_flags(config, build_parser().parse_args(["--chat"]))
+        assert config.chat_layout is True
+
 
 class TestOnlyOneThingReadsTheKeyboard:
     """The bug: characters typed during a turn simply vanished.

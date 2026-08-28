@@ -119,7 +119,9 @@ async def _launch_entry(entry: AppEntry) -> None:
     directory arrive exactly as the installer wrote them -- the same thing a
     double-click does. This call returns once the launch has been handed to
     the OS; whether the application keeps running is the application's own
-    affair.
+    affair. The launch is detached from wynxo's console: a GUI application's
+    console children (VS Code's node processes are the loud example) must
+    not be able to print into the UI mid-session.
     """
     path = entry.path
     if sys.platform == "win32" and path.suffix.lower() == ".lnk":
@@ -153,8 +155,28 @@ async def _launch_desktop(path) -> None:
 
 
 def _startfile(path: str) -> None:
-    """os.startfile, kept as a module function so tests can stand in for it."""
-    os.startfile(path)      # noqa: S606 -- ShellExecute on an OS-discovered shortcut
+    """Launch a shortcut, detached from wynxo's console.
+
+    os.startfile hands the .lnk to ShellExecute -- exactly what a double-
+    click does -- but on Windows the launched process tree can inherit
+    wynxo's console and print into it, shredding the UI (VS Code's node
+    extension host writes deprecation noise to stderr on every start).
+    ``cmd /c start`` keeps the same ShellExecute semantics for the shortcut
+    while handing the child null handles and a process group of its own, so
+    nothing it prints can reach our screen. Kept as a module function so
+    tests can stand in for it.
+    """
+    if os.name == "nt":
+        creation = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen(
+            ["cmd", "/c", "start", "", path],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creation,
+        )
+        return
+    os.startfile(path)      # noqa: S606 -- non-Windows, never reached for a .lnk
 
 
 async def _shell_launch(argv: list[str]) -> None:
