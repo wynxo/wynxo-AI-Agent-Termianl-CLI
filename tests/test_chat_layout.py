@@ -129,7 +129,8 @@ class TestTheLayout:
         """Header, status row and composer are pinned; the conversation gets
         whatever is left."""
         width, rows = chat.size()
-        furniture = (chat.HEADER_ROWS + chat.COMPOSER_ROWS + chat.STATUS_ROWS)
+        furniture = (chat.HEADER_ROWS + chat.FOOTER_ROWS
+                     + chat.composer_frame_rows())
         assert chat.transcript_rows() == rows - furniture
 
     def test_the_header_stays_on_screen(self, chat_with_header):
@@ -192,10 +193,10 @@ class TestTheLayout:
             chat.transcript.console.print(f"line {i}")
         chat.flush()
         chat.scroll = 20
-        assert "scrolled back" in str(chat._status_fragments().value)
+        assert "scrolled back" in str(chat._footer_fragments().value)
 
     def test_the_status_row_is_plain_when_following(self, chat):
-        assert "scrolled back" not in str(chat._status_fragments().value)
+        assert "scrolled back" not in str(chat._footer_fragments().value)
 
     def test_ctrl_d_on_an_empty_composer_quits(self, chat):
         chat.buffer.text = ""
@@ -443,7 +444,7 @@ class TestAWindowTooSmallForTheLayout:
         from wynxo.tui import MIN_ROWS, ChatUI
 
         furniture = (ChatUI.HEADER_ROWS + ChatUI.COMPOSER_ROWS
-                     + ChatUI.STATUS_ROWS)
+                     + ChatUI.FOOTER_ROWS)
         assert MIN_ROWS - furniture >= 2
 
 
@@ -523,39 +524,29 @@ class TestThePinnedBlockGrowsForThePlan:
         assert "THE BAR" in rendered
         assert "plan top" not in rendered
 
-    def test_the_status_area_grows(self):
+    def test_status_is_always_one_row(self):
         chat = ChatUI(status=lambda: "a\nb\nc\nd")
-        chat._status_fragments()
-        assert chat.status_rows() == 4
+        assert chat._status_fragments().value.count("\n") == 0
+        assert chat.FOOTER_ROWS == 1
+        before = chat.transcript_rows()
+        chat._status = lambda: "x\ny\nz"
+        assert chat.transcript_rows() == before
 
-    def test_and_shrinks_again(self):
-        text = ["a\nb\nc"]
-        chat = ChatUI(status=lambda: text[0])
-        chat._status_fragments()
-        assert chat.status_rows() == 3
-        text[0] = "just the bar"
-        chat._status_fragments()
-        assert chat.status_rows() == 1
-
-    def test_it_never_eats_the_whole_screen(self):
+    def test_verbose_status_is_flattened_without_reflow(self):
         chat = ChatUI(status=lambda: "\n".join(["x"] * 400))
-        chat._status_fragments()
-        assert chat.status_rows() <= chat.MAX_STATUS_ROWS
         assert chat.transcript_rows() >= 1
+        assert "\n" not in chat._status_fragments().value
 
     def test_the_conversation_keeps_room_on_a_short_window(self):
         chat = ChatUI(status=lambda: "\n".join(["x"] * 40), width=80)
         chat.size = lambda: (80, 12)
-        chat._status_fragments()
-        assert chat.transcript_rows() >= 3
+        assert chat.transcript_rows() >= 1
 
-    def test_the_transcript_gives_up_the_rows(self):
+    def test_status_changes_do_not_change_transcript_rows(self):
         chat = ChatUI(status=lambda: "one line")
-        chat._status_fragments()
         tall = chat.transcript_rows()
         chat._status = lambda: "a\nb\nc\nd\ne"
-        chat._status_fragments()
-        assert chat.transcript_rows() == tall - 4
+        assert chat.transcript_rows() == tall
 
 
 class TestTheWindowChangingSize:

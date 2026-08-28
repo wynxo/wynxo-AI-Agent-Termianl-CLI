@@ -33,6 +33,7 @@ from prompt_toolkit.application.current import get_app
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import (Float, FloatContainer, HSplit,
                                    Layout, Window)
@@ -103,6 +104,8 @@ class Transcript:
         if len(self.lines) > MAX_SCROLLBACK:
             del self.lines[: len(self.lines) - MAX_SCROLLBACK]
         if self.on_change is not None:
+            # Notify after the cap so the callback sees the actual current
+            # content length, including any discarded oldest rows.
             self.on_change()
 
     def visible(self, height: int, offset: int = 0) -> list[str]:
@@ -151,6 +154,25 @@ _ANSWER_KEYS = string.ascii_letters + string.digits
 receive -- backspace, the arrows, Ctrl-C -- belongs to the composer."""
 
 
+class _HistoryAlreadyLoaded:
+    """The stand-in for a history-loading task that will never run.
+
+    Only what load_history_if_not_yet_loaded checks is implemented, and it
+    only ever reports 'done'."""
+
+    def done(self) -> bool:
+        return True
+
+    def result(self) -> None:
+        return None
+
+    def add_done_callback(self, _cb) -> None:
+        pass
+
+    def cancel(self) -> bool:
+        return False
+
+
 class ChatUI:
     """The full-screen layout: transcript, status strip, composer.
 
@@ -167,16 +189,30 @@ class ChatUI:
     HEADER_ROWS = 2        # the identity line, and a rule under it
     TODO_WIDTH = 38        # fixed top-right todo panel width on wide screens
     TODO_MAX_ROWS = 10
-    COMPOSER_ROWS = 3      # top border, the line you type on, bottom border
-    STATUS_ROWS = 1        # the floor: the activity bar on its own
-    MAX_STATUS_ROWS = 6
-    """The ceiling. The pinned block grows to fit a plan and the line being
-    written, but never so far that there is no conversation left to read."""
+    COMPOSER_ROWS = 3      # floor of the composer: top border, one input row, bottom border
+    COMPOSER_MAX_ROWS = 6  # the composer's ceiling; beyond this it scrolls inside
+    FOOTER_ROWS = 1        # the status strip is exactly one row, always
+    STATUS_ROWS = FOOTER_ROWS  # compatibility name; status is no longer variable-height
+
+    # The layout contract, in the units the allocator actually uses:
+    #
+    #   OUTPUT   flexible  -- the transcript is the only child that may grow
+    #   COMPOSER natural   -- its height is its content, capped at MAX
+    #   FOOTER   fixed     -- exactly one row, whatever is happening
+    #
+    # prompt_toolkit's HSplit hands spare rows to any child whose reported
+    # max exceeds its preferred size (containers.py _divide_heights cycles
+    # children by weight toward max after preferred is met). So every fixed
+    # row here reports an exact dimension -- min == preferred == max -- and
+    # the composer's max is capped at its content height by
+    # dont_extend_height. There is then no child left that can absorb spare
+    # rows except the transcript, which is where they belong.
 
     def __init__(self, status: Callable[[], str] | None = None,
                  completer=None, on_interrupt: Callable[[], None] | None = None,
                  on_thinking: Callable[[], None] | None = None,
                  on_tools: Callable[[], None] | None = None,
+                 on_dictate: Callable[[], None] | None = None,
                  unicode: bool = True, accent: str = "ansimagenta",
                  width: int | None = None,
                  header: Callable[[], str] | None = None):
@@ -186,6 +222,7 @@ class ChatUI:
         # lines keep the width they were written at.
         self.transcript = Transcript(width or _terminal_width())
         self.transcript.on_change = self._changed
+        self._scroll_content_length = 0
         self.submissions: asyncio.Queue[str] = asyncio.Queue()
         self.scroll = 0
         """Rows scrolled back from the bottom. Zero follows the newest."""
@@ -199,6 +236,10 @@ class ChatUI:
         # out of the composer while they were at it. Bound here instead.
         self._on_thinking = on_thinking
         self._on_tools = on_tools
+        # Ctrl-R: one speech-to-text round. The session itself lives in the
+        # CLI; the layout only needs to know whom to poke and to keep the
+        # composer focused while it runs.
+        self._on_dictate = on_dictate
         self._unicode = unicode
         self._accent = accent
         self._closed = False
@@ -211,7 +252,6 @@ class ChatUI:
         """Told the new width when the window changes, so whatever wraps
         text for this pane can be told too."""
         self._last_width = 0
-        self._status_lines = 1
         self.todo_rendered = ""
         self.todo_frame = 0
         self._todo_last_tick = 0.0
@@ -221,15 +261,35 @@ class ChatUI:
         self.default = ""
         """The answer a bare enter takes, where the question names one."""
 
-        # Keep the composer single-line semantically, but render it as a
-        # wrapped viewport. prompt_toolkit then scrolls horizontally/vertically
-        # to the cursor instead of letting long input vanish behind the edge.
+        # Keep the composer single-line semantically (Enter submits; a
+        # newline needs Alt-Enter), but render it as a wrapped viewport.
+        # prompt_toolkit then scrolls horizontally/vertically to the cursor
+        # instead of letting long input vanish behind the edge. History is
+        # kept per session so Up/Down walk what you already sent.
         self.buffer = Buffer(multiline=False, completer=completer,
-                             complete_while_typing=True,
+                             complete_while_typing=False,
+                             history=InMemoryHistory(),
                              accept_handler=self._accept)
+        # prompt_toolkit loads history through a background task that needs
+        # the running application's event loop. InMemoryHistory has nothing
+        # to load, and this layout is regularly built before any loop exists
+        # (tests, previews, measuring the layout) -- so mark it loaded and
+        # keep create_content loop-free. Accepted lines still append to the
+        # history through the buffer's own accept path.
+        self.buffer._load_history_task = _HistoryAlreadyLoaded()
         self.app = self._build()
 
     # -- geometry ----------------------------------------------------------
+
+    def _raw_size(self) -> tuple[int, int]:
+        """Read terminal dimensions without announcing a resize callback."""
+        if self.app.is_running:
+            try:
+                size = self.app.output.get_size()
+                return max(MIN_WIDTH, size.columns), max(4, size.rows)
+            except Exception:
+                pass
+        return max(MIN_WIDTH, _terminal_width()), max(4, _terminal_height())
 
     def size(self) -> tuple[int, int]:
         """The screen, in columns and rows.
@@ -265,23 +325,54 @@ class ChatUI:
                 self.on_resize(width)
         return width, rows
 
-    def status_rows(self) -> int:
-        """How many rows the pinned block needs, as of the last repaint.
+    def composer_content_rows(self, width: int | None = None) -> int:
+        """How many rows the input actually needs, right now.
 
-        The previous frame's height rather than this one's: prompt_toolkit
-        settles the layout before it asks for content, and re-rendering the
-        bar here to measure it would advance its spinner twice per frame.
-        One frame of lag at ten frames a second is not visible.
+        Measured from the BufferControl itself, with the same width,
+        wrapping and line-prefix the real render will use -- so what the
+        composer is allocated is exactly what its content needs, never a
+        constant guessed at and never a row of blank space inside the box.
+        Capped at COMPOSER_MAX_ROWS; past that the BufferControl scrolls
+        internally and keeps the caret in view.
+        """
+        if width is None:
+            width, _ = self.size()
+        try:
+            rows = self._composer_control.preferred_height(
+                max(MIN_WIDTH, width), self.COMPOSER_MAX_ROWS,
+                True, self._composer_line_prefix)
+        except Exception:
+            rows = 1
+        return max(1, min(self.COMPOSER_MAX_ROWS, rows or 1))
+
+    def composer_frame_rows(self) -> int:
+        """The composer block's natural height: content plus its borders.
+
+        In a very short terminal the furniture must still fit. The input
+        control is capped to the rows left after the header, footer and one
+        readable output row; prompt_toolkit's small-window fallback is worse
+        than showing fewer composer lines.
         """
         _, rows = self.size()
-        room = max(1, rows - self.HEADER_ROWS - self.COMPOSER_ROWS - 3)
-        return max(self.STATUS_ROWS,
-                   min(self._status_lines, self.MAX_STATUS_ROWS, room))
+        available = max(1, rows - self.HEADER_ROWS - self.FOOTER_ROWS - 1 - 2)
+        return min(self.composer_content_rows(), available) + 2
+
+    def _composer_line_prefix(self, *_):
+        return [("class:prompt", self._composer_prefix())]
+
+    def status_rows(self) -> int:
+        """Compatibility accessor for the former variable-height status.
+
+        The footer is intentionally fixed now, so this always returns one.
+        """
+        return self.FOOTER_ROWS
 
     def transcript_rows(self) -> int:
+        """Rows left for the conversation: everything the fixed furniture
+        and the composer's current natural height do not take."""
         _, rows = self.size()
-        return max(1, rows - self.HEADER_ROWS - self.COMPOSER_ROWS
-                   - self.status_rows())
+        return max(1, rows - self.HEADER_ROWS - self.FOOTER_ROWS
+                   - self.composer_frame_rows())
 
     # -- rendering ---------------------------------------------------------
 
@@ -290,7 +381,8 @@ class ChatUI:
         # every repaint goes through this, so anything rich has written is
         # on screen by definition and no write can be left stranded in the
         # buffer waiting for the next call that happens to flush.
-        self.transcript.drain()
+        self._drain_transcript()
+
         width, _ = self.size()
         self.transcript.resize(width)
         rows = self.transcript_rows()
@@ -359,19 +451,27 @@ class ChatUI:
         return [("class:edge", bar * max(0, width))]
 
     def _status_fragments(self):
-        text = self._status()
+        """Compatibility alias for integrations that rendered the old status.
+
+        It intentionally returns the new fixed-height footer content; the old
+        multi-row status contract is gone so status changes cannot reflow the
+        composer.
+        """
+        return self._footer_fragments()
+
+    def _footer_fragments(self):
+        """The one status row, under the composer.
+
+        Fixed height by construction: whatever arrives here is flattened to
+        a single line, so no state change -- a stage, a tool result, thinking
+        toggling, the plan growing -- can ever move the composer or resize
+        the conversation above it. A longer history of what happened lives
+        in the transcript and in /log, not in this row.
+        """
+        text = " ".join(self._status().splitlines()).strip()
         if self.scroll > 0:
-            marker = "  ^ scrolled back -- End to follow again"
-            text = f"{text}\n{marker}" if text else marker.strip()
-        # Keep the status content bounded before prompt_toolkit lays out the
-        # screen. Otherwise a verbose status/plan can consume the entire
-        # viewport and leave the composer no room to render.
-        _, rows = self.size()
-        room = max(1, rows - self.HEADER_ROWS - self.COMPOSER_ROWS - 1)
-        status_lines = text.splitlines() if text else [""]
-        status_lines = status_lines[-min(self.MAX_STATUS_ROWS, room):]
-        text = "\n".join(status_lines)
-        self._status_lines = len(status_lines)
+            marker = "^ scrolled back -- End to follow again"
+            text = f"{text}   {marker}" if text else marker
         return ANSI(text)
 
     def _edge(self, top: bool):
@@ -391,44 +491,48 @@ class ChatUI:
             wrap_lines=False,      # rich already wrapped to the exact width
             dont_extend_height=False,
         )
-        status = Window(
-            content=FormattedTextControl(self._status_fragments,
+        footer = Window(
+            content=FormattedTextControl(self._footer_fragments,
                                          focusable=False),
-            height=lambda: self.status_rows(),
+            height=1,               # exact: min == preferred == max == 1
+            dont_extend_height=True,
         )
-        composer_control = BufferControl(buffer=self.buffer,
-                                          input_processors=[])
+        composer_control = self._composer_control = BufferControl(
+            buffer=self.buffer, input_processors=[])
         composer = Window(
-            content=composer_control,
-            # BufferControl's natural height is one row for ordinary input;
-            # allow it to grow only to the three-row viewport needed for a
-            # genuinely multiline/long buffer. The fixed frame, not this
-            # window, owns the footer height and the transcript owns all
-            # remaining flexible space.
-            height=Dimension(min=1, preferred=1, max=3),
+            content=self._composer_control,
+            # No explicit preferred: with preferred left unset the Window
+            # derives it from the BufferControl's real wrapped content, and
+            # dont_extend_height caps max at that same figure. The composer
+            # therefore grows exactly as the input needs -- one row empty,
+            # more for wrapped or multi-line input -- and the allocator has
+            # no slack row it could ever hand this window. Past
+            # COMPOSER_MAX_ROWS the control scrolls internally and keeps the
+            # caret visible.
+            height=Dimension(min=1, max=self.COMPOSER_MAX_ROWS),
             wrap_lines=True,
             dont_extend_height=True,
-            get_line_prefix=lambda *_: [("class:prompt", self._composer_prefix())],
+            get_line_prefix=self._composer_line_prefix,
         )
-        # The composer is a fixed bottom block. A one-line Window lets long
-        # input disappear past the right edge; a three-line block with a
-        # scrolling BufferControl keeps the caret and the newest text visible
-        # while leaving the bottom border immovable.
+        # Natural height, not a fixed one: the frame is exactly its content
+        # (borders plus whatever the input needs this frame), so it can
+        # neither collapse the input into one row nor swell into the blank
+        # box that a max > preferred dimension invites the allocator to fill.
         composer_frame = HSplit([
             Window(content=FormattedTextControl(self._edge(True)), height=1,
                    dont_extend_height=True),
             composer,
             Window(content=FormattedTextControl(self._edge(False)), height=1,
                    dont_extend_height=True),
-        ], height=Dimension(min=3, preferred=3, max=5))
+        ], height=lambda: Dimension.exact(self.composer_frame_rows()))
         header = FloatContainer(
             content=Window(content=FormattedTextControl(self._header_fragments),
                            height=1),
             floats=[Float(
                 right=0,
                 top=0,
-                width=Dimension(min=0, preferred=self.TODO_WIDTH, max=self.TODO_WIDTH),
-                height=Dimension(min=0, max=self.TODO_MAX_ROWS),
+                width=self.TODO_WIDTH,
+                height=self.TODO_MAX_ROWS,
                 content=Window(content=FormattedTextControl(self._todo_fragments),
                                wrap_lines=True),
             )],
@@ -437,18 +541,22 @@ class ChatUI:
             header,
             Window(content=FormattedTextControl(self._rule_fragments),
                    height=1, dont_extend_height=True),
-            # This is the only flexible child. The composer and status have
-            # explicit fixed heights, so new transcript lines cannot steal or
-            # donate rows to the input frame.
+            # The only flexible child: every spare row the screen has ends
+            # up here, because no other child reports a max above its
+            # preferred size. Streaming, thinking, tool activity and status
+            # changes all render inside fixed or content-driven rows and
+            # cannot move anything.
             transcript,
-            status,
             composer_frame,
+            footer,
         ], height=Dimension(min=0, preferred=0, weight=1))
 
         # The completer had nowhere to draw. A Buffer with a completer set
         # will happily compute suggestions and show none of them unless the
         # layout contains a menu to float over it -- which is why /mo… stopped
         # offering /model the moment the composer moved into this layout.
+        # CompletionsMenu is a float: it draws over the transcript and
+        # reserves nothing.
         layout = Layout(
             FloatContainer(
                 content=body,
@@ -619,7 +727,65 @@ class ChatUI:
         def _(event):
             self.scroll = 0
 
+        # Alt-Enter puts a newline in the composer instead of submitting.
+        # prompt_toolkit represents Alt-Enter as escape followed by Enter in
+        # the terminal stream; binding the sequence directly keeps ordinary
+        # Escape available for cancelling completion/pickers.
+        @keys.add("escape", "enter")
+        def _(event):
+            self.buffer.insert_text("\n")
+
+        # Ctrl-R: one speech-to-text round. The transcript lands in the
+        # composer to be reviewed and sent by hand.
+        @keys.add("c-r")
+        def _(event):
+            if self._on_dictate is not None:
+                self._on_dictate()
+
         return keys
+
+    # -- focus -------------------------------------------------------------
+
+    def refocus(self) -> None:
+        """Put the caret back in the composer.
+
+        Nothing in this layout is meant to hold focus for long: a turn
+        ending, a tool finishing, a question being answered or a speech
+        transcription landing should all leave the user typing, not hunting
+        for the input with a mouse. Idempotent when already focused.
+        """
+        if self._closed:
+            return
+        try:
+            for window in self.app.layout.find_all_windows():
+                if window.content.__class__ is BufferControl:
+                    self.app.layout.focus(window)
+                    return
+        except Exception:
+            return
+
+    # -- layout diagnostics --------------------------------------------------
+
+    def layout_report(self) -> str:
+        """Where the vertical space is going, one row per component.
+
+        Developer-only, but cheap enough to keep: the composer bugs of the
+        past all came from guessing which widget held which rows, and this
+        is the answer measured from the real layout objects at the real
+        size, not from the constants.
+        """
+        width, rows = self.size()
+        frame = self.composer_frame_rows()
+        content = self.composer_content_rows(width)
+        output = self.transcript_rows()
+        return "\n".join([
+            f"root      {rows}x{width}",
+            f"header    {self.HEADER_ROWS} (identity + rule)",
+            f"output    {output}",
+            f"composer  {frame} (content {content} + 2 borders, cap {self.COMPOSER_MAX_ROWS})",
+            f"footer    {self.FOOTER_ROWS}",
+            f"check     {self.HEADER_ROWS + output + frame + self.FOOTER_ROWS} <= {rows}",
+        ])
 
     # -- choosing, with arrows, without a second application ---------------
 
@@ -772,15 +938,25 @@ class ChatUI:
 
     # -- the api the repl uses ---------------------------------------------
 
+    def _drain_transcript(self) -> None:
+        """Drain rich output while preserving the user's scroll anchor."""
+        previous = len(self.transcript.lines)
+        self.transcript.drain()
+        current = len(self.transcript.lines)
+        if self.scroll > 0 and current > previous:
+            self.scroll += current - previous
+        self._scroll_content_length = current
+
     def _changed(self) -> None:
-        if self.scroll == 0:
-            return            # already following the bottom
-        # Something new arrived while scrolled back. Hold position rather
-        # than yanking the view down mid-read.
+        # Transcript.drain invokes this after appending. The actual anchor
+        # adjustment is performed by _drain_transcript, where the old length
+        # is still available; this callback remains for external clear/change
+        # notifications and repaint hooks.
+        self._scroll_content_length = len(self.transcript.lines)
 
     def flush(self) -> None:
         """Publish anything rich has drawn, and repaint."""
-        self.transcript.drain()
+        self._drain_transcript()
         self.invalidate()
 
     def invalidate(self) -> None:
@@ -879,7 +1055,8 @@ def _terminal_height(default: int = 24) -> int:
         return default
 
 
-MIN_ROWS = ChatUI.HEADER_ROWS + ChatUI.COMPOSER_ROWS + ChatUI.STATUS_ROWS + 2
+MIN_ROWS = (ChatUI.HEADER_ROWS + ChatUI.COMPOSER_ROWS
+            + ChatUI.FOOTER_ROWS + 2)
 """The furniture, plus two rows of conversation worth reading. Below this
 prompt_toolkit gives up and draws "Window too small..." instead of the
 layout, which is not something to leave a user staring at."""

@@ -25,6 +25,8 @@ from . import __version__
 from . import config as config_module
 from . import fullscreen
 from . import logo
+from . import stt
+from . import stt_devices
 from . import tui
 from .agent import Agent, Callbacks, Interrupted
 from .events import ToolEvent
@@ -203,6 +205,7 @@ COMMANDS = {
     "/sessions": "list recent sessions",
     "/init": "write a WYNXO.md describing this project",
     "/map": "the project layout the model is given, or rebuild it",
+    "/layout": "where the vertical space is going (layout diagnostics)",
     "/quit": "exit",
 }
 
@@ -779,6 +782,9 @@ class Repl:
         # tests and in an embedded Repl that nobody wrapped.
         self.screen = fullscreen.Screen(enabled=False)
         self.chat = None
+        self._dictation_state = ""
+        """The footer's speech line while a dictation runs."""
+        self._dictation_task: asyncio.Task | None = None
 
     def use_chat_layout(self) -> "tui.ChatUI":
         """Switch rendering into the chat layout.
@@ -794,9 +800,13 @@ class Repl:
             on_interrupt=self.interrupt,
             on_thinking=self.callbacks.toggle_thinking,
             on_tools=self.callbacks.toggle_verbose,
+            on_dictate=self.start_dictation,
             unicode=self.ui.g.unicode,
         )
         self.chat = chat
+        self._dictation_state = ""
+        """What the footer says while speech is being captured or read."""
+        self._dictation_task: asyncio.Task | None = None
         self.ui.console = chat.transcript.console
         # rich wraps to ui.width, and the pane truncates rather than wraps,
         # so the two have to agree -- including after the window is resized.
@@ -828,12 +838,21 @@ class Repl:
         return tui.render_to_ansi(Text.from_markup(line), width)
 
     def _chat_status(self) -> str:
-        """The pinned row: the activity bar while a turn runs, else status."""
+        """The one footer row: activity while a turn runs, else status.
+
+        Exactly one line, always. Everything the bar knows how to draw --
+        the plan, the tool history -- has a bounded home elsewhere (the plan
+        in the top-right float, history in the transcript and /log); letting
+        it into this row would change its height and resize the
+        conversation on every event, which is the reflow this layout exists
+        to prevent.
+        """
         width, _ = self.chat.size() if self.chat else (self.ui.width, 0)
+        if self._dictation_state:
+            return f"  {self._dictation_state}"
         bar = self.ui.bar
         if bar is not None:
-            rows = self.chat.MAX_STATUS_ROWS if self.chat else 1
-            if rendered := tui.render_to_ansi(bar, width, max_rows=rows):
+            if rendered := tui.render_to_ansi(bar, width, max_rows=1):
                 return rendered
         return "  " + self._status_line()
 
@@ -1163,6 +1182,11 @@ class Repl:
             self.ui.bar = None
             self.callbacks.watcher = None
             self._task = None
+            # Whatever happened -- answer, tool, error, cancellation -- the
+            # composer gets the caret back. Typing must work immediately.
+            if self.chat is not None:
+                self.chat.refocus()
+                self.chat.invalidate()
 
         if result.errors:
             self.pet.react(Mood.SAD)
@@ -1316,7 +1340,11 @@ class Repl:
             if self.talker.last_error:
                 self.ui.warn(f"talker: {self.talker.last_error}")
         if result.content and not result.errors:
-            self.speaker.say(result.content)
+            # Off the event loop. speakable() runs a stack of regexes over
+            # the whole answer -- seconds on a long one -- and say() also
+            # starts the synthesiser process; doing either here froze the
+            # chat UI for exactly as long.
+            await self.speaker.say_async(result.content)
 
     async def _talk(self, line: str) -> None:
         """Show one line from the talker, and say it out loud."""
@@ -1326,7 +1354,7 @@ class Repl:
         self.ui.console.print(
             Text("  " + self.pet.face(advance=False) + "  ",
                  style=f"bold {self.pet.style()}") + Text(line, style=ACCENT))
-        self.speaker.say(line)
+        await self.speaker.say_async(line)
 
     def _prompt_message(self) -> HTML:
         """The left edge of the input box.
@@ -1477,6 +1505,75 @@ class Repl:
         if self._task and not self._task.done():
             self._task.cancel()
 
+    # -- speech to text ------------------------------------------------------
+
+    def start_dictation(self) -> None:
+        """Ctrl-R: one microphone -> transcription -> composer round.
+
+        The transcript is put in the composer for review, never submitted --
+        what the microphone heard is a draft, and sending it is the user's
+        decision. Safe to press while a dictation is already running: the
+        second press cancels the first.
+        """
+        if self.chat is None:
+            self.ui.error("speech input needs the chat layout")
+            return
+        if self._dictation_task is not None and not self._dictation_task.done():
+            self._dictation_task.cancel()
+            return
+        self._dictation_task = asyncio.ensure_future(self._dictate())
+
+    async def _dictate(self) -> None:
+        session, hint = stt_devices.create_session(
+            stt_devices.SpeechConfig(
+                language=self.config.stt_language,
+                device=self.config.stt_device or None,
+                silence_timeout=self.config.stt_silence_timeout,
+                max_duration=self.config.stt_max_duration,
+                transcription_timeout=self.config.stt_transcription_timeout,
+            ),
+            on_state=self._on_speech_state,
+        )
+        if session is None:
+            self.ui.error(hint)
+            return
+        try:
+            text = await session.start()
+        except asyncio.CancelledError:
+            # The cancellation already ran through the session's own task
+            # (start() cancels with it), so the state is CANCELLED; only the
+            # footer needs putting back. Re-raise to end this task cleanly.
+            self._dictation_state = ""
+            self.chat.invalidate()
+            raise
+        except Exception as exc:
+            self.ui.error(f"speech input failed: {exc}")
+            return
+        finally:
+            self._dictation_state = ""
+        if session.state is stt_devices.SpeechState.CANCELLED:
+            self.chat.invalidate()
+            return
+        if text:
+            # Into the composer, for review. Cursor to the end of what was
+            # heard, ready for edits or a plain enter.
+            self.chat.buffer.insert_text(text)
+        elif session.state is stt_devices.SpeechState.ERROR:
+            self.ui.error("speech input failed; nothing was heard")
+        self.chat.refocus()
+        self.chat.invalidate()
+
+    def _on_speech_state(self, snapshot) -> None:
+        """The footer mirrors the speech state machine, one row, no reflow."""
+        mic = "🎙" if self.ui.g.unicode else "o"
+        labels = {
+            "listening": f"{mic} Listening...",
+            "transcribing": f"{self.ui.g.gear} Transcribing...",
+        }
+        self._dictation_state = labels.get(snapshot.state.value, "")
+        if self.chat is not None:
+            self.chat.invalidate()
+
     # -- slash commands ----------------------------------------------------
 
     async def command(self, text: str) -> bool:
@@ -1507,6 +1604,7 @@ class Repl:
                 ["key", "does"],
                 [("Ctrl-O", "show or hide the model's thinking (works mid-answer)"),
                  ("Ctrl-T", "full tool output vs. one-line summary (mid-answer)"),
+                 ("Ctrl-R", "speak a message: record, transcribe, review in the composer"),
                  ("Ctrl-E", "step effort up"),
                  ("Ctrl-B", "step effort down"),
                  ("Ctrl-C", "interrupt the current turn, keep the conversation"),
@@ -1537,6 +1635,13 @@ class Repl:
 
         if name == "/apps":
             return self.cmd_apps(args)
+
+        if name == "/layout":
+            if self.chat is None:
+                self.ui.info("the chat layout is not active; nothing to measure")
+                return True
+            self.ui.console.print(Text(self.chat.layout_report(), style=MUTED))
+            return True
 
         if name == "/thinking":
             return await self.cmd_thinking(args)
