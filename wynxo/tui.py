@@ -253,6 +253,9 @@ class ChatUI:
         self.transcript.on_change = self._changed
         self._scroll_content_length = 0
         self.submissions: asyncio.Queue[str] = asyncio.Queue()
+        self._active = False
+        """True while a turn or command is in flight; keeps the repaint
+        pump running so streamed output actually appears."""
         self.scroll = 0
         """Rows scrolled back from the bottom. Zero follows the newest."""
         self._unread = 0
@@ -1279,17 +1282,59 @@ class ChatUI:
     async def next_message(self) -> str:
         return await self.submissions.get()
 
-    async def repaint_loop(self, interval: float = 0.1) -> None:
-        """Keep the screen live while a turn streams.
+    def begin_turn(self) -> None:
+        """Mark that work is in flight, so the repaint loop keeps pumping.
 
         Streaming writes land in the buffer between keystrokes, and without
-        this the pane would only repaint when the user happened to press
-        something -- so an answer would arrive in silent jumps.
+        a periodic repaint the pane only redraws when the user presses
+        something -- so an answer would arrive in silent jumps. State
+        changes invalidate on their own; this flag is what keeps the pump
+        running for the whole turn (and for a slow command's spinner).
+        """
+        self._active = True
+        self.invalidate()
+
+    def end_turn(self) -> None:
+        """Idle again: the repaint pump stops unless the pet is animating
+        or a toast is still alive. Nothing is left mid-frame."""
+        self._active = False
+        self.invalidate()
+
+    def _wants_repaint(self) -> bool:
+        """Whether anything on screen changes with time right now.
+
+        The idle screen is static -- transcript, composer, footer, even the
+        plan panel -- so repainting it ten times a second is pure waste. The
+        pump only runs while a turn is active, a toast is still fading, the
+        activity strip is fresh, or the pet is animating.
+        """
+        if self._active:
+            return True
+        if self._toast is not None:
+            return True
+        if self.activity and time.monotonic() - self.activity_started < 5.0:
+            return True
+        try:
+            if (self._pet_animate is not None and self._pet_animate()
+                    and self._pet_enabled is not None and self._pet_enabled()):
+                return True
+        except Exception:
+            return False
+        return False
+
+    async def repaint_loop(self, interval: float = 0.1) -> None:
+        """Keep the screen live while anything is moving.
+
+        The loop itself stays cheap when idle: it wakes, finds nothing to
+        animate and skips the repaint, so a sitting session does not burn
+        CPU on full-screen redraws. State changes (new output, a toast, a
+        tool event, a resize) invalidate directly.
         """
         try:
             while not self._closed:
                 await asyncio.sleep(interval)
-                self.invalidate()
+                if self._wants_repaint():
+                    self.invalidate()
         except asyncio.CancelledError:
             pass
 
@@ -1404,6 +1449,19 @@ def usable() -> bool:
     if term in ("dumb", "unknown"):
         return False
     if _terminal_height() < MIN_ROWS:
+        return False
+    # The screen itself must be real. In a mintty-like terminal -- TERM is
+    # set, there is a pty on both ends, but no Windows console handle --
+    # prompt_toolkit raises NoConsoleScreenBufferError here, and the chat
+    # layout's fallback would be an invisible DummyOutput. If we cannot
+    # build a real output object, this terminal cannot host the chat.
+    try:
+        from prompt_toolkit.output.defaults import create_output
+
+        out = create_output()
+    except Exception:
+        return False
+    if type(out).__name__ in ("DummyOutput", "PlainTextOutput"):
         return False
     if not term:
         return sys.platform == "win32"

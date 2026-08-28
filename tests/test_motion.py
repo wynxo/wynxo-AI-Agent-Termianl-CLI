@@ -49,6 +49,32 @@ class TestSceneSelection:
         scene = motion.scene_for("thinking")
         assert motion.select(scene, width=120) == scene.frames
 
+    def test_every_frame_of_a_scene_has_a_consistent_shape(self):
+        """A multi-frame scene must not jitter: each frame's lines line up
+        in column count, and the frames agree on how many rows they take.
+        A frame that shifts the box one column over reads as a rendering
+        bug, not as animation -- the coding scene used to do exactly that
+        between "pet on top" and "pet inside the terminal".
+        """
+        from wcwidth import wcswidth
+
+        for scene in motion.SCENES.values():
+            if len(scene.frames) < 2:
+                continue
+            row_counts = {len(frame.split("\n")) for frame in scene.frames}
+            assert len(row_counts) == 1, f"{scene.name} frames differ in height"
+            # Row 0 may legitimately differ (a pet perched on top of the
+            # box versus inside it); the rows below it are the geometry that
+            # must not drift. The first frame's rows anchor the width and
+            # later frames must never exceed them -- a box that shifts one
+            # column over between frames is a rendering bug.
+            first = [wcswidth(line) for line in scene.frames[0].split("\n")]
+            for frame in scene.frames[1:]:
+                widths = [wcswidth(line) for line in frame.split("\n")]
+                for want, got in zip(first[1:], widths[1:]):
+                    assert got <= want, \
+                        f"{scene.name} frame row wider than the first: {got} > {want}"
+
 
 class TestPreview:
     def test_preview_is_deterministic(self):

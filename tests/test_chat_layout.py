@@ -569,9 +569,20 @@ class TestAWindowTooSmallForTheLayout:
             def isatty(self):
                 return tty
 
+        class _RealOutput:
+            """A stand-in for a console that can actually be drawn on."""
+
         # usable() imports sys itself, so the real module is what to patch.
         monkeypatch.setattr("sys.stdin", _TTY())
         monkeypatch.setattr("sys.stdout", _TTY())
+        # This runner has TERM set but no console, so the real
+        # create_output raises NoConsoleScreenBufferError -- the mintty case
+        # usable() now guards against. These tests simulate a terminal that
+        # really can host the layout, so patch in a working screen.
+        monkeypatch.setattr(
+            "prompt_toolkit.output.defaults.create_output",
+            lambda: _RealOutput(),
+        )
         return tui.usable()
 
     def test_a_short_window_takes_the_scrolling_prompt(self, monkeypatch):
@@ -590,6 +601,34 @@ class TestAWindowTooSmallForTheLayout:
         furniture = (ChatUI.HEADER_ROWS + ChatUI.COMPOSER_ROWS
                      + ChatUI.FOOTER_ROWS)
         assert MIN_ROWS - furniture >= 2
+
+    def test_a_pty_without_a_console_takes_the_scrolling_prompt(self,
+                                                                monkeypatch):
+        """The mintty case: TERM is set, both ends are ttys, the window is
+        tall enough -- but there is no Windows console to draw on. The chat
+        layout would fall back to an invisible DummyOutput, so usable()
+        must say no and leave the session to the scrolling prompt."""
+        from wynxo import tui
+        from wynxo.tui import MIN_ROWS
+
+        monkeypatch.setattr(tui, "_terminal_height",
+                            lambda default=24: MIN_ROWS)
+        monkeypatch.setenv("TERM", "xterm-256color")
+
+        class _TTY:
+            def isatty(self):
+                return True
+
+        class _NoConsole(Exception):
+            pass
+
+        monkeypatch.setattr("sys.stdin", _TTY())
+        monkeypatch.setattr("sys.stdout", _TTY())
+        monkeypatch.setattr(
+            "prompt_toolkit.output.defaults.create_output",
+            lambda: (_ for _ in ()).throw(_NoConsole()),
+        )
+        assert tui.usable() is False
 
 
 class TestTheCompletionMenuOnAShortWindow:
@@ -618,12 +657,14 @@ class TestTheCompletionMenuOnAShortWindow:
             assert self._rows(monkeypatch, rows) < rows
 
     def test_the_prompt_actually_uses_it(self):
-        """A constant here is the bug; the point is that it varies."""
+        """A constant here is the bug; the point is that it varies. The
+        classic prompt is built lazily now, so the knob lives in the
+        factory that builds it."""
         import inspect
 
         from wynxo.cli import Repl
 
-        source = inspect.getsource(Repl.__init__)
+        source = inspect.getsource(Repl._make_prompt_session)
         assert "reserve_space_for_menu=_menu_rows()" in source
 
 
@@ -912,15 +953,19 @@ class TestToolCardsLiveInTheConversation:
                                               "312 lines", "312", None))
         chat.transcript.drain()
         body = _plain(chat.transcript.lines)
-        assert "✓ read_file" in body
-        assert "312 lines" in body
+        # The start line named the tool; the result line carries only the
+        # outcome, so the pair reads ``→ read_file x.py`` / ``✓ 312 lines``.
+        assert "✓ 312 lines" in body
+        assert "read_file" not in body
 
     def test_a_failed_tool_result_prints_a_cross(self):
         cb, chat = self._callbacks()
         asyncio.run(cb._on_tool_result_locked("run_tests", False,
                                               "1 failed", "traceback", None))
         chat.transcript.drain()
-        assert "✗ run_tests" in _plain(chat.transcript.lines)
+        body = _plain(chat.transcript.lines)
+        assert "✗ 1 failed" in body
+        assert "run_tests" not in body
 
     def test_todo_writes_do_not_spam_the_conversation(self):
         cb, chat = self._callbacks()
@@ -1607,3 +1652,86 @@ class TestThePickerIsAlive:
         first = chat._picker_lines(40)[1]
         monkeypatch.setattr(_time, "monotonic", lambda: 5.0)
         assert chat._picker_lines(40)[1] != first
+
+
+class TestRepaintPumpOnlyRunsWhenSomethingMoves:
+    """The repaint loop used to invalidate the whole screen ten times a
+    second no matter what. A sitting session is static -- transcript,
+    composer, footer, plan panel -- so the pump now skips repaints unless a
+    turn is active, a toast is fading, the activity strip is fresh, or the
+    pet is animating. Streaming still flows: the CLI marks turns active.
+    """
+
+    def _chat(self, pet_animate=True, pet_enabled=True):
+        return ChatUI(
+            status=lambda: "",
+            pet_state=lambda: "idle",
+            pet_enabled=lambda: pet_enabled,
+            pet_animate=lambda: pet_animate,
+        )
+
+    def test_idle_static_screen_does_not_repaint(self):
+        chat = self._chat(pet_animate=False)
+        assert chat._wants_repaint() is False
+
+    def test_an_active_turn_keeps_the_pump_running(self):
+        chat = self._chat(pet_animate=False)
+        assert chat._wants_repaint() is False
+        chat.begin_turn()
+        assert chat._wants_repaint() is True
+        chat.end_turn()
+        assert chat._wants_repaint() is False
+
+    def test_the_pet_animation_keeps_the_pump_running(self):
+        chat = self._chat(pet_animate=True)
+        assert chat._wants_repaint() is True
+
+    def test_a_live_toast_keeps_the_pump_running(self):
+        chat = self._chat(pet_animate=False)
+        chat.notify("✓ saved")
+        assert chat._wants_repaint() is True
+
+    def test_a_stale_activity_strip_goes_quiet(self):
+        import time
+
+        chat = self._chat(pet_animate=False)
+        chat.set_activity("→ read_file x.py")
+        chat.activity_started = time.monotonic() - 6
+        assert chat._wants_repaint() is False
+
+    def test_the_loop_skips_repaints_when_idle(self):
+        import asyncio
+        from unittest.mock import MagicMock
+
+        chat = self._chat(pet_animate=False)
+        app = MagicMock()
+        chat.app = app
+
+        async def go():
+            task = asyncio.ensure_future(chat.repaint_loop(interval=0.02))
+            await asyncio.sleep(0.12)
+            chat._closed = True
+            await task
+
+        asyncio.run(go())
+        assert app.invalidate.call_count == 0, \
+            "an idle screen must not be redrawn on a timer"
+
+    def test_the_loop_repaints_while_a_turn_is_active(self):
+        import asyncio
+        from unittest.mock import MagicMock
+
+        chat = self._chat(pet_animate=False)
+        app = MagicMock()
+        chat.app = app
+        chat.begin_turn()
+
+        async def go():
+            task = asyncio.ensure_future(chat.repaint_loop(interval=0.02))
+            await asyncio.sleep(0.12)
+            chat._closed = True
+            await task
+
+        asyncio.run(go())
+        assert app.invalidate.call_count >= 2, \
+            "an active turn must keep streaming on screen"

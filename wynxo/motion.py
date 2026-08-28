@@ -96,13 +96,13 @@ SCENES: dict[str, Scene] = {
     "thinking": Scene(
         "thinking",
         (
-            " ≽^˘⩊•^≼  ·\n  ˘˘˘˘˘˘\n",
+            " ≽^˘⩊•^≼  · \n  ˘˘˘˘˘˘\n",
             " ≽^•⩊˘^≼   ·\n  ˘˘˘˘˘˘\n",
-            " ≽^˘⩊•^≼  ·\n  ˘˘˘˘˘˘\n",
+            " ≽^˘⩊•^≼  · \n  ˘˘˘˘˘˘\n",
         ),
         label="working it out",
         fps=5.0,
-        ascii=(" =^o.^=  .\n  -----\n", " =^.o^=   .\n  -----\n", " =^o.^=  .\n  -----\n"),
+        ascii=(" =^o.^=  . \n  -----\n", " =^.o^=   .\n  -----\n", " =^o.^=  . \n  -----\n"),
     ),
     "working": Scene(
         "working",
@@ -136,22 +136,24 @@ SCENES: dict[str, Scene] = {
         ascii=(" =^O.O^=\n  ++++\n  ----\n", " =^O.O^=\n  ----\n  ++++\n"),
     ),
     # The coding scene is the little story: the neko hops onto a tiny
-    # terminal, gets inside it, and types until the screen fills.
+    # terminal, gets inside it, and types until the screen fills. Every
+    # frame is the same width and height so the box never shifts columns
+    # between frames -- a jittering box reads as a rendering bug, not life.
     "coding": Scene(
         "coding",
         (
-            "   ≽^•⩊•^≼\n  ┌──────┐\n  │ >_    │\n  └──────┘\n",
-            "  ┌──────┐\n  │ ≽^•̀⩊•́^≼ │\n  │ >_     │\n  └──────┘\n",
-            "  ┌──────┐\n  │ ≽^•́⩊•̀^≼ │\n  │ ████░░ │\n  └──────┘\n",
-            "  ┌──────┐\n  │ ≽^≧⩊≦^≼ │\n  │ ██████ │\n  └──────┘\n",
+            "≽^•⩊•^≼\n┌───────────┐\n│ >_        │\n└───────────┘\n",
+            "┌───────────┐\n│ ≽^•̀⩊•́^≼   │\n│ >_        │\n└───────────┘\n",
+            "┌───────────┐\n│ ≽^•́⩊•̀^≼   │\n│ ████░░    │\n└───────────┘\n",
+            "┌───────────┐\n│ ≽^≧⩊≦^≼   │\n│ ██████    │\n└───────────┘\n",
         ),
         label="typing at a tiny terminal",
         fps=5.0,
         ascii=(
-            "   =^.^=\n  +------+\n  | >_   |\n  +------+\n",
-            "  +------+\n  | =^>.>^= |\n  | >_    |\n  +------+\n",
-            "  +------+\n  | =^>.>^= |\n  | ####  |\n  +------+\n",
-            "  +------+\n  | =^_^=  |\n  | ###### |\n  +------+\n",
+            "=^.^=\n+-----------+\n| >_        |\n+-----------+\n",
+            "+-----------+\n| =^>.>^=   |\n| >_        |\n+-----------+\n",
+            "+-----------+\n| =^>.>^=   |\n| ####      |\n+-----------+\n",
+            "+-----------+\n| =^_^=     |\n| ######    |\n+-----------+\n",
         ),
         compact=(" ≽^•̀⩊•́^≼ █", " ≽^•́⩊•̀^≼ █", " ≽^≧⩊≦^≼ █"),
     ),
@@ -191,12 +193,12 @@ SCENES: dict[str, Scene] = {
     "happy": Scene(
         "happy",
         (
-            " ≽^≧⩊≦^≼  ✦\n  ˘˘˘˘˘˘\n",
+            " ≽^≧⩊≦^≼  ✦ \n  ˘˘˘˘˘˘\n",
             " ≽^ᵕ⩊ᵕ^≼   ✦\n  ˘˘˘˘˘˘\n",
         ),
         label="pleased with how it went",
         fps=6.0,
-        ascii=(" =^_^=  *\n  -----\n", " =^v^=   *\n  -----\n"),
+        ascii=(" =^_^=  * \n  -----\n", " =^v^=   *\n  -----\n"),
     ),
     "error": Scene(
         "error",

@@ -847,8 +847,12 @@ class TestNothingWarnsAboutCursorPositions:
         assert source.index("silence_cpr_warning") < source.index("ask_endpoint")
 
     def test_the_repl_still_does(self):
+        """The classic prompt silences it when it is actually built; the
+        eager prompt session moved into _make_prompt_session so the chat
+        layout no longer constructs (and crashes on) a console it never
+        uses."""
         import inspect
 
         from wynxo.cli import Repl
 
-        assert "silence_cpr_warning" in inspect.getsource(Repl.__init__)
+        assert "silence_cpr_warning" in inspect.getsource(Repl._make_prompt_session)

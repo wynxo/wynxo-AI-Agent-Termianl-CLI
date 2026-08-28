@@ -229,8 +229,11 @@ class TestCprWarning:
     def test_the_repl_silences_its_own_session(self):
         import inspect
 
-        source = inspect.getsource(cli.Repl.__init__)
-        assert "silence_cpr_warning(self.prompt_session.app)" in source
+        # The classic prompt is built lazily now (its eager construction
+        # crashed chat mode under Git Bash), so the CPR silencing moved
+        # into the factory that actually builds it.
+        source = inspect.getsource(cli.Repl._make_prompt_session)
+        assert "silence_cpr_warning(session.app)" in source
 
 
 class TestPinnedPlan:

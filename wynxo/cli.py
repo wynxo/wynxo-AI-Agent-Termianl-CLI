@@ -538,11 +538,14 @@ class TerminalCallbacks(Callbacks):
             self.chat.notify((self.ui.g.tick if ok else self.ui.g.cross)
                              + f" {name} {'completed' if ok else 'failed'}",
                              ok=ok)
+            # The start line already named the tool; the result line is the
+            # outcome alone -- ``✓ 743 lines``, ``✕ 1 failed`` -- the shape
+            # a coding-agent transcript keeps. Repeating the name would just
+            # echo the line above it.
             mark = self.ui.g.tick if ok else self.ui.g.cross
             line = Text(f"  {mark} ", style="green" if ok else "red")
-            line.append(name, style="bold")
             if detail:
-                line.append(f"  {detail}", style=MUTED)
+                line.append(detail, style=MUTED)
             self.ui.console.print(line)
             return
         if self.verbose_tools and output.strip():
@@ -711,6 +714,30 @@ def _menu_rows() -> int:
     return 0
 
 
+class _LazyPromptSession:
+    """A PromptSession stand-in built on first use.
+
+    Everything that touches ``prompt_session`` -- the classic loop, the
+    free-text input, the permission question -- sees a normal session
+    through attribute delegation; the expensive constructor (which opens
+    the Windows console and can raise NoConsoleScreenBufferError in Git
+    Bash and remote shells) runs only when the classic path actually
+    prompts. Chat mode never does, so it never pays the cost.
+    """
+
+    def __init__(self, factory: Callable[[], PromptSession]):
+        self._factory = factory
+        self._session: PromptSession | None = None
+
+    def _get(self) -> PromptSession:
+        if self._session is None:
+            self._session = self._factory()
+        return self._session
+
+    def __getattr__(self, name: str):
+        return getattr(self._get(), name)
+
+
 class Repl:
     chat: "tui.ChatUI | None" = None
     """The pinned-composer layout, when this session uses it. A class-level
@@ -796,24 +823,17 @@ class Repl:
             self._shift_effort(-1)
             event.app.invalidate()
 
-        self.prompt_session: PromptSession = PromptSession(
-            history=FileHistory(str(history_file)),
-            completer=CommandCompleter(lambda: self.workspace),
-            complete_while_typing=True,
-            key_bindings=bindings,
-            multiline=False,
-            # The default reserves eight rows for a completion dropdown,
-            # which shows up as a slab of empty screen under every prompt.
-            # Readline-style completion prints inline and needs none.
-            # Enough rows for the menu to open downward without the prompt
-            # jumping, but not so many that an empty slab sits under the
-            # input the rest of the time -- and never more than the window
-            # has, or prompt_toolkit replaces the whole screen with "Window
-            # too small...", which is what a four-row pane got.
-            reserve_space_for_menu=_menu_rows(),
-            complete_style=CompleteStyle.COLUMN,
-        )
-        silence_cpr_warning(self.prompt_session.app)
+        self._prompt_bindings = bindings
+        # The classic prompt is built lazily, on its first real use. Its
+        # constructor builds a whole prompt_toolkit application, and on
+        # Windows that opens the console -- which raises
+        # NoConsoleScreenBufferError when TERM is set but no console buffer
+        # exists (Git Bash, mintty, a remote shell). The chat layout never
+        # prompts, so an eager build crashed the app before the layout could
+        # even start. Only the classic path ever reaches for it.
+        self.prompt_session: PromptSession | None = prompt_session
+        if self.prompt_session is None:
+            self.prompt_session = _LazyPromptSession(self._make_prompt_session)
         self.callbacks = TerminalCallbacks(ui, self.prompt_session)
         self.callbacks.journal = self.journal
         self.callbacks.pet = self.pet
@@ -832,6 +852,35 @@ class Repl:
         self._dictation_state = ""
         """The footer's speech line while a dictation runs."""
         self._dictation_task: asyncio.Task | None = None
+
+    def _make_prompt_session(self) -> PromptSession:
+        """Build the classic prompt on demand.
+
+        Constructing a PromptSession eagerly builds its whole application
+        (and opens the Windows console), which crashed start-up in chat
+        mode under Git Bash and remote shells. Built here, on the classic
+        path's first real prompt, so the chat layout never touches it.
+        """
+        history_file = data_dir() / "history"
+        session = PromptSession(
+            history=FileHistory(str(history_file)),
+            completer=CommandCompleter(lambda: self.workspace),
+            complete_while_typing=True,
+            key_bindings=self._prompt_bindings,
+            multiline=False,
+            # The default reserves eight rows for a completion dropdown,
+            # which shows up as a slab of empty screen under every prompt.
+            # Readline-style completion prints inline and needs none.
+            # Enough rows for the menu to open downward without the prompt
+            # jumping, but not so many that an empty slab sits under the
+            # input the rest of the time -- and never more than the window
+            # has, or prompt_toolkit replaces the whole screen with "Window
+            # too small...", which is what a four-row pane got.
+            reserve_space_for_menu=_menu_rows(),
+            complete_style=CompleteStyle.COLUMN,
+        )
+        silence_cpr_warning(session.app)
+        return session
 
     def _pet_mood(self) -> str:
         """The pet's current mood, for the top-right scene."""
@@ -1058,11 +1107,22 @@ class Repl:
                         f"  [{ACCENT}]{self.ui.g.caret}[/] {escape(text)}")
                     chat.flush()
                     if text.startswith("/"):
-                        if await self._guarded(self.command(text)) is False:
-                            break
+                        # A command can hold a status spinner (model list,
+                        # map rebuild); mark it active so the repaint pump
+                        # keeps its messages appearing.
+                        chat.begin_turn()
+                        try:
+                            if await self._guarded(self.command(text)) is False:
+                                break
+                        finally:
+                            chat.end_turn()
                         chat.flush()
                         continue
-                    await self._guarded(self.turn(text))
+                    chat.begin_turn()
+                    try:
+                        await self._guarded(self.turn(text))
+                    finally:
+                        chat.end_turn()
                     chat.flush()
                     if await self._guarded(self._drain_queue()) is False:
                         break

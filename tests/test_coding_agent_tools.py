@@ -39,10 +39,21 @@ def test_run_tests_returns_structured_failure(tmp_path: Path):
     assert result.metadata["duration"] >= 0
 
 
+async def _git_init(path: Path) -> None:
+    # Await the child inside the same loop that spawned it. Leaving the
+    # coroutine unawaited closes the loop while the process (and its
+    # stdout/stderr pipe transports) are still alive, which trips the
+    # Windows Proactor deallocator on GC.
+    proc = await asyncio.create_subprocess_exec(
+        "git", "init", str(path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.wait()
+
+
 def test_git_tools_are_read_only_and_structured(tmp_path: Path):
-    asyncio.run(asyncio.create_subprocess_exec("git", "init", str(tmp_path),
-                                                stdout=asyncio.subprocess.DEVNULL,
-                                                stderr=asyncio.subprocess.DEVNULL))
+    asyncio.run(_git_init(tmp_path))
     status = asyncio.run(GitStatus(tmp_path).invoke({}))
     diff = asyncio.run(GitDiff(tmp_path).invoke({}))
     log = asyncio.run(GitLog(tmp_path).invoke({}))
