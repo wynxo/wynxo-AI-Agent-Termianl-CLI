@@ -104,25 +104,9 @@ class Session:
         return base + sum(message_tokens(m) for m in self.messages)
 
     def should_compact(self, budget: int, num_ctx: int) -> bool:
-        # The smaller of the two. An effort level's budget is a ceiling it
-        # imposes on itself to keep a turn cheap; it can never raise the
-        # real one. Taking the budget whenever it was set meant that at low
-        # effort, with Ollama's default 2048-token window, the conversation
-        # was allowed to reach six thousand tokens -- three times what the
-        # model can hold. Ollama truncates the prompt silently, so the model
-        # forgets the beginning of the task and nothing says why. That is
-        # the exact failure setup warns about when it asks for num_ctx.
         limit = min([n for n in (budget, num_ctx) if n and n > 0] or [8000])
-        # Compact at 75%: leave room for the reply itself plus the next few
-        # tool results, or compaction triggers only once it is already too late.
         if self.token_estimate() <= limit * 0.75:
             return False
-
-        # And only if there is enough to summarise for it to be worth a model
-        # call. The system prompt and the last few messages are not
-        # summarisable, so on a small window they can sit above the threshold
-        # on their own -- and compaction then fired on every iteration,
-        # spending a call each time to remove nothing.
         older, _ = self.slice_for_summary()
         if not older:
             return False
@@ -137,66 +121,45 @@ class Session:
 
         The tail is kept whole because the model needs exact recent state --
         a summarised tool result is worse than useless when it was the thing
-        the next step depends on. Tool-call exchanges are atomic: an assistant
-        message carrying tool calls always stays with all immediately following
-        tool results.
+        the next step depends on. A complete assistant-tool exchange is also
+        atomic, even when the chosen `keep_recent` boundary falls immediately
+        before or inside that exchange.
         """
         if len(self.messages) <= keep_recent:
             return [], self.messages
 
         cut = len(self.messages) - keep_recent
 
-        # Find the atomic tool-call exchange that contains the proposed
-        # boundary. If the boundary is at the assistant call, or anywhere in
-        # its following tool results, move the boundary to the start of that
-        # exchange. This may keep a few more than `keep_recent`, which is
-        # preferable to emitting an invalid history with orphaned tool
-        # messages or tool calls.
+        # If the boundary lands on an assistant tool call, keep that complete
+        # exchange. If it lands on a tool result, walk backwards to its owning
+        # assistant. Likewise, if the boundary is immediately after a tool
+        # result, move it backwards so that result is never left in `older`
+        # without its assistant call. Keeping a few extra messages is safer
+        # than producing a structurally invalid Ollama history.
         exchange_start = None
-        for index in range(cut, -1, -1):
-            message = self.messages[index]
-            if message.get("role") == "tool":
-                # A tool result belongs to the nearest preceding assistant
-                # carrying tool_calls. If the search reaches a non-tool before
-                # finding one, this is not a well-formed exchange; leave the
-                # original boundary alone and let normal history handling deal
-                # with it.
-                cursor = index - 1
-                while cursor >= 0 and self.messages[cursor].get("role") == "tool":
-                    cursor -= 1
-                if cursor >= 0:
-                    owner = self.messages[cursor]
-                    if owner.get("role") == "assistant" and owner.get("tool_calls"):
-                        exchange_start = cursor
-                break
-            if message.get("role") == "assistant" and message.get("tool_calls"):
-                exchange_start = index
-                break
-
-        if exchange_start is not None:
-            cut = exchange_start
-
-        # Also handle the case where the candidate boundary points immediately
-        # before a tool result. Walk left over a contiguous tool-result group
-        # and keep its owning assistant with it.
-        if cut < len(self.messages) and self.messages[cut].get("role") == "tool":
-            cursor = cut - 1
-            while cursor >= 0 and self.messages[cursor].get("role") == "tool":
-                cursor -= 1
-            if cursor >= 0:
-                owner = self.messages[cursor]
-                if owner.get("role") == "assistant" and owner.get("tool_calls"):
-                    cut = cursor
-
-        # If the boundary starts on an assistant tool call, keep every result
-        # that immediately answers it. This handles a boundary chosen at the
-        # exact start of an exchange.
         if cut < len(self.messages):
             candidate = self.messages[cut]
             if candidate.get("role") == "assistant" and candidate.get("tool_calls"):
-                cut += 1
-                while cut < len(self.messages) and self.messages[cut].get("role") == "tool":
-                    cut += 1
+                exchange_start = cut
+            elif candidate.get("role") == "tool":
+                cursor = cut - 1
+                while cursor >= 0 and self.messages[cursor].get("role") == "tool":
+                    cursor -= 1
+                if (cursor >= 0
+                        and self.messages[cursor].get("role") == "assistant"
+                        and self.messages[cursor].get("tool_calls")):
+                    exchange_start = cursor
+            elif cut > 0 and self.messages[cut - 1].get("role") == "tool":
+                cursor = cut - 1
+                while cursor >= 0 and self.messages[cursor].get("role") == "tool":
+                    cursor -= 1
+                if (cursor >= 0
+                        and self.messages[cursor].get("role") == "assistant"
+                        and self.messages[cursor].get("tool_calls")):
+                    exchange_start = cursor
+
+        if exchange_start is not None:
+            cut = exchange_start
 
         return self.messages[:cut], self.messages[cut:]
 
@@ -256,7 +219,7 @@ class Session:
         except (OSError, json.JSONDecodeError):
             return None
         if not isinstance(data, dict):
-            return None       # valid JSON, but not a session
+            return None
 
         session = cls(
             workspace=workspace,
@@ -264,10 +227,6 @@ class Session:
             created_at=as_float(data.get("created_at"), time.time()),
             compactions=as_int(data.get("compactions")),
         )
-        # A file half-written by a crash, or written by another version, can
-        # parse cleanly and still hold the wrong shapes. Anything that is not
-        # a usable message is dropped rather than carried into the history,
-        # where it would break the next request instead of this one.
         session.messages = [m for m in as_list(data.get("messages"))
                             if isinstance(m, dict)]
         usage = data.get("usage")
@@ -287,8 +246,6 @@ class Session:
         if not directory.is_dir():
             return []
         def when(path: Path) -> float:
-            # A session file can vanish between the glob and the stat --
-            # /new prunes them, and another wynxo may be running.
             try:
                 return -path.stat().st_mtime
             except OSError:
@@ -296,9 +253,6 @@ class Session:
 
         out = []
         for path in sorted(directory.glob("*.json"), key=when)[:limit]:
-            # Guarded per file, deliberately. This list is what /resume and
-            # /sessions show, so one unreadable file must cost the user that
-            # one session -- not every conversation they have ever had.
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(data, dict):
