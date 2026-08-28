@@ -582,6 +582,23 @@ class TestStartingWithAPrompt:
         repl.turn = turn
         return repl
 
+    def test_the_real_constructor_builds_a_lazy_prompt(self, tmp_path):
+        """Regression: the lazy-prompt refactor referenced a ``prompt_session``
+        name that was never a constructor parameter, so the real
+        ``Repl(config, workspace, ui)`` raised NameError before the layout
+        could start -- while every test that used ``Repl.__new__`` sailed
+        past it. The constructor is the thing that actually runs; it must
+        build the session itself, lazily."""
+        from wynxo.cli import Repl
+        from wynxo.config import Config
+        from wynxo.ui import UI
+
+        repl = Repl(Config(), tmp_path, UI())
+        assert repl.prompt_session is not None
+        # The classic PromptSession opens the Windows console in its
+        # constructor; the lazy stand-in must not have done that yet.
+        assert type(repl.prompt_session).__name__ == "_LazyPromptSession"
+
     def test_the_prompt_is_answered_inside_the_layout(self):
         repl = self._repl()
         assert asyncio.run(repl.start_with("add retries")) == 0

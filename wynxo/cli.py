@@ -834,9 +834,8 @@ class Repl:
         # exists (Git Bash, mintty, a remote shell). The chat layout never
         # prompts, so an eager build crashed the app before the layout could
         # even start. Only the classic path ever reaches for it.
-        self.prompt_session: PromptSession | None = prompt_session
-        if self.prompt_session is None:
-            self.prompt_session = _LazyPromptSession(self._make_prompt_session)
+        self.prompt_session: PromptSession | None = _LazyPromptSession(
+            self._make_prompt_session)
         self.callbacks = TerminalCallbacks(ui, self.prompt_session)
         self.callbacks.journal = self.journal
         self.callbacks.pet = self.pet
