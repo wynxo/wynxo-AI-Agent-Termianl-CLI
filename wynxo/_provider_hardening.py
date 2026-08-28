@@ -26,16 +26,16 @@ def install() -> None:
             message = data.get("message")
             if not isinstance(message, dict):
                 message = {}
-            return type(original_chunk({}))(
-                content=as_text(message.get("content")),
-                thinking=as_text(message.get("thinking")) or as_text(message.get("reasoning")),
-                tool_calls=[c for c in as_list(message.get("tool_calls")) if isinstance(c, dict)],
-                done=_as_bool(data.get("done")),
-                prompt_tokens=as_int(data.get("prompt_eval_count")),
-                completion_tokens=as_int(data.get("eval_count")),
-                total_duration_ns=as_int(data.get("total_duration")),
-                load_duration_ns=as_int(data.get("load_duration")),
-            )
+            chunk = original_chunk(data)
+            chunk.content = as_text(message.get("content"))
+            chunk.thinking = as_text(message.get("thinking")) or as_text(message.get("reasoning"))
+            chunk.tool_calls = [c for c in as_list(message.get("tool_calls")) if isinstance(c, dict)]
+            chunk.done = _as_bool(data.get("done"))
+            chunk.prompt_tokens = as_int(data.get("prompt_eval_count"))
+            chunk.completion_tokens = as_int(data.get("eval_count"))
+            chunk.total_duration_ns = as_int(data.get("total_duration"))
+            chunk.load_duration_ns = as_int(data.get("load_duration"))
+            return chunk
         to_chunk._wynxo_wire_hardened = True
         OllamaClient._to_chunk = to_chunk
 
@@ -60,23 +60,34 @@ def install() -> None:
                 raise ProviderError(
                     f"The Ollama inspection response for {model!r} had an unexpected shape: {type(exc).__name__}."
                 ) from exc
-            # Compat servers sometimes serialize capabilities/context as a
-            # string or number. Normalize it at the boundary so the rest of
-            # the agent can rely on ModelInfo's advertised types.
             if not isinstance(info, ModelInfo):
                 return ModelInfo(name=model)
             if isinstance(info.capabilities, str):
                 info.capabilities = [part.strip() for part in info.capabilities.split(",") if part.strip()]
             elif info.capabilities is not None:
-                info.capabilities = [str(part) for part in info.capabilities]
+                try:
+                    info.capabilities = [str(part) for part in info.capabilities]
+                except TypeError:
+                    info.capabilities = None
             info.context_length = as_int(info.context_length)
             info.parameter_size = as_text(info.parameter_size)
             info.quantization = as_text(info.quantization)
             info.family = as_text(info.family)
             return info
-        from .coerce import as_int
         show._wynxo_show_hardened = True
         OllamaClient.show = show
+
+    original_ping = OllamaClient.ping
+    if not getattr(original_ping, "_wynxo_ping_hardened", False):
+        async def ping(self):
+            try:
+                return await original_ping(self)
+            except (AttributeError, TypeError, json.JSONDecodeError) as exc:
+                raise ProviderError(
+                    f"Ollama at {self.base_url} returned an invalid /api/version response ({type(exc).__name__})."
+                ) from exc
+        ping._wynxo_ping_hardened = True
+        OllamaClient.ping = ping
 
 
 install()
