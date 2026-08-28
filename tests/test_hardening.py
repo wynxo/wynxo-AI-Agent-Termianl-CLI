@@ -9,7 +9,7 @@ from wynxo.hardening import (
     windows_hard_refusal,
     windows_is_read_only_command,
 )
-from wynxo.tools import Glob
+from wynxo.tools import Glob, ListDir
 
 
 def test_atomic_write_preserves_existing_mode(tmp_path: Path):
@@ -45,15 +45,21 @@ def test_windows_safe_queries_are_read_only():
 
 
 @pytest.mark.asyncio
-async def test_glob_keeps_real_hidden_project_config(tmp_path: Path):
+async def test_hidden_project_config_is_discoverable(tmp_path: Path):
     (tmp_path / ".github").mkdir()
     (tmp_path / ".github" / "workflows.yml").write_text("name: ci\n", encoding="utf-8")
+    (tmp_path / ".vscode").mkdir()
+    (tmp_path / ".vscode" / "settings.json").write_text("{}\n", encoding="utf-8")
     (tmp_path / ".git").mkdir()
     (tmp_path / ".git" / "config").write_text("internal\n", encoding="utf-8")
 
-    tool = Glob(tmp_path)
-    result = await tool.invoke({"pattern": "**/*"})
+    glob = await Glob(tmp_path).invoke({"pattern": "**/*"})
+    listing = await ListDir(tmp_path).invoke({"path": ".", "depth": 2})
 
-    assert result.ok
-    assert ".github/workflows.yml" in result.output.replace("\\", "/")
-    assert ".git/config" not in result.output.replace("\\", "/")
+    assert glob.ok
+    assert ".github/workflows.yml" in glob.output.replace("\\", "/")
+    assert ".vscode/settings.json" in glob.output.replace("\\", "/")
+    assert ".git/config" not in glob.output.replace("\\", "/")
+    assert ".github/" in listing.output.replace("\\", "/")
+    assert ".vscode/" in listing.output.replace("\\", "/")
+    assert ".git/" not in listing.output.replace("\\", "/")
