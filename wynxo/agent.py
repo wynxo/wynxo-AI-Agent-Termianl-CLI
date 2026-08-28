@@ -38,6 +38,7 @@ from .prompts import (
     build_system_prompt,
 )
 from .provider import OllamaClient, ProviderError
+from .model import ModelBackend, OllamaBackend
 from .scope import Boundary, Mode
 from .session import Session
 from . import testing
@@ -200,6 +201,7 @@ class Agent:
         memory: Memory | None = None,
     ):
         self.client = client
+        self.backend: ModelBackend = OllamaBackend(client)
         self.config = config
         self.policy = policy
         self.workspace = workspace
@@ -322,7 +324,7 @@ class Agent:
         # chunks still go to content_parts below, for parse_turn() to act on.
         live_filter = LiveContentFilter(
             start_in_thinking=self._template_prefills_think)
-        stream = self.client.chat(
+        stream = self.backend.chat(
             messages if messages is not None else self.session.wire(),
             model=self.config.model,
             tools=self.tools.ollama_schemas() if (use_tools and self.native_tools) else None,

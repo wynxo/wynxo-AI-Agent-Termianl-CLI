@@ -429,6 +429,10 @@ class TerminalCallbacks(Callbacks):
         self._end_stream()
         if self.bar is not None:
             self.bar.update(activity=name, detail=detail)
+        # Stage changes are transient in chat mode; the pinned activity bar
+        # is the single source of truth and must not pollute transcript history.
+        if self.chat is not None and self.bar is not None:
+            return
         suffix = f" [{MUTED}]{detail}[/]" if detail else ""
         self.ui.console.print(f"  [{ACCENT}]{self.ui.g.arrow}[/] [{MUTED}]{name}[/]{suffix}")
 
@@ -445,7 +449,8 @@ class TerminalCallbacks(Callbacks):
             self.bar.update(activity=_ACTIVITY.get(name, name), detail=summary)
             if name == "todo_write":
                 return       # the pinned plan is the announcement
-        self.ui.tool_start(name, summary)
+        if self.chat is None:
+            self.ui.tool_start(name, summary)
 
     async def on_tool_result(self, name: str, ok: bool, display: str, output: str) -> None:
         async with self._status_lock:
@@ -467,6 +472,9 @@ class TerminalCallbacks(Callbacks):
         # line per todo_write is the same information a second time -- and it
         # scrolls, which is exactly what pinning the panel was meant to stop.
         if name == "todo_write" and ok and self.bar is not None:
+            return
+        if self.chat is not None and self.bar is not None:
+            self.bar.update(activity=_ACTIVITY.get(name, name), detail=("done" if ok else "failed"))
             return
         if self.verbose_tools and output.strip():
             self.ui.tool_result(name, ok, "", "")
