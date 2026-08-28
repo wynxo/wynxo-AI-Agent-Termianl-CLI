@@ -232,23 +232,32 @@ class Shell(Tool):
             return ToolResult.failure(
                 f"Command timed out after {args.timeout}s and was killed: "
                 f"{command}\n\nOutput before it was killed:\n"
-                f"{output or '(none)'}"
+                f"{output or '(none)'}",
+                command=command, timed_out=True,
             )
         await process.wait()
 
         code = process.returncode or 0
+        # A shell may encode a child failure in its own status; on Windows
+        # PowerShell commonly emits the real code in the output while exiting
+        # with 1. Preserve the useful status for structured consumers.
+        if code == 1 and output:
+            import re as _re
+            match = _re.search(r"exit(?:ed)?\s+code\s+(-?\d+)", output, _re.IGNORECASE)
+            if match:
+                code = int(match.group(1))
         if code == 0:
             return ToolResult.success(
-                output or "(no output)",
-                display=f"$ {command}",
-                exit_code=0,
-            )
+            output or "(no output)",
+            display=f"$ {command}",
+            exit_code=0,
+        )
         return ToolResult(
             ok=False,
             output=f"exit code {code}\n{output or '(no output)'}",
             display=f"$ {command}",
             error=f"exit code {code}",
-            metadata={"exit_code": code},
+            metadata={"exit_code": code, "command": command},
         )
 
     async def _stream(self, process, timeout: int) -> tuple[str, bool]:

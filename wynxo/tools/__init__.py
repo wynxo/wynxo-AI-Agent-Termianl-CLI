@@ -8,6 +8,8 @@ from ..memory import Memory
 from ..scope import Boundary
 from .base import Tool, ToolResult
 from .files import EditFile, ListDir, MultiEdit, ReadFile, WriteFile
+from .fs_extra import FindFiles, ListDirectory, SearchText
+from .dev import GitDiff, GitLog, GitStatus, RunTests
 from ..secrets import Shield
 from .memory_tool import Remember
 from .search import Glob, Grep
@@ -67,6 +69,13 @@ def build_registry(
         Grep(workspace, boundary, shield),
         TodoWrite(workspace, boundary, shield),
         Remember(workspace, boundary, memory, shield),
+        ListDirectory(workspace, boundary, shield),
+        FindFiles(workspace, boundary, shield),
+        SearchText(workspace, boundary, shield),
+        GitStatus(workspace, boundary, shield),
+        GitDiff(workspace, boundary, shield),
+        GitLog(workspace, boundary, shield),
+        RunTests(workspace, boundary, shield),
     ]
     if allow_shell:
         tools.append(Shell(workspace, boundary, shield))
