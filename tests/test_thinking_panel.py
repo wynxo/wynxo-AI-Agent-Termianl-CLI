@@ -116,6 +116,25 @@ class TestOpeningItMidTurn:
         callbacks.toggle_thinking()
         assert "kept regardless" in "".join(callbacks._thinking_buffer)
 
+    def test_reopening_does_not_replay_a_closed_panel(self, session):
+        page, _ui, callbacks = session
+        think(callbacks, "already shown once. ")
+        callbacks.toggle_thinking()
+        callbacks.toggle_thinking()
+        callbacks.toggle_thinking()
+        assert plain(page).count("already shown once") == 1
+
+    def test_reopening_shows_only_what_arrived_while_collapsed(self, session):
+        page, _ui, callbacks = session
+        think(callbacks, "first thought. ")
+        callbacks.toggle_thinking()
+        callbacks.toggle_thinking()
+        think(callbacks, "new thought. ")
+        callbacks.toggle_thinking()
+        body = plain(page)
+        assert body.count("first thought") == 1
+        assert body.count("new thought") == 1
+
     def test_opening_with_nothing_thought_yet_is_quiet(self, session):
         page, _ui, callbacks = session
         callbacks.toggle_thinking()
@@ -132,3 +151,4 @@ class TestEachTurnStartsFresh:
 
         source = inspect.getsource(Repl.turn)
         assert "_thinking_buffer.clear()" in source
+        assert "_thinking_shown = 0" in source

@@ -276,6 +276,13 @@ class TerminalCallbacks(Callbacks):
         """The file currently being written, while a tool call streams."""
         self._thinking_buffer: list[str] = []
         """Every thought of the current turn, shown or not."""
+        self._thinking_shown = 0
+        """Characters already rendered in a closed thinking panel.
+
+        A terminal cannot erase a completed panel from scrollback. Remembering
+        this boundary lets Ctrl-O resume with only text that arrived while the
+        panel was collapsed instead of printing the whole scratchpad again.
+        """
 
     # -- live toggles, called from the key watcher thread -------------------
 
@@ -302,7 +309,8 @@ class TerminalCallbacks(Callbacks):
         """
         # Only the leading space is trimmed. Stripping the tail would glue
         # the backlog to whichever word streams in next.
-        backlog = "".join(self._thinking_buffer).lstrip()
+        whole = "".join(self._thinking_buffer)
+        backlog = whole[self._thinking_shown:].lstrip()
         if not backlog:
             return
         if self._streaming:
@@ -312,6 +320,7 @@ class TerminalCallbacks(Callbacks):
         if self._thinker is None:
             self._thinker = ThoughtStreamer(self.ui)
         self._thinker.feed(backlog)
+        self._thinking_shown = len(whole)
 
     def _thinking_note(self) -> str:
         """The collapsed form: how much thinking there is, and how to read it.
@@ -369,6 +378,7 @@ class TerminalCallbacks(Callbacks):
             self.ui.console.print(Text("  thinking", style=f"bold {MUTED}"))
             self._thinker = ThoughtStreamer(self.ui)
         self._thinker.feed(text)
+        self._thinking_shown = len("".join(self._thinking_buffer))
 
     def _end_thinking(self) -> None:
         if self._thinker is not None:
@@ -978,6 +988,7 @@ class Repl:
         # Cleared per turn: opening the panel should show this answer's
         # reasoning, not everything the model has thought this session.
         self.callbacks._thinking_buffer.clear()
+        self.callbacks._thinking_shown = 0
 
         bar = ActivityBar(self.ui, self.policy.name, describe_bindings(LIVE_KEYS),
                           model=self.config.model, pet=self.pet)
