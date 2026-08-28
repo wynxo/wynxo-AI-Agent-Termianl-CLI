@@ -804,14 +804,15 @@ class TestAnswerNeverGoesMissing:
         assert "No tags here at all" in streamed, "the second turn showed nothing"
         await agent.client.aclose()
 
-    async def test_an_answer_labelled_as_thought_is_still_shown(self, tmp_path):
-        """A model whose whole reply arrives in the thinking field, with no
-        content, must not produce a blank response."""
-        agent, _, _ = make_agent(tmp_path, [
+    async def test_a_thought_only_response_never_leaks_as_an_answer(self, tmp_path):
+        """Reasoning is not a user-visible fallback for a missing answer."""
+        agent, _, cb = make_agent(tmp_path, [
             {"content": "", "thinking": "The capital is Paris."},
         ])
         result = await agent.run("capital of france")
-        assert "Paris" in result.content
+        assert result.content == ""
+        assert "Paris" not in "".join(cb.content)
+        assert any("empty answer" in warning for warning in cb.warnings)
         await agent.client.aclose()
 
     async def test_a_normal_answer_is_unaffected(self, tmp_path):
@@ -983,13 +984,11 @@ class TestAnEmptyAnswerIsNotSilence:
         assert not any("empty answer" in w for w in cb.warnings), cb.warnings
 
     @pytest.mark.asyncio
-    async def test_an_answer_that_arrived_as_thinking_is_not_warned_about(self, tmp_path):
-        # Already handled elsewhere: the thought becomes the answer. It must
-        # not also be reported as nothing.
+    async def test_a_thought_only_response_warns_about_the_missing_answer(self, tmp_path):
         agent, _, cb = make_agent(
             tmp_path, [{"content": "", "thinking": "The file already retries."}])
         await agent.run("does the fetch helper retry?")
-        assert not any("empty answer" in w for w in cb.warnings), cb.warnings
+        assert any("empty answer" in w for w in cb.warnings), cb.warnings
 
     @pytest.mark.asyncio
     async def test_the_warning_says_what_to_do_about_it(self, tmp_path):

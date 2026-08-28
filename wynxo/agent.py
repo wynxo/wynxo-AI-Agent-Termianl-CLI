@@ -362,14 +362,6 @@ class Agent:
         turn = parse_turn("".join(content_parts), "".join(thinking_parts),
                           native_calls)
 
-        # An answer that ended up labelled as thought is still an answer.
-        # Some templates never close the block, so everything the model wrote
-        # is reasoning as far as the tags are concerned -- and showing nothing
-        # at all is the worst possible reading of that.
-        if not turn.content and not turn.tool_calls and turn.thinking:
-            turn.content = turn.thinking
-            turn.thinking = ""
-
         # Last line of defence, whatever the cause: a turn that streamed
         # nothing while the parsed result does have an answer means the live
         # filter and parse_turn disagreed. They can, because the filter may
