@@ -304,8 +304,9 @@ class OllamaClient:
         before any chunk has been yielded -- nothing has been emitted that a
         second attempt could duplicate.
         """
+        timeout = self.config.request_timeout
         async with self._client.stream(
-            "POST", "/api/chat", json=payload, timeout=None
+            "POST", "/api/chat", json=payload, timeout=timeout
         ) as response:
             if response.status_code >= 400:
                 body = (await response.aread()).decode("utf-8", "replace")
@@ -336,7 +337,7 @@ class OllamaClient:
 
         # Only reached after a think-level downgrade.
         async with self._client.stream(
-            "POST", "/api/chat", json=payload, timeout=None
+            "POST", "/api/chat", json=payload, timeout=timeout
         ) as response:
             if response.status_code >= 400:
                 body = (await response.aread()).decode("utf-8", "replace")
