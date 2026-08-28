@@ -455,8 +455,12 @@ def link_command(python: Path, venv_dir: Path,
         try:
             target.mkdir(parents=True, exist_ok=True)
             if sys.platform == "win32":
-                body = (f'@echo off\r\n"{entry}" %*\r\n' if entry is not None
-                        else f'@echo off\r\n"{python}" -m wynxo %*\r\n')
+                # Do not delegate to pip's generated wynxo.exe. Some Windows
+                # application-control policies block freshly generated console
+                # wrappers even though the trusted Python interpreter is
+                # allowed. A cmd shim invoking the interpreter directly keeps
+                # the normal `wynxo` UX without attempting to bypass policy.
+                body = (f'@echo off\r\n"{python}" -m wynxo %*\r\n')
                 launcher.write_text(body, encoding="utf-8")
             else:
                 body = (f'#!/bin/sh\nexec "{entry}" "$@"\n' if entry is not None

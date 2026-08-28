@@ -179,6 +179,21 @@ py -m venv .venv
 .venv\Scripts\python.exe -m wynxo
 ```
 
+The installer creates `wynxo.cmd`, a normal command shim that invokes the
+virtual environment's Python interpreter directly instead of pip's generated
+`.venv\Scripts\wynxo.exe` console wrapper. This is useful on managed Windows
+machines where Device Guard / Application Control blocks generated wrappers
+while allowing the trusted Python interpreter.
+
+If `wynxo` is unavailable on `PATH`, use the supported fallback:
+
+```
+.venv\Scripts\python.exe -m wynxo
+```
+
+This is a legitimate launch path, not a policy bypass. An organization can
+still enforce a policy that blocks Python or Command Prompt themselves.
+
 **Do not use `.venv\Scripts\Activate.ps1`.** PowerShell blocks `.ps1` scripts
 under its default Restricted execution policy, so activation fails, `pip` is
 then either missing or your global one, and the install appears to do nothing
