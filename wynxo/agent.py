@@ -592,6 +592,11 @@ class Agent:
             return True
 
         summary = summarise_call(call.name, call.arguments, self.workspace)
+        if not self.task_state.record_action(f"{call.name}:{call.arguments}"):
+            await self.cb.on_warning(f"Repeated tool action detected: {call.name}. Reconsider the approach.")
+        path = call.arguments.get("path") if isinstance(call.arguments, dict) else None
+        if path:
+            self.task_state.add_file(str(path), changed=tool.mutating)
         event = ToolEvent(call.name, summary)
         event.start()
         # Keep the execution identity in the model-visible metadata too. This
@@ -655,6 +660,10 @@ class Agent:
             await self.cb.on_tool_result(call.name, result.ok, result.display, result.output)
         self.session.add_tool_result(
             call.name, self._trim_output(result.output), call.call_id)
+        if result.ok:
+            self.task_state.record_success(f"{call.name}: {result.display or 'completed'}")
+        else:
+            self.task_state.record_failure(f"{call.name}: {result.error or result.display or 'failed'}")
 
         if call.name == "todo_write" and result.ok:
             await self.cb.on_todos(result.display)
@@ -827,11 +836,13 @@ class Agent:
         code = result.metadata.get("exit_code", 0 if result.ok else 1)
 
         if result.ok:
+            self.task_state.record_success(f"tests passed: {runner.command}")
             await self.cb.on_tool_result(
                 "tests", True, TESTS_PASSED_NOTE.format(command=runner.command), "")
             return 0
 
         body = testing.summarise(result.output)
+        self.task_state.record_failure(f"tests failed: {runner.command}")
         await self.cb.on_tool_result(
             "tests", False, f"tests failed ({runner.command})", body)
         self.session.add_user(TESTS_FAILED_PROMPT.format(
@@ -994,8 +1005,7 @@ class Agent:
 
     async def run(self, request: str) -> TurnResult:
         started = time.monotonic()
-        self.task_state.reset()
-        self.task_state.transition(TaskState.THINKING)
+        self.task_state.begin(request)
         # Where this turn began, so the test pass can tell whether anything
         # was actually changed. A turn that only answered a question has
         # nothing new to break.

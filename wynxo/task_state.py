@@ -33,6 +33,43 @@ _ALLOWED: dict[TaskState, frozenset[TaskState]] = {
 class TaskStateMachine:
     def __init__(self) -> None:
         self.state = TaskState.IDLE
+        self.objective = ""
+        self.root_cause = ""
+        self.relevant_files: list[str] = []
+        self.changed_files: list[str] = []
+        self.failures: list[str] = []
+        self.successes: list[str] = []
+        self.blockers: list[str] = []
+        self.action_fingerprints: list[str] = []
+
+    def begin(self, objective: str) -> None:
+        self.reset()
+        self.objective = objective.strip()
+        self.transition(TaskState.THINKING)
+
+    def record_action(self, fingerprint: str) -> bool:
+        """Record an action and reject recent repeats without new evidence."""
+        if fingerprint in self.action_fingerprints[-3:]:
+            self.blockers.append(f"Repeated action: {fingerprint}")
+            return False
+        self.action_fingerprints.append(fingerprint)
+        return True
+
+    def record_failure(self, failure: str) -> None:
+        if failure and failure not in self.failures:
+            self.failures.append(failure)
+
+    def record_success(self, success: str) -> None:
+        if success and success not in self.successes:
+            self.successes.append(success)
+
+    def set_root_cause(self, cause: str) -> None:
+        self.root_cause = cause.strip()
+
+    def add_file(self, path: str, changed: bool = False) -> None:
+        target = self.changed_files if changed else self.relevant_files
+        if path and path not in target:
+            target.append(path)
 
     def transition(self, target: TaskState) -> bool:
         if target is self.state:
@@ -44,3 +81,11 @@ class TaskStateMachine:
 
     def reset(self) -> None:
         self.state = TaskState.IDLE
+        self.objective = ""
+        self.root_cause = ""
+        self.relevant_files = []
+        self.changed_files = []
+        self.failures = []
+        self.successes = []
+        self.blockers = []
+        self.action_fingerprints = []

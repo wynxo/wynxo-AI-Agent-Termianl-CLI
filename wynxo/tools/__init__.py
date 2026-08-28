@@ -16,6 +16,7 @@ from .search import Glob, Grep
 from .shell import Shell
 from .todo import TodoWrite
 from .apps import OpenApplication
+from .navigation_tool import NavigateSymbols
 
 __all__ = ["Tool", "ToolResult", "Registry", "build_registry"]
 
@@ -70,6 +71,7 @@ def build_registry(
         Grep(workspace, boundary, shield),
         TodoWrite(workspace, boundary, shield),
         OpenApplication(workspace, boundary, shield),
+        NavigateSymbols(workspace, boundary, shield),
         Remember(workspace, boundary, memory, shield),
         ListDirectory(workspace, boundary, shield),
         FindFiles(workspace, boundary, shield),

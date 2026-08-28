@@ -15,6 +15,9 @@ two decide whether the agent works at all.
 from __future__ import annotations
 
 import time
+import shutil
+import sys
+from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -67,14 +70,27 @@ class Doctor:
         """Run every check. Returns a process exit code."""
         self.ui.console.print()
         self.ui.console.print(f"[bold {ACCENT}]  wynxo doctor[/]")
+        # Keep environment facts available for the report, but fail-fast checks
+        # should remain the only checks when the provider cannot be reached.
         self.ui.console.print(
             f"  [{MUTED}]{self.config.model} on {self.client.base_url}[/]"
         )
         self.ui.console.print()
 
         if not await self.check_server():
+            # Keep the provider failure as the sole recorded check: callers
+            # use this to distinguish a connectivity failure from a later
+            # model/configuration failure. Environment facts are shown in the
+            # header and do not need to masquerade as completed checks.
+            self.checks = [self.checks[-1]]
             self.report()
             return 1
+        self.checks.extend([
+            Check("python", Status.PASS, f"{sys.version.split()[0]} at {sys.executable}"),
+            Check("git", Status.PASS if shutil.which("git") else Status.WARN,
+                  shutil.which("git") or "not found"),
+            Check("installation", Status.PASS, str(Path(__file__).resolve().parent)),
+        ])
         if not await self.check_model_present():
             self.report()
             return 1
