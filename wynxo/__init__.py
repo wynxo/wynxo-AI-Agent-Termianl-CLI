@@ -18,5 +18,6 @@ from . import _symlink_hardening as _symlink_hardening  # noqa: F401,E402
 from . import _projectmap_hardening as _projectmap_hardening  # noqa: F401,E402
 from . import _speech_hardening as _speech_hardening  # noqa: F401,E402
 from . import _schema_hardening as _schema_hardening  # noqa: F401,E402
+from . import _journal_hardening as _journal_hardening  # noqa: F401,E402
 
 __all__ = ["__version__"]
