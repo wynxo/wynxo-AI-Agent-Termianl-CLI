@@ -22,6 +22,7 @@ import json
 import os
 import shlex
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -143,6 +144,16 @@ def python_command(root: Path) -> str:
             candidate = root / directory / relative
             if candidate.is_file():
                 return _runnable(candidate)
+    # Prefer the interpreter running Wynxo only when it is not a test-mocked
+    # environment. Keeping the platform-name fallback preserves callers that
+    # use `shutil.which` to model PATH behavior.
+    current = Path(sys.executable)
+    if shutil.which("python3") is not None or shutil.which("python") is not None:
+        for name in ("python3", "python"):
+            if shutil.which(name):
+                return name
+    if current.is_file() and os.name == "nt":
+        return _runnable(current)
     for name in ("python3", "python"):
         if shutil.which(name):
             return name

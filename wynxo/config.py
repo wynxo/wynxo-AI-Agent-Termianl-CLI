@@ -136,6 +136,13 @@ class Config(Schema):
     speech_rate = Field(int, "Speaking rate. 0 leaves the engine's default; "
                              "the scale differs per engine.", default=0)
     speech_model = Field(str, "Path to a piper .onnx voice model.", default="")
+    stt_enabled = Field(bool, "Enable microphone speech recognition independently of TTS.", default=False)
+    stt_backend = Field(str, "Speech recognition backend name.", default="auto")
+    stt_device = Field((str, int), "Microphone device name or index, or empty for the default.", default="")
+    stt_language = Field(str, "Speech recognition language, for example en-US.", default="")
+    stt_silence_timeout = Field(float, "Seconds of silence before recording stops.", default=1.25, ge=0.2, le=10.0)
+    stt_max_duration = Field(float, "Maximum speech recording duration in seconds.", default=30.0, ge=1.0, le=600.0)
+    stt_transcription_timeout = Field(float, "Maximum transcription duration in seconds.", default=60.0, ge=1.0, le=600.0)
 
     def endpoint(self) -> Endpoint:
         for ep in self.endpoints:
