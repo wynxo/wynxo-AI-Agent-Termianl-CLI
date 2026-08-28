@@ -540,3 +540,40 @@ class TestAnEmptyOldText:
                 {"old_text": "a = 1", "new_text": "a = 2"},
                 {"old_text": "", "new_text": "X"}])))
         assert (tmp_path / "a.py").read_text() == "a = 1\n"
+
+
+class TestShellStreamCleanup:
+    """Cancelled and timed-out commands must retire their pipe transports.
+
+    On Windows the ProactorEventLoop hands a subprocess a pipe transport for
+    stdout; when the loop closes while that transport is still alive, its
+    deallocator later runs against an already-closed socket and the
+    interpreter prints "Exception ignored while calling deallocator
+    (asyncio: I/O operation on closed pipe)". Explicitly closing the stream
+    is what makes the teardown clean.
+    """
+
+    async def test_a_live_stream_is_closed(self):
+        from unittest.mock import MagicMock
+
+        stream = MagicMock()
+        process = MagicMock()
+        process.stdout = stream
+        await Shell._close_streams(process)
+        stream.close.assert_called_once()
+
+    async def test_no_stream_is_not_an_error(self):
+        from unittest.mock import MagicMock
+
+        process = MagicMock()
+        process.stdout = None
+        await Shell._close_streams(process)      # must not raise
+
+    async def test_an_already_closed_stream_is_tolerated(self):
+        from unittest.mock import MagicMock
+
+        stream = MagicMock()
+        stream.close.side_effect = ValueError("I/O operation on closed pipe")
+        process = MagicMock()
+        process.stdout = stream
+        await Shell._close_streams(process)      # must not raise

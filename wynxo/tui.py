@@ -36,6 +36,7 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import (Float, FloatContainer, HSplit,
                                    Layout, Window)
 from prompt_toolkit.layout.menus import CompletionsMenu
@@ -253,6 +254,9 @@ class ChatUI:
         self.submissions: asyncio.Queue[str] = asyncio.Queue()
         self.scroll = 0
         """Rows scrolled back from the bottom. Zero follows the newest."""
+        self._unread = 0
+        """New lines that arrived while scrolled back. Reset on following.
+        Tells the user what they missed without dragging them down."""
         self._status = status or (lambda: "")
         self._header = header or (lambda: "")
         self.activity = ""
@@ -734,6 +738,8 @@ class ChatUI:
                 text = self.activity + (f"   {text}" if text else "")
         if self.scroll > 0:
             marker = "^ scrolled back -- End to follow again"
+            if self._unread > 0:
+                marker = f"↓ {self._unread} new   {marker}"
             text = f"{text}   {marker}" if text else marker
         return ANSI(text)
 
@@ -838,7 +844,10 @@ class ChatUI:
             layout=layout,
             key_bindings=self._keys(),
             full_screen=True,
-            mouse_support=False,
+            # Mouse delivers the wheel so scrolling the transcript works the
+            # way it does in any real terminal. Clicks fall through to the
+            # composer, which is the only focusable window.
+            mouse_support=True,
             color_depth=ColorDepth.TRUE_COLOR,
             erase_when_done=True,
             output=_output(),
@@ -1001,6 +1010,20 @@ class ChatUI:
         @keys.add("end")
         def _(event):
             self.scroll = 0
+
+        # Mouse wheel. prompt_toolkit only accepts these as Keys enum
+        # members, not as parseable strings like "scroll-up".
+        @keys.add(Keys.ScrollUp, filter=scrolling)
+        def _(event):
+            """Mouse wheel up: scroll back, leaving auto-follow behind."""
+            self.scroll = min(
+                self.transcript.max_offset(self.transcript_rows()),
+                self.scroll + 3)
+
+        @keys.add(Keys.ScrollDown, filter=scrolling)
+        def _(event):
+            """Mouse wheel down: toward the bottom; at zero, follow again."""
+            self.scroll = max(0, self.scroll - 3)
 
         # Alt-Enter puts a newline in the composer instead of submitting.
         # prompt_toolkit represents Alt-Enter as escape followed by Enter in
@@ -1214,12 +1237,22 @@ class ChatUI:
     # -- the api the repl uses ---------------------------------------------
 
     def _drain_transcript(self) -> None:
-        """Drain rich output while preserving the user's scroll anchor."""
+        """Drain rich output while preserving the user's scroll anchor.
+
+        While the user is scrolled back, new lines push the anchor deeper
+        instead of dragging them to the bottom, and the count of what they
+        have not seen accumulates for the footer's ``↓ N new`` marker.
+        """
         previous = len(self.transcript.lines)
         self.transcript.drain()
         current = len(self.transcript.lines)
-        if self.scroll > 0 and current > previous:
-            self.scroll += current - previous
+        added = current - previous
+        if self.scroll > 0:
+            self.scroll += added
+            if added > 0:
+                self._unread += added
+        else:
+            self._unread = 0
         self._scroll_content_length = current
 
     def _changed(self) -> None:

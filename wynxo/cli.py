@@ -493,8 +493,17 @@ class TerminalCallbacks(Callbacks):
                 self.bar.record_tool_event(event)
             if name == "todo_write":
                 return       # the pinned plan is the announcement
-        if self.chat is None:
-            self.ui.tool_start(name, summary)
+        if self.chat is not None and name != "todo_write":
+            # Tools live in the conversation, compactly: one line when it
+            # starts, one when it lands. This is the coding-agent shape --
+            # what is running stays visible without a second screen.
+            line = Text(f"  {self.ui.g.arrow} ", style=ACCENT)
+            line.append(name, style="bold")
+            if summary:
+                line.append(f"  {summary}", style=MUTED)
+            self.ui.console.print(line)
+            return
+        self.ui.tool_start(name, summary)
 
     async def on_tool_result(self, name: str, ok: bool, display: str, output: str, event: ToolEvent | None = None) -> None:
         async with self._status_lock:
@@ -518,16 +527,25 @@ class TerminalCallbacks(Callbacks):
         if name == "todo_write" and ok and self.bar is not None:
             return
         if self.chat is not None and self.bar is not None:
-            detail = event.compact() if event is not None else ("done" if ok else "failed")
+            # The tool's own display summary is the best card: "312 lines",
+            # "1 failed", "launched notepad". The event compact adds the
+            # duration when present; never downgrade to a bare "done".
+            detail = (display or (event.compact() if event is not None else "")
+                      or ("done" if ok else "failed"))
             if event is not None:
                 self.bar.record_tool_event(event)
             self.bar.update(activity=_ACTIVITY.get(name, name), detail=detail)
-            if self.chat is not None:
-                self.chat.set_activity((self.ui.g.tick if ok else self.ui.g.cross)
-                                       + f" {name} · {detail}", ok=ok)
-                self.chat.notify((self.ui.g.tick if ok else self.ui.g.cross)
-                                 + f" {name} {'completed' if ok else 'failed'}",
-                                 ok=ok)
+            self.chat.set_activity((self.ui.g.tick if ok else self.ui.g.cross)
+                                   + f" {name} · {detail}", ok=ok)
+            self.chat.notify((self.ui.g.tick if ok else self.ui.g.cross)
+                             + f" {name} {'completed' if ok else 'failed'}",
+                             ok=ok)
+            mark = self.ui.g.tick if ok else self.ui.g.cross
+            line = Text(f"  {mark} ", style="green" if ok else "red")
+            line.append(name, style="bold")
+            if detail:
+                line.append(f"  {detail}", style=MUTED)
+            self.ui.console.print(line)
             return
         if self.verbose_tools and output.strip():
             self.ui.tool_result(name, ok, "", "")

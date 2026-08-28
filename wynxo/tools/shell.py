@@ -229,9 +229,11 @@ class Shell(Tool):
             # carries on in the background, still writing to the project,
             # while the user believes they stopped it.
             await self._terminate(process)
+            await self._close_streams(process)
             raise
         if timed_out:
             await self._terminate(process)
+            await self._close_streams(process)
             # The output is handed back rather than discarded. A command that
             # hangs is exactly when its last few lines matter most -- they say
             # which test wedged or which download stalled -- and throwing them
@@ -245,6 +247,7 @@ class Shell(Tool):
                 stdout=output, stderr="", exit_code=None,
             )
         await process.wait()
+        await self._close_streams(process)
 
         code = process.returncode or 0
         # A shell may encode a child failure in its own status; on Windows
@@ -344,6 +347,26 @@ class Shell(Tool):
                    if dropped else "\n")
             body += gap + "\n".join(tail)
         return body.strip(), timed_out
+
+    @staticmethod
+    async def _close_streams(process) -> None:
+        """Retire the pipe transports before the loop does.
+
+        On Windows the ProactorEventLoop hands a subprocess a pipe transport
+        for stdout. If the loop closes while that transport is still alive
+        -- the exact shape of a cancelled or timed-out command -- the
+        deallocator later runs against an already-closed socket and the
+        interpreter prints "Exception ignored while calling deallocator"
+        (asyncio: I/O operation on closed pipe). Explicitly closing the
+        stream retires the transport cleanly, which any asyncio program
+        should do once the process has been reaped.
+        """
+        try:
+            stream = getattr(process, "stdout", None)
+            if stream is not None:
+                stream.close()
+        except Exception:
+            pass
 
     @staticmethod
     async def _terminate(process) -> None:

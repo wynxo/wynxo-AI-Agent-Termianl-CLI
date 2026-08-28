@@ -12,10 +12,19 @@ is no second renderer to drift out of step with the first.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
 from wynxo.tui import MAX_SCROLLBACK, ChatUI, Transcript, render_to_ansi
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _plain(lines) -> str:
+    """The transcript keeps styled text; assertions want what the eye sees."""
+    return _ANSI.sub("", "\n".join(lines))
 
 
 class TestTheTranscript:
@@ -215,6 +224,61 @@ class TestTheLayout:
             chat.buffer.validate_and_handle()
         assert chat.submissions.get_nowait() == "first"
         assert chat.submissions.get_nowait() == "second"
+
+    def test_scrolled_back_counts_what_arrives_as_unread(self, chat):
+        for i in range(50):
+            chat.transcript.console.print(f"line {i}")
+        chat.flush()
+        chat.scroll = 10
+        chat.transcript.console.print("new line")
+        chat.flush()
+        assert chat.scroll > 10
+        assert chat._unread > 0
+        assert "new" in str(chat._footer_fragments().value)
+        assert "scrolled back" in str(chat._footer_fragments().value)
+
+    def test_following_the_newest_resets_the_unread_count(self, chat):
+        for i in range(50):
+            chat.transcript.console.print(f"line {i}")
+        chat.flush()
+        chat.scroll = 10
+        chat.transcript.console.print("while you were away")
+        chat.flush()
+        assert chat._unread > 0
+        chat.scroll = 0
+        chat.flush()
+        assert chat._unread == 0
+
+    def test_the_mouse_wheel_scrolls_the_transcript(self, chat):
+        import types
+
+        for i in range(50):
+            chat.transcript.console.print(f"line {i}")
+        chat.flush()
+
+        def press(key):
+            for binding in chat.app.key_bindings.bindings:
+                if key in str(binding.keys):
+                    binding.handler(types.SimpleNamespace(data="", app=chat.app))
+                    return True
+            return False
+
+        assert press("scroll-up")
+        assert chat.scroll > 0
+        assert press("scroll-down")
+        assert chat.scroll == 0
+
+    def test_the_mouse_wheel_cannot_push_beyond_the_top(self, chat):
+        import types
+
+        for i in range(5):
+            chat.transcript.console.print(f"line {i}")
+        chat.flush()
+        for binding in chat.app.key_bindings.bindings:
+            if "scroll-up" in str(binding.keys):
+                for _ in range(50):
+                    binding.handler(types.SimpleNamespace(data="", app=chat.app))
+        assert chat.scroll == chat.transcript.max_offset(chat.transcript_rows())
 
     def test_scrolling_stops_at_the_top(self, chat):
         for i in range(5):
@@ -814,6 +878,55 @@ class TestReadingALineInsideTheApp:
             return await asyncio.wait_for(pending, 1)
 
         assert asyncio.run(go()) == ""
+
+
+class TestToolCardsLiveInTheConversation:
+    """In the chat layout a tool call is one compact line when it starts and
+    one when it lands -- the coding-agent shape, inside the conversation."""
+
+    def _callbacks(self):
+        from unittest.mock import MagicMock
+
+        from wynxo.cli import TerminalCallbacks
+        from wynxo.ui import UI
+
+        chat = ChatUI(status=lambda: "")
+        ui = UI()
+        ui.console = chat.transcript.console
+        cb = TerminalCallbacks(ui)
+        cb.chat = chat
+        cb.bar = MagicMock()
+        return cb, chat
+
+    def test_a_tool_start_prints_one_compact_line(self):
+        cb, chat = self._callbacks()
+        asyncio.run(cb._on_tool_start_locked("read_file", "x.py", None))
+        chat.transcript.drain()
+        body = _plain(chat.transcript.lines)
+        assert "→ read_file" in body
+        assert "x.py" in body
+
+    def test_a_tool_result_prints_one_compact_line(self):
+        cb, chat = self._callbacks()
+        asyncio.run(cb._on_tool_result_locked("read_file", True,
+                                              "312 lines", "312", None))
+        chat.transcript.drain()
+        body = _plain(chat.transcript.lines)
+        assert "✓ read_file" in body
+        assert "312 lines" in body
+
+    def test_a_failed_tool_result_prints_a_cross(self):
+        cb, chat = self._callbacks()
+        asyncio.run(cb._on_tool_result_locked("run_tests", False,
+                                              "1 failed", "traceback", None))
+        chat.transcript.drain()
+        assert "✗ run_tests" in _plain(chat.transcript.lines)
+
+    def test_todo_writes_do_not_spam_the_conversation(self):
+        cb, chat = self._callbacks()
+        asyncio.run(cb._on_tool_start_locked("todo_write", "[x] step", None))
+        chat.transcript.drain()
+        assert "todo_write" not in _plain(chat.transcript.lines)
 
 
 class TestTheSpinnerWhereNothingCanRepaint:
