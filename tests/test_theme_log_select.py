@@ -587,7 +587,7 @@ class TestEverySettingIsPickable:
 
     PICKERS = ("cmd_theme", "cmd_effort", "cmd_mode", "cmd_scope",
                "cmd_pet", "cmd_speak", "cmd_endpoint", "cmd_model",
-               "cmd_ctx", "cmd_thinking", "cmd_talker", "cmd_fullscreen",
+               "cmd_ctx", "cmd_thinking", "cmd_talker",
                "cmd_secrets", "cmd_logo")
 
     def _run_bare(self, name, monkeypatch):

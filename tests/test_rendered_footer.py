@@ -84,9 +84,9 @@ class TestTheLayoutContract:
         chat = ChatUI(status=lambda: "", width=80)
         frame = body_children(chat)[3]
         dim = frame.preferred_height(80, 40)
-        assert dim.min == 3                       # borders + one input row
-        assert dim.preferred == 3                 # empty input = exactly this
-        assert dim.max == 3                       # nothing spare can be added
+        assert dim.min == 2                       # breathing gap + one input row
+        assert dim.preferred == 2                 # empty input = exactly this
+        assert dim.max == 2                       # nothing spare can be added
 
     def test_the_composer_cannot_absorb_spare_rows(self):
         """The allocator's max loop is what turned idle screens into a tall
@@ -110,18 +110,57 @@ class TestTheLayoutContract:
                 assert dim.max == dim.preferred, \
                     "a fixed row must report an exact dimension"
 
+    def test_the_composer_is_a_bare_caret_not_a_box(self):
+        """The coding-agent shape: no borders around the input, just the
+        caret and a breathing gap above it."""
+        chat = ChatUI(status=lambda: "", width=80)
+        frame = body_children(chat)[3]
+        gap, composer = list(frame.children)
+        assert isinstance(gap, Window)
+        assert gap.preferred_height(80, 40).max == 1      # the gap row
+        from prompt_toolkit.layout.controls import BufferControl
+        assert isinstance(composer.content, BufferControl)
+        assert composer.content.buffer is chat.buffer
+
+    def test_the_caret_prefix_is_the_unicode_caret(self):
+        chat = ChatUI(status=lambda: "")
+        assert chat._composer_prefix() == "❯ "
+
+    def test_the_caret_falls_back_to_ascii(self):
+        chat = ChatUI(status=lambda: "", unicode=False)
+        assert chat._composer_prefix() == "> "
+
+    def test_a_question_keeps_a_distinct_prefix(self):
+        import asyncio
+
+        async def go():
+            chat = ChatUI(status=lambda: "")
+            chat.question = "pick a tool"
+            chat.answer = asyncio.get_event_loop().create_future()
+            assert chat.asking
+            assert chat._composer_prefix() == "❯ pick a tool "
+
+        asyncio.run(go())
+
+    def test_the_prompt_class_is_themed(self):
+        from wynxo.tui import DEFAULT_CHROME
+        assert "prompt" in DEFAULT_CHROME
+        chat = ChatUI(status=lambda: "")
+        prefix = chat._composer_line_prefix(1, 1, 1)
+        assert prefix[0][0] == "class:prompt"
+
     def test_allocation_on_an_idle_screen(self):
         """A short conversation on a tall screen: every spare row goes to
-        the transcript, the composer keeps its natural three rows, the
+        the transcript, the composer keeps its natural two rows, the
         footer stays one."""
         chat = ChatUI(status=lambda: "status", width=80)
         chat.transcript.console.print("hello")
         chat.flush()
         sizes = allocated_heights(chat, rows=30)
         transcript, frame, footer = sizes[2], sizes[3], sizes[4]
-        assert frame == 3
+        assert frame == 2
         assert footer == 1
-        assert transcript == 30 - chat.HEADER_ROWS - 3 - 1
+        assert transcript == 30 - chat.HEADER_ROWS - 2 - 1
 
     def test_allocation_with_a_full_transcript(self):
         chat = ChatUI(status=lambda: "", width=80)
@@ -129,9 +168,9 @@ class TestTheLayoutContract:
             chat.transcript.console.print(f"line {i}")
         chat.flush()
         sizes = allocated_heights(chat, rows=24)
-        assert sizes[3] == 3
+        assert sizes[3] == 2
         assert sizes[4] == 1
-        assert sizes[2] == 24 - chat.HEADER_ROWS - 3 - 1
+        assert sizes[2] == 24 - chat.HEADER_ROWS - 2 - 1
 
     def test_empty_and_long_input_do_not_change_the_footer_or_steal_output(self):
         chat = ChatUI(status=lambda: "", width=80)
@@ -139,7 +178,7 @@ class TestTheLayoutContract:
             chat.buffer.text = value
             sizes = allocated_heights(chat, rows=40)
             assert sizes[4] == 1
-            assert sizes[3] <= chat.COMPOSER_MAX_ROWS + 2
+            assert sizes[3] <= chat.COMPOSER_MAX_ROWS + 1
             assert sizes[2] == 40 - chat.HEADER_ROWS - sizes[3] - 1
 
 
@@ -148,7 +187,7 @@ class TestComposerBehaviour:
         chat = ChatUI(status=lambda: "", width=80)
         chat.buffer.text = ""
         assert chat.composer_content_rows(80) == 1
-        assert chat.composer_frame_rows() == 3
+        assert chat.composer_frame_rows() == 2
 
     def test_multiline_input_grows(self):
         chat = ChatUI(status=lambda: "", width=80)
@@ -161,7 +200,7 @@ class TestComposerBehaviour:
         chat = ChatUI(status=lambda: "", width=80)
         chat.buffer.text = "\n".join(f"line {i}" for i in range(20))
         assert chat.composer_content_rows(80) == chat.COMPOSER_MAX_ROWS
-        assert chat.composer_frame_rows() == chat.COMPOSER_MAX_ROWS + 2
+        assert chat.composer_frame_rows() == chat.COMPOSER_MAX_ROWS + 1
 
     def test_a_long_line_wraps_and_grows(self):
         chat = ChatUI(status=lambda: "", width=80)

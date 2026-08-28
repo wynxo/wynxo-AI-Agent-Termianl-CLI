@@ -23,7 +23,6 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from . import __version__
 from . import config as config_module
-from . import fullscreen
 from . import logo
 from . import stt
 from . import stt_devices
@@ -181,7 +180,6 @@ COMMANDS = {
     "/animate": "preview the animations: list, or <name> for a scene",
     "/todo": "plan panel: expanded | compact | hidden (toggle with no arg)",
     "/theme": "colour palette: purple | sakura | midnight | ember | plain | minimal",
-    "/fullscreen": "draw on the alternate screen, like vim: on | off",
     "/secrets": "credential protection: on | off | allow <path>",
     "/logo": "the start-up logo: pick one, or off",
     "/speak": "read answers out loud: on | off | test | engine <name>",
@@ -830,10 +828,6 @@ class Repl:
         self.agent.permissions.mode = mode
         self.agent.refresh_system_prompt()
         self._task: asyncio.Task | None = None
-        # Set by amain() once the alternate screen is bracketed around the
-        # session. Left as an inert Screen so /fullscreen works the same in
-        # tests and in an embedded Repl that nobody wrapped.
-        self.screen = fullscreen.Screen(enabled=False)
         self.chat = None
         self._dictation_state = ""
         """The footer's speech line while a dictation runs."""
@@ -856,6 +850,7 @@ class Repl:
         p = self.ui.palette
         return {
             "edge": p.faint,
+            "prompt": f"bold {p.accent}",
             "toast-ok": p.good,
             "toast-fail": p.bad,
             "pet": "",
@@ -1849,9 +1844,6 @@ class Repl:
 
         if name == "/theme":
             return await self.cmd_theme(args)
-
-        if name == "/fullscreen":
-            return await self.cmd_fullscreen(args)
 
         if name == "/secrets":
             return await self.cmd_secrets(args)
@@ -3119,112 +3111,6 @@ class Repl:
         self.ui.info(f"thinking display {'on' if self.ui.show_thinking else 'off'}")
         return True
 
-    async def cmd_fullscreen(self, args: list[str]) -> bool:
-        """Switch screens now, and remember the choice.
-
-        Takes effect immediately rather than at next start: a setting that
-        says it changed while the screen plainly did not is the kind of
-        thing that makes people stop trusting the whole settings menu.
-        """
-        if self.chat is not None:
-            return await self._chat_layout_fullscreen(args)
-
-        want = args[0].lower() if args else ""
-        if want not in ("on", "off"):
-            chosen = await self._pick(
-                "fullscreen",
-                [("on", "take over the terminal; your shell comes back "
-                        "untouched on exit, but this screen has no scrollback"),
-                 ("off", "stay in the normal scrolling terminal")],
-                "on" if self.config.fullscreen else "off",
-            )
-            if chosen is NO_PICKER:
-                state = "on" if self.config.fullscreen else "off"
-                self.ui.info(f"fullscreen is {state}  {self.ui.g.dot}  "
-                             "/fullscreen on | off")
-                return True
-            if chosen is None:
-                return True
-            want = chosen
-
-        enable = want == "on"
-        if enable and not fullscreen.supported():
-            self.ui.warn("this terminal cannot switch screens, so fullscreen "
-                         "would do nothing here")
-            return True
-
-        self.config.fullscreen = enable
-        self.config.save()
-
-        screen = getattr(self, "screen", None)
-        if screen is not None:
-            screen.enabled = enable or screen.active
-            if enable:
-                screen.enter()
-            else:
-                screen.leave()
-                screen.enabled = False
-
-        if enable:
-            # The new screen is blank, so the conversation so far is not on
-            # it. Say where it went rather than letting it look lost.
-            self.ui.info(fullscreen.note(True, self.ui.g.unicode))
-            self.ui.info("the scrollback from before is waiting on the other "
-                         "screen, and comes back when wynxo exits")
-        else:
-            self.ui.success("back to the scrolling terminal")
-        return True
-
-    async def _chat_layout_fullscreen(self, args: list[str]) -> bool:
-        """/fullscreen under the chat layout, where there is nothing to switch.
-
-        This layout is drawn by an application that owns the screen: the
-        header, the status row and the composer are pinned, which is only
-        possible on a screen nothing else scrolls. Switching back mid-session
-        is not a setting, it is a different program -- so the honest lever is
-        the layout itself, and the option says so rather than flipping a flag
-        that would visibly do nothing.
-        """
-        want = args[0].lower() if args else ""
-        if want not in ("on", "off"):
-            chosen = await self._pick(
-                "fullscreen",
-                [("on", "this screen, with the composer and status pinned "
-                        "(where you are now)"),
-                 ("off", "the classic scrolling terminal, with real "
-                         "scrollback -- from the next start")],
-                "on",
-            )
-            if chosen is NO_PICKER or chosen is None:
-                self.ui.info("the chat layout always draws on the alternate "
-                             f"screen  {self.ui.g.dot}  /fullscreen off for "
-                             "the scrolling terminal")
-                return True
-            want = chosen
-
-        if want == "on":
-            # Not only a message: "off" saves the classic layout for next
-            # time, so "on" has to be able to take that back. Without this,
-            # changing your mind in the same session would still start the
-            # scrolling prompt tomorrow.
-            if not self.config.chat_layout:
-                self.config.chat_layout = True
-                self.config.save()
-                self.ui.success("this layout again from the next start")
-                return True
-            self.ui.info("already there: the chat layout draws on the "
-                         "alternate screen, and your shell comes back "
-                         "untouched when wynxo exits")
-            return True
-
-        self.config.fullscreen = False
-        self.config.chat_layout = False
-        self.config.save()
-        self.ui.success("the scrolling terminal from the next start")
-        self.ui.info(f"or now, with  wynxo --classic   {self.ui.g.dot}  "
-                     "/fullscreen on brings this layout back")
-        return True
-
     async def cmd_logo(self, args: list[str]) -> bool:
         """Choose the start-up logo, and show it straight away.
 
@@ -3800,11 +3686,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chat", action="store_true",
                         help="pin the composer to the bottom of the screen "
                              "(the default where the terminal allows it)")
-    parser.add_argument("--fullscreen", action="store_true",
-                        help="draw on the alternate screen, like vim; your "
-                             "terminal is restored exactly on exit")
-    parser.add_argument("--no-fullscreen", action="store_true",
-                        help="stay in the normal scrolling terminal")
     parser.add_argument("--no-stream", action="store_true", help="wait for the full response")
     parser.add_argument("--no-thinking", action="store_true", help="hide model reasoning")
     parser.add_argument("--yolo", action="store_true",
@@ -3836,17 +3717,6 @@ def apply_flags(config, args) -> None:
         config.chat_layout = False
     if args.chat:
         config.chat_layout = True
-    if args.fullscreen:
-        config.fullscreen = True
-    if args.no_fullscreen:
-        config.fullscreen = False
-        # The chat layout draws on the alternate screen by construction, so
-        # under it this flag would otherwise do nothing at all. "Stay in the
-        # normal scrolling terminal" has exactly one meaning here, and it is
-        # the classic prompt -- unless --chat was asked for in the same
-        # breath, where the more specific flag wins.
-        if not args.chat:
-            config.chat_layout = False
     if args.no_thinking:
         config.show_thinking = False
     if args.talker:
@@ -3979,33 +3849,22 @@ async def amain(argv: list[str] | None = None) -> int:
     # "?" as an escape-injection guard -- turning every colour code from rich
     # and from the status lines into literal "?[1;32m" garbage on screen.
     # write_raw passes them through, which is what a terminal UI needs.
-    # The alternate screen is entered before anything draws and left after
-    # everything, so the session is bracketed exactly. Screen() is a no-op
-    # when fullscreen is off or the terminal cannot do it, so there is no
-    # branch here.
-    # The chat layout owns the whole screen, so it must not be wrapped in
-    # patch_stdout -- that exists to keep printed output from colliding with
-    # a scrolling prompt, and there is no scrolling prompt here.
     #
-    # Nor in a Screen. prompt_toolkit's Application is built full_screen, so
-    # it enters and leaves the alternate screen itself, and a second owner of
-    # the same escape sequence is not redundant but harmful: /fullscreen off
-    # would switch the terminal back to the primary screen with the
-    # application still running and still drawing, which paints the whole
-    # interface over the user's shell and leaves it there after wynxo exits.
+    # The chat layout owns the whole screen and manages its own alternate
+    # screen (prompt_toolkit's Application is built full_screen), so it must
+    # not be wrapped in patch_stdout -- that exists to keep printed output
+    # from colliding with a scrolling prompt, and there is no scrolling
+    # prompt here.
     if config.chat_layout and tui.usable():
-        repl.screen = fullscreen.Screen(enabled=False)
         repl.use_chat_layout()
         if prompt:
             return await repl.start_with(prompt)
         return await repl.start()
 
-    with fullscreen.Screen(config.fullscreen) as screen:
-        repl.screen = screen
-        with patch_stdout(raw=True):
-            if prompt:
-                return await repl.start_with(prompt)
-            return await repl.start()
+    with patch_stdout(raw=True):
+        if prompt:
+            return await repl.start_with(prompt)
+        return await repl.start()
 
 
 def _print_ascii(args, ui: UI) -> int:

@@ -51,6 +51,7 @@ MAX_SCROLLBACK = 4_000
 
 DEFAULT_CHROME = {
     "edge": "ansibrightblack",
+    "prompt": "bold ansibrightcyan",
     "toast-ok": "ansibrightcyan",
     "toast-fail": "ansired",
     "pet": "",
@@ -212,7 +213,7 @@ class ChatUI:
     ACTIVITY_ROWS = 1      # activity is rendered inside the fixed footer row
     TODO_WIDTH = 38        # fixed top-right todo panel width on wide screens
     TODO_MAX_ROWS = 10
-    COMPOSER_ROWS = 3      # floor of the composer: top border, one input row, bottom border
+    COMPOSER_ROWS = 2      # floor of the composer: a breathing gap, one input row
     COMPOSER_MAX_ROWS = 6  # the composer's ceiling; beyond this it scrolls inside
     FOOTER_ROWS = 1        # the status strip is exactly one row, always
     ACTIVITY_MAX = 96      # prevent provider/tool text from flooding the chrome
@@ -399,7 +400,9 @@ class ChatUI:
         return max(1, min(self.COMPOSER_MAX_ROWS, rows or 1))
 
     def composer_frame_rows(self) -> int:
-        """The composer block's natural height: content plus its borders.
+        """The composer block's natural height: a breathing gap plus the
+        input's own rows. No borders -- the input is a bare caret line, the
+        way a coding-agent prompt is, not a box.
 
         In a very short terminal the furniture must still fit. The input
         control is capped to the rows left after the header, footer and one
@@ -407,8 +410,8 @@ class ChatUI:
         than showing fewer composer lines.
         """
         _, rows = self.size()
-        available = max(1, rows - self.HEADER_ROWS - self.FOOTER_ROWS - 1 - 2)
-        return min(self.composer_content_rows(), available) + 2
+        available = max(1, rows - self.HEADER_ROWS - self.FOOTER_ROWS - 2)
+        return min(self.composer_content_rows(), available) + 1
 
     def _composer_line_prefix(self, *_):
         return [("class:prompt", self._composer_prefix())]
@@ -743,16 +746,6 @@ class ChatUI:
             text = f"{text}   {marker}" if text else marker
         return ANSI(text)
 
-    def _edge(self, top: bool):
-        def render():
-            width, _ = self.size()
-            if self._unicode:
-                left, right, bar = ("╭", "╮", "─") if top else ("╰", "╯", "─")
-            else:
-                left, right, bar = ("+", "+", "-")
-            return [(f"class:edge", left + bar * max(0, width - 2) + right)]
-        return render
-
     def _build(self) -> Application:
         transcript = Window(
             content=FormattedTextControl(self._transcript_fragments,
@@ -785,15 +778,14 @@ class ChatUI:
             get_line_prefix=self._composer_line_prefix,
         )
         # Natural height, not a fixed one: the frame is exactly its content
-        # (borders plus whatever the input needs this frame), so it can
-        # neither collapse the input into one row nor swell into the blank
-        # box that a max > preferred dimension invites the allocator to fill.
+        # (a breathing gap plus whatever the input needs this frame), so it
+        # can neither collapse the input into one row nor swell into the
+        # blank box that a max > preferred dimension invites the allocator
+        # to fill. The gap keeps the caret from pressing against the last
+        # transcript line -- the spacing a coding-agent prompt has.
         composer_frame = HSplit([
-            Window(content=FormattedTextControl(self._edge(True)), height=1,
-                   dont_extend_height=True),
+            Window(height=1, dont_extend_height=True),
             composer,
-            Window(content=FormattedTextControl(self._edge(False)), height=1,
-                   dont_extend_height=True),
         ], height=lambda: Dimension.exact(self.composer_frame_rows()))
         header = FloatContainer(
             content=Window(content=FormattedTextControl(self._header_fragments),
@@ -865,10 +857,18 @@ class ChatUI:
 
     def _composer_prefix(self) -> str:
         """What sits to the left of the cursor: the usual caret, or the
-        question currently waiting for an answer."""
+        question currently waiting for an answer.
+
+        A bare caret (the coding-agent shape) rather than a boxed prompt;
+        the ASCII fallback is a plain ``>`` so dumb terminals still read
+        it. The prompt style class is themed, so /theme recolours it.
+        """
         if self.asking or self.typing:
-            return f"│ {self.question} "
-        return "│ > "
+            return f"{self._caret()} {self.question} "
+        return self._caret() + " "
+
+    def _caret(self) -> str:
+        return "❯" if self._unicode else ">"
 
     def _accept(self, buff: Buffer) -> bool:
         text = buff.text

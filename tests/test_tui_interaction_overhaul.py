@@ -39,7 +39,7 @@ def test_long_and_multiline_input_keep_a_bounded_natural_frame():
     chat = ChatUI(status=lambda: "", width=80)
     for text in ("", "one", "one\ntwo", "\n".join(str(i) for i in range(50)), "x" * 1000):
         chat.buffer.text = text
-        assert 3 <= chat.composer_frame_rows() <= chat.COMPOSER_MAX_ROWS + 2
+        assert 2 <= chat.composer_frame_rows() <= chat.COMPOSER_MAX_ROWS + 1
 
 
 def test_end_returns_to_following_and_refocus_is_idempotent():

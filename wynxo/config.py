@@ -99,10 +99,6 @@ class Config(Schema):
                               "with the conversation above it, the way a chat "
                               "application does, instead of a prompt that "
                               "scrolls away.", default=True)
-    fullscreen = Field(bool, "Draw on the terminal's alternate screen, the way "
-                             "vim and less do. Your shell is restored exactly on "
-                             "exit, at the cost of no scrollback during the "
-                             "session.", default=False)
     log = Field(bool, "Write a session transcript for debugging.", default=True)
     voice = Field(str, "How the agent talks: plain, warm, mentor or blunt.",
                   default="plain", choices=("plain", "warm", "mentor", "blunt", "kawaii"))

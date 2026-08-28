@@ -846,7 +846,7 @@ class TestReadingALineInsideTheApp:
             await asyncio.wait_for(pending, 1)
 
         asyncio.run(go())
-        assert chat._composer_prefix() == "│ > "
+        assert chat._composer_prefix() == "❯ "
         assert chat.buffer.text == ""
 
     def test_what_you_type_is_not_sent_as_a_message(self, chat):
@@ -1105,7 +1105,7 @@ class TestAskingInsideTheRunningApp:
             await asyncio.wait_for(pending, 1)
 
         asyncio.run(go())
-        assert chat._composer_prefix() == "│ > "
+        assert chat._composer_prefix() == "❯ "
 
     def test_a_typed_word_answers_too(self, chat):
         async def go():
