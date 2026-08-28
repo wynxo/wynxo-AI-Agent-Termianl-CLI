@@ -163,16 +163,37 @@ def normalise_url(raw: str) -> str:
     if not v:
         return DEFAULT_ENDPOINT
     if not v.startswith(("http://", "https://")):
+        # Brackets are required when an IPv6 literal appears in a URL. People
+        # normally type ``::1`` rather than the URL spelling ``[::1]``.
+        if v.count(":") >= 2 and not v.startswith("["):
+            v = f"[{v}]"
         v = "http://" + v
     for suffix in ("/v1", "/api"):
         if v.endswith(suffix):
             v = v[: -len(suffix)]
+
+    # ``0.0.0.0`` and ``::`` mean "listen on every interface" to a server;
+    # they are not destinations a client can connect to. OLLAMA_HOST is used
+    # for both jobs, so accepting its bind-address form keeps a local Ollama
+    # installation usable without requiring users to maintain a second
+    # environment variable for clients.
+    scheme, rest = v.split("://", 1)
+    authority, slash, tail = rest.partition("/")
+    if authority == "0.0.0.0" or authority.startswith("0.0.0.0:"):
+        authority = "127.0.0.1" + authority[len("0.0.0.0"):]
+    elif authority == "[::]" or authority.startswith("[::]:"):
+        authority = "[::1]" + authority[len("[::]"):]
+    v = f"{scheme}://{authority}" + (f"/{tail}" if slash else "")
     # Bare http host with no port: assume Ollama's default rather than :80.
     # https is left alone -- that shape means a reverse proxy on 443, not a
     # directly exposed Ollama.
     if v.startswith("http://"):
         host = v[len("http://"):].split("/", 1)[0]
-        has_port = "]" in host if host.startswith("[") else ":" in host
+        if host.startswith("["):
+            closing = host.find("]")
+            has_port = closing >= 0 and host[closing + 1:].startswith(":")
+        else:
+            has_port = ":" in host
         if not has_port:
             v = v.replace(host, f"{host}:11434", 1)
     return v.rstrip("/")
