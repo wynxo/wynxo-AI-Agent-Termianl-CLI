@@ -9,6 +9,7 @@ from typing import NamedTuple
 
 from ..schema import Field, Schema
 from ..session import estimate_tokens
+from ..editing import diff_stats, replacement_ratio
 from .base import Tool, ToolResult
 
 MAX_READ_BYTES = 400_000
@@ -301,21 +302,26 @@ class WriteFile(Tool):
 
         n = len(args.content.splitlines())
         verb = "updated" if existed else "created"
+        diff = make_diff(before, args.content, rel) if existed else make_diff("", args.content, rel)
+        additions = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
+        deletions = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
         return ToolResult.success(
             f"{verb} {rel} ({n} lines){note}",
-            display=make_diff(before, args.content, rel) if existed else "",
-            path=rel,
-            created=not existed,
+            display=diff,
+            path=rel, changed=before != args.content,
+            created=not existed, additions=additions, deletions=deletions,
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         )
 
 
 class EditInput(Schema):
     path = Field(str, "File path, relative to the project root.")
     expected_hash = Field(str, "Optional SHA-256 of the file as last read; rejects external drift.", default="")
-    old_text = Field(str, "Exact text to replace, including indentation. Must appear "
-                          "in the file exactly once unless replace_all is true.")
+    old_text = Field(str, "Exact text to replace, including indentation. Optional for line-range edits.", default="")
     new_text = Field(str, "Replacement text.")
     replace_all = Field(bool, "Replace every occurrence.", default=False)
+    start_line = Field(int, "Optional one-based start line for a range replacement.", default=0, ge=0)
+    end_line = Field(int, "Optional one-based inclusive end line for a range replacement.", default=0, ge=0)
 
 
 class EditFile(Tool):
@@ -337,16 +343,6 @@ class EditFile(Tool):
                 "in it, then edit one of the files.")
         if not path.exists():
             return ToolResult.failure(f"{rel} does not exist. Use write_file to create it.")
-        if args.old_text == args.new_text:
-            return ToolResult.failure("old_text and new_text are identical; nothing to do.")
-        if not args.old_text:
-            # Empty matches between every character, so the count that would
-            # otherwise be reported ("appears 7 times") describes nothing and
-            # tells the model nothing about what to do differently.
-            return ToolResult.failure(
-                "old_text is empty. Give the exact text to replace, or use "
-                "write_file if you mean to create or replace the whole file.")
-
         if _looks_binary(path):
             return ToolResult.failure(
                 f"{rel} is a binary file. Editing it as text would corrupt it.")
@@ -361,6 +357,37 @@ class EditFile(Tool):
                     "Re-read the file before editing; no changes were applied.",
                     stale=True, expected_hash=args.expected_hash, actual_hash=actual,
                 )
+
+        if args.start_line or args.end_line:
+            if args.old_text or args.replace_all:
+                return ToolResult.failure("Use either exact old_text replacement or start_line/end_line, not both.")
+            if not args.start_line or not args.end_line or args.end_line < args.start_line:
+                return ToolResult.failure("A line edit requires valid one-based start_line and end_line.")
+            lines = before.splitlines(keepends=True)
+            if args.start_line > len(lines) or args.end_line > len(lines):
+                return ToolResult.failure(f"Line range {args.start_line}-{args.end_line} is outside {rel} ({len(lines)} lines).")
+            old_text = "".join(lines[args.start_line - 1:args.end_line])
+            after = "".join(lines[:args.start_line - 1]) + args.new_text + "".join(lines[args.end_line:])
+            note = _write_back(path, after, source)
+            diff = make_diff(before, after, rel)
+            stats = diff_stats(diff)
+            return ToolResult.success(
+                f"edited {rel} lines {args.start_line}-{args.end_line}{note}",
+                display=diff, path=rel, changed=stats.changed,
+                additions=stats.additions, deletions=stats.deletions,
+                large_rewrite=replacement_ratio(before, after) > 0.5,
+                sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+        if args.old_text == args.new_text:
+            return ToolResult.failure("old_text and new_text are identical; nothing to do.")
+        if not args.old_text:
+            # Empty matches between every character, so the count that would
+            # otherwise be reported ("appears 7 times") describes nothing and
+            # tells the model nothing about what to do differently.
+            return ToolResult.failure(
+                "old_text is empty. Give the exact text to replace, or use "
+                "write_file if you mean to create or replace the whole file.")
+
         count = before.count(args.old_text)
 
         if count == 0:
@@ -379,12 +406,15 @@ class EditFile(Tool):
             else before.replace(args.old_text, args.new_text, 1)
         )
         note = _write_back(path, after, source)
-
+        diff = make_diff(before, after, rel)
+        stats = diff_stats(diff)
         return ToolResult.success(
             f"edited {rel} "
             f"({count if args.replace_all else 1} replacement(s)){note}",
-            display=make_diff(before, after, rel),
-            path=rel,
+            display=diff,
+            path=rel, changed=stats.changed,
+            additions=stats.additions, deletions=stats.deletions,
+            large_rewrite=replacement_ratio(before, after) > 0.5,
             sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         )
 
@@ -545,10 +575,13 @@ class MultiEdit(Tool):
                     else text.replace(edit.old_text, edit.new_text, 1))
 
         note = _write_back(path, text, source)
-
+        diff = make_diff(before, text, rel)
+        additions = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
+        deletions = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
         return ToolResult.success(
             f"applied {len(args.edits)} edit(s) to {rel}{note}",
-            display=make_diff(before, text, rel),
-            path=rel,
-            edits=len(args.edits),
+            display=diff,
+            path=rel, changed=before != text,
+            edits=len(args.edits), additions=additions, deletions=deletions,
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         )

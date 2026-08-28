@@ -41,6 +41,8 @@ class TaskStateMachine:
         self.successes: list[str] = []
         self.blockers: list[str] = []
         self.action_fingerprints: list[str] = []
+        self.inspected_files: list[str] = []
+        self.verification: list[str] = []
 
     def begin(self, objective: str) -> None:
         self.reset()
@@ -70,6 +72,12 @@ class TaskStateMachine:
         target = self.changed_files if changed else self.relevant_files
         if path and path not in target:
             target.append(path)
+        if path and not changed and path not in self.inspected_files:
+            self.inspected_files.append(path)
+
+    def record_verification(self, check: str) -> None:
+        if check and check not in self.verification:
+            self.verification.append(check)
 
     def transition(self, target: TaskState) -> bool:
         if target is self.state:
@@ -89,3 +97,5 @@ class TaskStateMachine:
         self.successes = []
         self.blockers = []
         self.action_fingerprints = []
+        self.inspected_files = []
+        self.verification = []

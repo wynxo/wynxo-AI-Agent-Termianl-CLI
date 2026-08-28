@@ -662,6 +662,8 @@ class Agent:
             call.name, self._trim_output(result.output), call.call_id)
         if result.ok:
             self.task_state.record_success(f"{call.name}: {result.display or 'completed'}")
+            if call.name == "read_file" and path:
+                self.task_state.add_file(str(path), changed=False)
         else:
             self.task_state.record_failure(f"{call.name}: {result.error or result.display or 'failed'}")
 
@@ -837,6 +839,7 @@ class Agent:
 
         if result.ok:
             self.task_state.record_success(f"tests passed: {runner.command}")
+            self.task_state.record_verification(runner.command)
             await self.cb.on_tool_result(
                 "tests", True, TESTS_PASSED_NOTE.format(command=runner.command), "")
             return 0
