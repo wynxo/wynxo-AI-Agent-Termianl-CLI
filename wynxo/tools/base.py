@@ -174,6 +174,8 @@ class Tool(ABC):
         candidate = Path(raw).expanduser()
         full = candidate if candidate.is_absolute() else (self.workspace / candidate)
         full = Path(os.path.normpath(str(full)))
+        if not raw or not str(raw).strip():
+            raise ValueError("Path must not be empty.")
         if not self.boundary.contains(full):
             raise PermissionError(self.boundary.reject(raw)) from None
         return full

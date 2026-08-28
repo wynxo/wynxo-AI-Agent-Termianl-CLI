@@ -216,6 +216,9 @@ class ChatUI:
         self.default = ""
         """The answer a bare enter takes, where the question names one."""
 
+        # Keep the composer single-line semantically, but render it as a
+        # wrapped viewport. prompt_toolkit then scrolls horizontally/vertically
+        # to the cursor instead of letting long input vanish behind the edge.
         self.buffer = Buffer(multiline=False, completer=completer,
                              complete_while_typing=True,
                              accept_handler=self._accept)
@@ -296,10 +299,13 @@ class ChatUI:
         # is where a chat window puts it, and it keeps the newest line in the
         # same place on screen whether there are three lines or three hundred.
         if picker := self._picker_lines(width):
-            # Sits at the foot of the conversation, which is where the eye
-            # already is and where the answer is about to be typed.
-            lines = lines[len(picker):] if len(lines) > len(picker) else []
-            lines = lines + picker
+            # Picker rows are rendered in the transcript pane, but must never
+            # push the newest conversation rows out of the pane. Reserve their
+            # rows from the visible slice instead of appending and truncating
+            # the combined list (which used to hide the newest messages).
+            available = max(0, rows - len(picker))
+            lines = self.transcript.visible(available, self.scroll)
+            lines = [""] * max(0, available - len(lines)) + lines + picker
         if len(lines) < rows:
             lines = [""] * (rows - len(lines)) + lines
         return ANSI("\n".join(lines[-rows:]))
@@ -323,8 +329,16 @@ class ChatUI:
         text = self._status()
         if self.scroll > 0:
             marker = "  ^ scrolled back -- End to follow again"
-            text = f"{text}{marker}" if text else marker.strip()
-        self._status_lines = text.count("\n") + 1 if text else 1
+            text = f"{text}\n{marker}" if text else marker.strip()
+        # Keep the status content bounded before prompt_toolkit lays out the
+        # screen. Otherwise a verbose status/plan can consume the entire
+        # viewport and leave the composer no room to render.
+        _, rows = self.size()
+        room = max(1, rows - self.HEADER_ROWS - self.COMPOSER_ROWS - 1)
+        status_lines = text.splitlines() if text else [""]
+        status_lines = status_lines[-min(self.MAX_STATUS_ROWS, room):]
+        text = "\n".join(status_lines)
+        self._status_lines = len(status_lines)
         return ANSI(text)
 
     def _edge(self, top: bool):
@@ -349,12 +363,24 @@ class ChatUI:
                                          focusable=False),
             height=lambda: self.status_rows(),
         )
+        composer_control = BufferControl(buffer=self.buffer,
+                                          input_processors=[])
         composer = Window(
-            content=BufferControl(buffer=self.buffer,
-                                  input_processors=[]),
+            content=composer_control,
             height=1,
+            wrap_lines=True,
+            dont_extend_height=False,
             get_line_prefix=lambda *_: [("class:prompt", self._composer_prefix())],
         )
+        # The composer is a fixed bottom block. A one-line Window lets long
+        # input disappear past the right edge; a three-line block with a
+        # scrolling BufferControl keeps the caret and the newest text visible
+        # while leaving the bottom border immovable.
+        composer_frame = HSplit([
+            Window(content=FormattedTextControl(self._edge(True)), height=1),
+            composer,
+            Window(content=FormattedTextControl(self._edge(False)), height=1),
+        ])
         body = HSplit([
             Window(content=FormattedTextControl(self._header_fragments),
                    height=1),
@@ -362,9 +388,7 @@ class ChatUI:
                    height=1),
             transcript,
             status,
-            Window(content=FormattedTextControl(self._edge(True)), height=1),
-            composer,
-            Window(content=FormattedTextControl(self._edge(False)), height=1),
+            composer_frame,
         ])
 
         # The completer had nowhere to draw. A Buffer with a completer set
@@ -557,6 +581,8 @@ class ChatUI:
 
         Returns the chosen value, or None if the user pressed escape.
         """
+        if not options:
+            return None
         self.picker = {
             "title": title,
             "options": options,

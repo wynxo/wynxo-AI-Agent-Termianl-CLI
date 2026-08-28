@@ -510,9 +510,11 @@ class TerminalCallbacks(Callbacks):
         try:
             return await self._ask(name, summary, preview)
         finally:
-            # Hand the terminal back so the rest of the turn keeps its status
-            # line and its live keys.
-            self._resume_live()
+            # The classic prompt temporarily releases its reader. The chat
+            # layout never did, so restarting a watcher there would create a
+            # second stdin reader and steal composer keystrokes.
+            if self.chat is None:
+                self._resume_live()
 
     def _suspend_live(self) -> None:
         """Release the terminal before prompt_toolkit reads a line."""
@@ -528,7 +530,8 @@ class TerminalCallbacks(Callbacks):
             self.watcher.start()
 
     async def _ask(self, name: str, summary: str, preview: str) -> Decision:
-        self._suspend_live()
+        if self.chat is None:
+            self._suspend_live()
         self.ui.console.print()
         verb = {
             "write_file": "write to",
@@ -540,10 +543,10 @@ class TerminalCallbacks(Callbacks):
             self.ui.diff(preview) if preview.lstrip().startswith(("---", "+", "-")) else self.ui.code(preview)
 
         if self.chat is not None:
-            # Asked through the composer that is already on screen. Starting
-            # a second prompt_toolkit application inside the running one
-            # leaves the layout half-drawn -- border gone, question typed
-            # over the input -- which is what it did before this branch.
+            # The chat application already owns stdin. Do not stop/restart a
+            # second reader around this question: doing so briefly releases
+            # the pinned composer and loses type-ahead. The question is shown
+            # in that same composer and the layout remains live.
             self.chat.flush()
             answer = await self.chat.ask(
                 "[y] yes  [a] always  [n] no  [q] stop:",

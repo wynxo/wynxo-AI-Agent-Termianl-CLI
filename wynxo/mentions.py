@@ -114,7 +114,7 @@ def expand(text: str, workspace: Path, boundary=None,
         full = candidate if candidate.is_absolute() else (workspace / candidate)
         try:
             full = full.resolve()
-        except OSError as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             problems.append(f"@{raw}: {exc}")
             continue
 
@@ -136,7 +136,7 @@ def expand(text: str, workspace: Path, boundary=None,
                     f"({full.stat().st_size // 1024}KB); ask me to read part of it")
                 continue
             body = full.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             problems.append(f"@{raw}: {exc}")
             continue
 
