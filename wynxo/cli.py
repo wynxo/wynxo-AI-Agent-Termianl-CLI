@@ -57,7 +57,7 @@ from .ui import (ACCENT, BAR_ACCENT, MUTED, ActivityBar, CodeStreamer,
 _ACTIVITY = {
     "read_file": "reading", "write_file": "writing file", "edit_file": "editing",
     "list_dir": "listing", "glob": "finding", "grep": "searching",
-    "shell": "running", "todo_write": "planning",
+    "shell": "running", "todo_write": "planning", "open_application": "opening",
 }
 _LANGUAGE = {"read_file": "python", "shell": "console"}
 
@@ -3112,7 +3112,7 @@ class Repl:
         if action in ("add", "remember") and rest:
             scope = "user" if rest.startswith("user:") else "project"
             note = rest.split(":", 1)[1].strip() if rest.startswith("user:") else rest
-            added, message = memory.remember(note, scope)
+            added, message = memory.remember(note, scope, explicit=True)
             self.ui.success(f"remembered: {message}") if added else self.ui.info(message)
             self.agent.refresh_system_prompt()
             return True

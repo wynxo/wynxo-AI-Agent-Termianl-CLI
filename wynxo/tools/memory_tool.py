@@ -26,6 +26,8 @@ class Remember(Tool):
         "Write something down so you still know it in a later session. Use it "
         "for durable facts: build and test commands, conventions, decisions and "
         "why, things that bit you, and preferences the user states. "
+        "User-scoped memory is never written by this tool: only an explicit "
+        "`/memory add user: ...` request may persist personal facts. "
         "Do not use it for what is already in the files, for anything you are "
         "unsure of, or for the details of the current task. "
         "Set forget=true to remove an entry that has stopped being true."
@@ -39,13 +41,14 @@ class Remember(Tool):
                  shield=None):
         super().__init__(workspace, boundary, shield)
         self.memory = memory or Memory(workspace)
+        self.memory._agent_write = True
 
     async def run(self, args: RememberInput) -> ToolResult:
         if args.forget:
             count, message = self.memory.forget(args.note, args.scope)
             return ToolResult.success(message, display=message, dropped=count)
 
-        added, message = self.memory.remember(args.note, args.scope)
+        added, message = self.memory.remember(args.note, args.scope, explicit=False)
         if not added:
             # Not an error: the model tried to record something already known,
             # and telling it so is more useful than a failure.

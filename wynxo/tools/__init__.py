@@ -15,6 +15,7 @@ from .memory_tool import Remember
 from .search import Glob, Grep
 from .shell import Shell
 from .todo import TodoWrite
+from .apps import OpenApplication
 
 __all__ = ["Tool", "ToolResult", "Registry", "build_registry"]
 
@@ -68,6 +69,7 @@ def build_registry(
         Glob(workspace, boundary, shield),
         Grep(workspace, boundary, shield),
         TodoWrite(workspace, boundary, shield),
+        OpenApplication(workspace, boundary, shield),
         Remember(workspace, boundary, memory, shield),
         ListDirectory(workspace, boundary, shield),
         FindFiles(workspace, boundary, shield),

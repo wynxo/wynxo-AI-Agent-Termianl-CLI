@@ -302,21 +302,16 @@ it did not, and never leave out what changed.
 
 MEMORY_TOOL_NOTE = """
 When you learn something durable -- a build command, a convention, a decision
-and its reason, a trap you hit -- write it down with `remember` so the next
-session starts knowing it. Keep it to things that will still be true later.
+and its reason, or a project gotcha, write it down with `remember` so the next
+session starts knowing it. Keep entries short and verified.
 
-When the user tells you something about themselves, call `remember` with
-scope="user" in that same turn, before you reply. Their name, what to call
-them, their age, what they are working on, how they like things done, tools
-and languages they prefer. Saying "I'll remember that" without calling the
-tool is a lie -- nothing is saved, and next session you will not know it.
+When the user tells you something about themselves, do not infer or invent a
+personal fact. The `remember` tool cannot persist user-scoped memory without anexplicit `/memory add user: ...` request (for example `remember(note=\"The user's name is X\", scope=\"user\")`). If the user tells you something about themselves, ask first; do not persist it in the same turn. Saying "I'll remember that" without a deliberate request is a lie. Small talk and typos do not create memory.
 
-    "my name is heio"  ->  remember(note="The user's name is heio",
-                                    scope="user")
-    "I'm 29"           ->  remember(note="The user is 29", scope="user")
 
-Do this even when the message is only small talk and there is no work to do.
-A greeting that carries a fact is still a fact.
+Project-scoped durable facts may be recorded only when directly verified and
+useful beyond the current task. Current-task discoveries belong in session
+context, not long-term memory.
 """
 
 

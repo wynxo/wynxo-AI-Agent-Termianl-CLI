@@ -190,6 +190,7 @@ class Memory:
         self.project = MemoryFile(
             path=workspace / PROJECT_DIR / PROJECT_FILE,
             header=PROJECT_HEADER, limit=MAX_PROJECT_CHARS)
+        self._agent_write = False
         self.user = MemoryFile(
             path=(user_dir or config_dir()) / USER_FILE,
             header=USER_HEADER, limit=MAX_USER_CHARS)
@@ -198,7 +199,15 @@ class Memory:
         return self.user if scope.strip().lower() in ("user", "me", "global") \
             else self.project
 
-    def remember(self, note: str, scope: str = "project") -> tuple[bool, str]:
+    def remember(self, note: str, scope: str = "project", explicit: bool = False) -> tuple[bool, str]:
+        """Persist only explicitly authorised memories.
+
+        Model tool calls are never sufficient evidence for personal facts. The
+        CLI passes explicit=True for `/memory add`; project notes from the
+        agent remain allowed only for durable repository facts.
+        """
+        if scope.strip().lower() in ("user", "me", "global") and not explicit and self._agent_write:
+            return False, "User memory requires an explicit user request via /memory add."
         return self.file_for(scope).append(note)
 
     def forget(self, pattern: str, scope: str = "project") -> tuple[int, str]:
