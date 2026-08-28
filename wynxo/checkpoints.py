@@ -45,21 +45,22 @@ class Checkpoints:
                 raw = path.read_bytes()
                 mode = stat.S_IMODE(path.stat().st_mode)
                 # Keep a decoded representation for existing callers and UI
-                # diffs. UTF-8 with surrogateescape is lossless for bytes that
-                # are not valid UTF-8, while BOM-aware decodes make common
-                # UTF-16/UTF-8-sig project files readable in review output.
-                if raw.startswith((b"\\xff\\xfe", b"\\xfe\\xff")):
+                # diffs, but treat raw bytes as the source of truth for undo.
+                if raw.startswith((bytes((0xFF, 0xFE)), bytes((0xFE, 0xFF)))):
                     encoding = "utf-16"
-                elif raw.startswith(b"\\xef\\xbb\\xbf"):
+                elif raw.startswith(bytes((0xEF, 0xBB, 0xBF))):
                     encoding = "utf-8-sig"
                 else:
                     encoding = "utf-8"
-                content = raw.decode(encoding, errors="surrogateescape")
+                try:
+                    content = raw.decode(encoding, errors="surrogateescape")
+                except UnicodeError:
+                    content = raw.decode("utf-8", errors="replace")
             else:
                 raw = None
                 mode = None
                 content = None
-        except (OSError, UnicodeError):
+        except OSError:
             return
 
         self._stack.append(
