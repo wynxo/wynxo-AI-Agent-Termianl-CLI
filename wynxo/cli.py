@@ -1239,6 +1239,16 @@ class Repl:
         elif result.content:
             self.ui.console.print()
 
+        # The completion report is built from recorded task state -- changed
+        # files, checks that ran, failures that remain -- never from the
+        # model's prose. A "fixed" claim cannot outrun the evidence. Pure
+        # conversation has no evidence and gets no report.
+        if not result.interrupted:
+            report = self.agent.task_state.completion_report()
+            if report:
+                self.ui.console.print()
+                self.ui.console.print(Text(report, style="dim"))
+
         # No stats line here: the pinned bar under the input already shows
         # tokens, rate and context, and printing them again above the next
         # prompt was the same numbers twice, scrolling away from where you

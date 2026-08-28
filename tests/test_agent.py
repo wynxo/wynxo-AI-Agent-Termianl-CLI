@@ -4,6 +4,8 @@ These are the tests that matter: they exercise the real loop, real tools and
 real files, with only the model replaced. If these pass, the agent works.
 """
 
+import asyncio
+import dataclasses
 import json
 
 import httpx
@@ -1144,3 +1146,109 @@ class TestRepeatedActionsReachTheModel:
         assert not any("already performed" in m.get("content", "")
                        for m in tool_msgs), tool_msgs
         await agent.client.aclose()
+
+
+class TestNoProgressRecovery:
+    """The hard repeat cap: the same action repeated with no progress event
+    between repeats trips a structured recovery prompt once, then stops."""
+
+    def _shell_call(self, command="echo hi"):
+        return {"function": {"name": "shell",
+                             "arguments": {"command": command}}}
+
+    def test_recovery_prompt_then_strategy_change_completes(self, tmp_path):
+        agent, fake, cb = make_agent(tmp_path, [
+            {"tool_calls": [self._shell_call()]},     # fresh
+            {"tool_calls": [self._shell_call()]},     # repeat 1
+            {"tool_calls": [self._shell_call()]},     # repeat 2
+            {"tool_calls": [self._shell_call()]},     # repeat 3 -> cap, recovery
+            {"tool_calls": [self._shell_call("echo changed-strategy")]},
+            {"content": "Done."},
+        ])
+        agent.policy = dataclasses.replace(agent.policy, max_iterations=20)
+        result = asyncio.run(agent.run("Inspect the launcher"))
+        assert result.content == "Done."
+        assert result.recovered, "the cap must have tripped once"
+        # The recovery block reached the model as a user message.
+        recovery = next((m.get("content", "") for m in fake.requests[-1]["messages"]
+                         if m.get("role") == "user" and "RECOVERY" in str(m.get("content", ""))), "")
+        assert "RECOVERY" in recovery
+        assert "Inspect the launcher" in recovery
+        # The 4th identical call was never executed: only 3 ran.
+        tool_msgs = [m for m in fake.requests[-1]["messages"]
+                     if m.get("role") == "tool"]
+        assert len(tool_msgs) == 4, tool_msgs   # 3 blocked-by-cap shell + strategy change
+        assert any("stopping" in w or "Repeated" in w for w in cb.warnings)
+        assert agent.task_state.state.name == "COMPLETED"
+        asyncio.run(agent.client.aclose())
+
+    def test_repeat_cap_stops_the_loop_cleanly(self, tmp_path):
+        agent, fake, cb = make_agent(tmp_path, [
+            {"tool_calls": [self._shell_call()]} for _ in range(8)
+        ])
+        agent.policy = dataclasses.replace(agent.policy, max_iterations=20)
+        result = asyncio.run(agent.run("Inspect the launcher"))
+        assert result.content.startswith("(stopped:")
+        assert "repeated the same action" in result.content
+        assert result.recovered, "the first cap trip inserted recovery"
+        # 3 executed per batch; the 4th of each batch was blocked.
+        tool_msgs = [m for m in fake.requests[-1]["messages"]
+                     if m.get("role") == "tool"]
+        assert len(tool_msgs) == 6, tool_msgs
+        assert any("stopping the tool loop" in w for w in cb.warnings)
+        asyncio.run(agent.client.aclose())
+
+    def test_progress_between_repeats_never_trips_the_cap(self, tmp_path):
+        """A re-read after an edit is verification, not a stuck loop."""
+        (tmp_path / "a.txt").write_text("one\n")
+        agent, fake, _ = make_agent(tmp_path, [
+            {"tool_calls": [{"function": {"name": "read_file",
+                                          "arguments": {"path": "a.txt"}}}]},
+            {"tool_calls": [{"function": {"name": "edit_file",
+                                          "arguments": {"path": "a.txt",
+                                                        "old_text": "one",
+                                                        "new_text": "two"}}}]},
+            {"tool_calls": [{"function": {"name": "read_file",
+                                          "arguments": {"path": "a.txt"}}}]},
+            {"tool_calls": [{"function": {"name": "read_file",
+                                          "arguments": {"path": "a.txt"}}}]},
+            {"content": "Done."},
+        ])
+        result = asyncio.run(agent.run("Update a.txt"))
+        assert result.content == "Done."
+        assert not result.recovered, "progress must reset the repeat counts"
+        asyncio.run(agent.client.aclose())
+
+
+class TestCompletionReportFromState:
+    """The final report is built from recorded task state, never model
+    prose: changed files, checks that ran, failures that remain."""
+
+    def test_report_reflects_an_actual_edit(self, tmp_path):
+        (tmp_path / "calc.py").write_text(
+            "def add(a, b):\n    return a - b\n", newline="\n")
+        agent, fake, _ = make_agent(tmp_path, [
+            {"tool_calls": [{"function": {"name": "edit_file",
+                                          "arguments": {"path": "calc.py",
+                                                        "old_text": "return a - b",
+                                                        "new_text": "return a + b"}}}]},
+            {"content": "Fixed."},
+        ])
+        agent.policy = dataclasses.replace(agent.policy, max_iterations=20)
+        result = asyncio.run(agent.run("Fix the add function"))
+        assert result.content == "Fixed."
+        report = agent.task_state.completion_report()
+        assert report is not None
+        assert "calc.py" in report
+        assert "✓ completed" in report
+        # No verification ran (no test runner in the scratch project), so no
+        # verification line -- and no invented claims.
+        assert "verification" not in report
+        asyncio.run(agent.client.aclose())
+
+    def test_small_talk_gets_no_report(self, tmp_path):
+        agent, fake, _ = make_agent(tmp_path, [{"content": "hey!"}])
+        result = asyncio.run(agent.run("hello"))
+        assert result.content == "hey!"
+        assert agent.task_state.completion_report() is None
+        asyncio.run(agent.client.aclose())

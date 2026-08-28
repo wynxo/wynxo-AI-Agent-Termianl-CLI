@@ -43,19 +43,36 @@ class TaskStateMachine:
         self.action_fingerprints: list[str] = []
         self.inspected_files: list[str] = []
         self.verification: list[str] = []
+        self._repeat_counts: dict[str, int] = {}
+        """Per-action repeat counts since the last progress event."""
 
     def begin(self, objective: str) -> None:
         self.reset()
         self.objective = objective.strip()
         self.transition(TaskState.THINKING)
 
-    def record_action(self, fingerprint: str) -> bool:
-        """Record an action and reject recent repeats without new evidence."""
-        if fingerprint in self.action_fingerprints[-3:]:
-            self.blockers.append(f"Repeated action: {fingerprint}")
-            return False
+    def record_action(self, fingerprint: str) -> int:
+        """Record an action; return how many times it has been repeated since
+        the last progress event (0 for a fresh action, 1 for its first
+        repeat, and so on).
+
+        mark_progress() resets the counters, so a legitimate re-read or
+        re-run after an edit or a passing check never counts against the
+        task -- only an action that keeps coming back with nothing changing
+        in between does. Repeats land in ``blockers`` for the recovery
+        prompt the agent can surface to the model.
+        """
         self.action_fingerprints.append(fingerprint)
-        return True
+        count = self._repeat_counts.get(fingerprint, 0) + 1
+        self._repeat_counts[fingerprint] = count
+        if count >= 2:
+            self.blockers.append(f"Repeated action: {fingerprint}")
+        return count - 1
+
+    def mark_progress(self) -> None:
+        """A step that measurably moved the task forward resets repeat
+        counts: an edit landed, a check passed, the plan changed."""
+        self._repeat_counts = {}
 
     def record_failure(self, failure: str) -> None:
         if failure and failure not in self.failures:
@@ -87,6 +104,78 @@ class TaskStateMachine:
         self.state = target
         return True
 
+    def recovery_block(self) -> str:
+        """A structured, model-visible description of why the task is stuck.
+
+        Built entirely from recorded state -- what was repeated, what has
+        failed, what the objective was, what has changed -- so the model
+        gets the same evidence the UI has, not a prose guess at it.
+        """
+        lines = [
+            "RECOVERY",
+            "",
+            "The task is not making progress. Recorded state:",
+        ]
+        if self.objective:
+            lines.append(f"  objective: {self.objective[:300]}")
+        blockers = self.blockers[-4:]
+        if blockers:
+            lines.append("  repeated actions:")
+            for blocker in blockers:
+                lines.append(f"    - {blocker}")
+        if self.failures:
+            lines.append("  failures:")
+            for failure in self.failures[-4:]:
+                lines.append(f"    - {failure[:200]}")
+        if self.changed_files:
+            lines.append("  changed files: " + ", ".join(self.changed_files[-6:]))
+        if self.root_cause:
+            lines.append(f"  root cause so far: {self.root_cause[:200]}")
+        lines.append("")
+        lines.append(
+            "Try a different strategy now: another way to inspect, another "
+            "hypothesis, or a narrower question. Do not repeat the actions "
+            "above."
+        )
+        return "\n".join(lines)
+
+    def completion_report(self) -> str | None:
+        """A compact evidence summary of a finished coding turn, or None
+        when there is nothing to report.
+
+        Pure conversation (small talk, a question) has no changed files, no
+        failures and no verification, so it gets no report. Coding turns
+        get exactly what the machine recorded -- never model prose -- so a
+        "fixed" claim cannot outrun the checks that ran.
+        """
+        changed = self.changed_files
+        verified = self.verification
+        # Blocking failures are the ones the completion gate cares about: a
+        # test or syntax run that failed at the end. A failed grep mid-
+        # investigation is normal exploration and must not flip the report
+        # to "partially completed".
+        blocking = [f for f in self.failures
+                    if f.startswith(("tests failed", "syntax check failed"))]
+        if not (changed or blocking or verified):
+            return None
+
+        out = []
+        if blocking:
+            out.append(f"⚠ partially completed · {len(blocking)} blocking failure(s)")
+        else:
+            out.append("✓ completed")
+        if changed:
+            out.append("  changed: " + ", ".join(changed[:8]))
+            if len(changed) > 8:
+                out[-1] += f" (+{len(changed) - 8} more)"
+        if verified:
+            out.append("  verification: " + "; ".join(verified[:4]))
+        if blocking:
+            out.append("  issues:")
+            for failure in blocking[:4]:
+                out.append(f"    ✕ {failure[:160]}")
+        return "\n".join(out)
+
     def reset(self) -> None:
         self.state = TaskState.IDLE
         self.objective = ""
@@ -99,3 +188,4 @@ class TaskStateMachine:
         self.action_fingerprints = []
         self.inspected_files = []
         self.verification = []
+        self._repeat_counts = {}

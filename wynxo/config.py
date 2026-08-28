@@ -116,6 +116,7 @@ class Config(Schema):
     max_tool_iterations = Field(int, "Maximum model/tool iterations per request.", default=40, ge=1, le=1000)
     max_tool_result_chars = Field(int, "Maximum tool-result characters retained in model context.", default=12000, ge=1000, le=200000)
     max_command_output_chars = Field(int, "Maximum command output characters retained.", default=30000, ge=1000, le=1000000)
+    max_action_repeats = Field(int, "Stop the tool loop after the same action repeats this many times without any progress event between repeats.", default=3, ge=1, le=50)
 
     # -- talker / coder ----------------------------------------------------
     talker = Field(str, "A small, fast model that does the talking while the "

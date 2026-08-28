@@ -188,6 +188,12 @@ class Interrupted(Exception):
     """The user pressed Ctrl-C during a turn."""
 
 
+class Stuck(Exception):
+    """The same action has repeated without any progress event between
+    repeats. Raised by the tool loop; _act() turns the first occurrence
+    into a model-visible recovery prompt and a second into a clean stop."""
+
+
 @dataclass
 class TurnResult:
     content: str
@@ -198,6 +204,9 @@ class TurnResult:
     interrupted: bool = False
     compacted: bool = False
     empty_retried: bool = False
+    recovered: bool = False
+    """The loop hit the no-progress repeat cap and gave the model a
+    structured recovery prompt before it kept going."""
     errors: list[str] = field(default_factory=list)
 
 
@@ -245,6 +254,9 @@ class Agent:
         self._failure_signatures: list[tuple] = []
         """Failure signatures from test runs, so the same failure twice in a
         task is flagged as no-progress instead of silently re-attempted."""
+        self._recovery_inserted = False
+        """The no-progress recovery prompt has been shown once this turn;
+        the next repeat-cap trip stops the loop instead of nudging again."""
         self.shield = Shield(workspace, enabled=config.protect_secrets)
         self.tools = registry or build_registry(
             workspace, allow_shell=config.allow_shell,
@@ -599,7 +611,15 @@ class Agent:
             return True
 
         summary = summarise_call(call.name, call.arguments, self.workspace)
-        repeated = not self.task_state.record_action(_fingerprint(call))
+        repeats = self.task_state.record_action(_fingerprint(call))
+        repeated = repeats >= 1
+        if repeats >= self.config.max_action_repeats:
+            # A hard limit, not another warning: the same action has come
+            # back this many times with no edit, passing check or plan
+            # change between repeats. _act() decides between a recovery
+            # prompt and a clean stop; the call itself is not executed.
+            raise Stuck(f"repeated the same action {repeats + 1} times "
+                        f"({summary}) with no progress in between")
         if repeated:
             await self.cb.on_warning(
                 f"Repeated tool action detected: {summary}. Reconsider the approach.")
@@ -644,6 +664,10 @@ class Agent:
             await self.cb.on_tool_start(call.name, summary, event=event)
         except TypeError:
             await self.cb.on_tool_start(call.name, summary)
+        # Progress means a file actually changed, not that a mutating-capable
+        # tool succeeded -- a shell echo is "may mutate", not progress. The
+        # checkpoint mark taken before this call tells us exactly that.
+        pre_call = self.checkpoints.mark()
         self._checkpoint(tool, call)
         # Long-running tools report as they go. Cleared afterwards so a
         # tool object reused for a later call cannot write into a line
@@ -683,6 +707,12 @@ class Agent:
             self.task_state.record_success(f"{call.name}: {result.display or 'completed'}")
             if call.name == "read_file" and path:
                 self.task_state.add_file(str(path), changed=False)
+            if call.name == "todo_write" or self.checkpoints.changes_since(pre_call):
+                # A file changed or the plan moved: measurable progress, so
+                # repeat counts reset. A re-read after that is a fresh
+                # action, not a stuck loop; a shell echo changes nothing and
+                # stays counted.
+                self.task_state.mark_progress()
         else:
             self.task_state.record_failure(f"{call.name}: {result.error or result.display or 'failed'}")
 
@@ -889,6 +919,9 @@ class Agent:
         if result.ok:
             self.task_state.record_success(f"tests passed: {runner.command}")
             self.task_state.record_verification(runner.command)
+            # A passing run is measurable progress: whatever the model does
+            # next starts from a clean repeat counter.
+            self.task_state.mark_progress()
             await self.cb.on_tool_result(
                 "tests", True, TESTS_PASSED_NOTE.format(command=runner.command), "")
             return 0
@@ -918,6 +951,7 @@ class Agent:
             shell.on_output = previous_output
         if result.ok:
             self.task_state.record_success("syntax check passed")
+            self.task_state.mark_progress()
             await self.cb.on_tool_result(
                 "tests", True, "syntax check passed (compileall)", "")
             return 0
@@ -1008,9 +1042,26 @@ class Agent:
                 return result
 
             result.tool_calls += len(turn.tool_calls)
-            if not await self._run_tool_calls(turn):
-                result.interrupted = True
-                result.content = turn.content
+            try:
+                if not await self._run_tool_calls(turn):
+                    result.interrupted = True
+                    result.content = turn.content
+                    return result
+            except Stuck as stuck:
+                if not self._recovery_inserted:
+                    # First trip: hand the model a structured recovery
+                    # block -- what repeated, what failed, the objective --
+                    # and let it change strategy once. The block is new
+                    # information, so repeat counts reset for a fair try.
+                    self._recovery_inserted = True
+                    result.recovered = True
+                    self.task_state.transition(TaskState.RECOVERING)
+                    self.task_state.mark_progress()
+                    self.session.add_user(self.task_state.recovery_block())
+                    continue
+                await self.cb.on_warning(
+                    f"{stuck}; stopping the tool loop.")
+                result.content = f"(stopped: {stuck})"
                 return result
 
         await self.cb.on_warning(
@@ -1127,6 +1178,7 @@ class Agent:
         # nothing new to break.
         self._turn_mark = self.checkpoints.mark()
         self._warned_over_window = False
+        self._recovery_inserted = False
 
         # "hello" is not a task. Without this the planning scaffold at high
         # effort turns a greeting into invented work -- see is_small_talk().
