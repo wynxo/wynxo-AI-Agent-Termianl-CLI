@@ -148,6 +148,7 @@ def _theme_summary(name: str) -> str:
         "midnight": "cool blue",
         "ember": "warm orange",
         "plain": "your terminal's own 16 colours",
+        "minimal": "plain grey, no animation (reduced motion)",
     }.get(name, "")
 
 
@@ -175,8 +176,9 @@ COMMANDS = {
     "/ctx": "show or set the context window (num_ctx)",
     "/tools": "list the tools the agent can call",
     "/apps": "list the applications discovered on this machine (add refresh to rescan)",
-    "/pet": "the companion: on | off | name <x> | voice <x>",
-    "/theme": "colour palette: purple | sakura | midnight | ember | plain",
+    "/pet": "the companion: on | off | name <x> | voice <x> | show <mood>",
+    "/animate": "preview the animations: list, or <name> for a scene",
+    "/theme": "colour palette: purple | sakura | midnight | ember | plain | minimal",
     "/fullscreen": "draw on the alternate screen, like vim: on | off",
     "/secrets": "credential protection: on | off | allow <path>",
     "/logo": "the start-up logo: pick one, or off",
@@ -697,6 +699,13 @@ class Repl:
         self.pet.style_name = "kawaii" if config.voice == "kawaii" else "default"
         self.pet.set_pace(self.policy.name)
         self._last_elapsed = 0.0
+        from .motion import MotionScheduler
+        self.motion = MotionScheduler(reduced=not config.animations)
+        """One timing loop for the timed animations (waveforms, effects).
+        The pet face itself is render-driven; this scheduler exists for the
+        things that need explicit timing independent of repaints."""
+        self._speech_wave = ""
+        """The waveform frame currently in the footer's speech line."""
 
         # The talker speaks; the coder works. Constructed here so /talker can
         # turn it on and off mid-session without rebuilding the agent.
@@ -849,7 +858,8 @@ class Repl:
         """
         width, _ = self.chat.size() if self.chat else (self.ui.width, 0)
         if self._dictation_state:
-            return f"  {self._dictation_state}"
+            wave = f"  {self._speech_wave}" if self._speech_wave else ""
+            return f"  {self._dictation_state}{wave}"
         bar = self.ui.bar
         if bar is not None:
             if rendered := tui.render_to_ansi(bar, width, max_rows=1):
@@ -1002,6 +1012,7 @@ class Repl:
             for pending in (task, painter):
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await pending
+            await self.motion.aclose()
             self.speaker.stop()
             await self.client.aclose()
         return 0
@@ -1033,6 +1044,7 @@ class Repl:
         # She stops when wynxo does. A speech process is a child that
         # outlives its parent, so quitting mid-sentence used to leave the
         # voice talking to an empty terminal.
+        await self.motion.aclose()
         self.speaker.stop()
         await self.client.aclose()
         self.ui.console.print(f"  [{MUTED}]bye[/]")
@@ -1543,6 +1555,8 @@ class Repl:
             # The cancellation already ran through the session's own task
             # (start() cancels with it), so the state is CANCELLED; only the
             # footer needs putting back. Re-raise to end this task cleanly.
+            self.motion.unregister("speech")
+            self._speech_wave = ""
             self._dictation_state = ""
             self.chat.invalidate()
             raise
@@ -1550,6 +1564,8 @@ class Repl:
             self.ui.error(f"speech input failed: {exc}")
             return
         finally:
+            self.motion.unregister("speech")
+            self._speech_wave = ""
             self._dictation_state = ""
         if session.state is stt_devices.SpeechState.CANCELLED:
             self.chat.invalidate()
@@ -1564,13 +1580,34 @@ class Repl:
         self.chat.invalidate()
 
     def _on_speech_state(self, snapshot) -> None:
-        """The footer mirrors the speech state machine, one row, no reflow."""
+        """The footer mirrors the speech state machine, one row, no reflow.
+
+        The waveform is a timed animation driven by the one scheduler; the
+        row it renders into already exists, so the animation can never move
+        the composer or change the footer's height."""
         mic = "🎙" if self.ui.g.unicode else "o"
+        state = snapshot.state.value
         labels = {
             "listening": f"{mic} Listening...",
             "transcribing": f"{self.ui.g.gear} Transcribing...",
         }
-        self._dictation_state = labels.get(snapshot.state.value, "")
+        self.motion.unregister("speech")
+        self._speech_wave = ""
+        if state in ("listening", "transcribing"):
+            from .motion import scene_for
+            self.motion.register(
+                "speech", scene_for(state),
+                self._wave_frame,
+                unicode=self.ui.g.unicode,
+                width=self.chat.size()[0] if self.chat else 80,
+            )
+        self._dictation_state = labels.get(state, "")
+        if self.chat is not None:
+            self.chat.invalidate()
+
+    def _wave_frame(self, frame: str) -> None:
+        """One waveform frame landed in the footer's speech line."""
+        self._speech_wave = frame
         if self.chat is not None:
             self.chat.invalidate()
 
@@ -1701,6 +1738,9 @@ class Repl:
 
         if name == "/pet":
             return await self.cmd_pet(args)
+
+        if name == "/animate":
+            return await self.cmd_animate(args)
 
         if name == "/theme":
             return await self.cmd_theme(args)
@@ -2747,6 +2787,19 @@ class Repl:
             return True
         self.config.theme = choice
         self.config.save()
+        if choice == "minimal":
+            # Reduced motion: no animated faces, no waveforms, no effects.
+            # The interface stays fully usable -- just still.
+            if self.config.animations:
+                self.config.animations = False
+                self.config.save()
+            self.pet.animate = False
+            self.motion.stop_all()
+            self.motion.reduced = True
+        else:
+            # Leaving minimal restores whatever motion was configured.
+            self.pet.animate = self.config.animations
+            self.motion.reduced = not self.config.animations
         # Rebind now so the rest of this session picks it up, and say plainly
         # that anything already drawn keeps the old colours.
         from .ui import apply_palette
@@ -2757,6 +2810,54 @@ class Repl:
         self.pet.style_name = self.pet.style_name   # keep the face set
         self.ui.success(f"theme: {choice}")
         self._preview_theme()
+        return True
+
+    async def cmd_animate(self, args: list[str]) -> bool:
+        """Preview the animation scenes, or toggle motion on and off.
+
+        Deterministic by design: previews are frame strips printed once, not
+        live loops, so the command never owns the screen or needs a timer.
+        The live timed animations (speech waveforms) run off the one
+        scheduler and are switched off together by /animate off.
+        """
+        from .motion import SCENES, preview
+
+        if args and args[0].lower() in ("on", "off"):
+            on = args[0].lower() == "on"
+            self.config.animations = on
+            self.config.save()
+            self.pet.animate = on
+            if not on:
+                self.motion.stop_all()
+            self.motion.reduced = not on
+            self.ui.success(f"animations {'on' if on else 'off'}"
+                            + ("  (reduced motion)" if not on else ""))
+            return True
+
+        if args:
+            name = args[0].lower()
+            if name not in SCENES:
+                self.ui.warn(f"unknown scene; pick one of {', '.join(SCENES)}")
+                return True
+            self.ui.console.print(
+                Text(f"  {name}", style="bold")
+                + Text(f"  {SCENES[name].label}", style=MUTED))
+            self.ui.console.print(
+                Text(preview(name, unicode=self.ui.g.unicode),
+                     style=f"bold {self.pet.style()}"))
+            self.ui.console.print()
+            return True
+
+        self.ui.table(
+            ["scene", "what it shows", "speed", "plays"],
+            [(n, s.label, f"{s.fps:.0f} fps",
+              "loop" if s.loops else "once") for n, s in SCENES.items()],
+            title="animations",
+        )
+        self.ui.info(
+            f"preview one: /animate <scene>   motion: "
+            f"{'on' if not self.motion.reduced else 'off'}"
+            + ("  (/animate off for reduced motion)" if not self.motion.reduced else ""))
         return True
 
     async def _question(self, question: str, answers: dict[str, str],
@@ -3178,8 +3279,27 @@ class Repl:
         if action in ("still", "animate"):
             self.pet.animate = action == "animate"
             self.config.animations = self.pet.animate
+            self.motion.reduced = not self.pet.animate
             self.config.save()
             self.ui.success(f"animation {'on' if self.pet.animate else 'off'}")
+            return True
+
+        if action == "show":
+            from .motion import preview, scene_for
+            moods = [m.value for m in Mood]
+            if len(args) > 1 and args[1].lower() in moods:
+                moods = [args[1].lower()]
+            self.ui.console.print()
+            for mood in moods:
+                scene = scene_for(mood)
+                self.ui.console.print(
+                    Text(f"  {mood}", style="bold")
+                    + Text(f"  {scene.label}", style=MUTED))
+                self.ui.console.print(
+                    Text(preview(mood, unicode=self.ui.g.unicode),
+                         style=f"bold {self.pet.style()}"))
+            self.ui.console.print()
+            self.ui.info("moods: " + " | ".join(m.value for m in Mood))
             return True
 
         if action == "name" and len(args) == 1:
@@ -3225,7 +3345,7 @@ class Repl:
             self.ui.success(f"voice: {choice} -- {_voice_summary(choice)}")
             return True
 
-        self.ui.warn("usage: /pet [on|off|still|animate|name <x>|voice <x>]")
+        self.ui.warn("usage: /pet [on|off|still|animate|show <mood>|name <x>|voice <x>]")
         return True
 
     def cmd_memory(self, args: list[str]) -> bool:

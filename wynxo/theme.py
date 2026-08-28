@@ -167,8 +167,28 @@ CATBOY = Palette(
     code_theme="solarized-dark",
 )
 
+# Reduced-motion theme: the same plain grey palette with no animation
+# ambitions. `/theme minimal` also switches the animation engine to its
+# static mode, so this is the palette for the accessibility option.
+MINIMAL = Palette(
+    name="minimal",
+    accent="bright_white",
+    accent_dim="bright_black",
+    text="default",
+    muted="bright_black",
+    faint="bright_black",
+    good="bright_green",
+    warn="yellow",
+    bad="bright_red",
+    bar_bg="black",
+    bar_text="default",
+    bar_dim="bright_black",
+    bar_accent="bright_white",
+    code_theme="ansi_dark",
+)
+
 PALETTES: dict[str, Palette] = {
-    p.name: p for p in (PURPLE, SAKURA, KAWAII, MIDNIGHT, EMBER, CATBOY, PLAIN)
+    p.name: p for p in (PURPLE, SAKURA, KAWAII, MIDNIGHT, EMBER, CATBOY, PLAIN, MINIMAL)
 }
 DEFAULT = "purple"
 
