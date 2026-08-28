@@ -342,7 +342,7 @@ def build_system_prompt(
     memory: str = "",
     boundary=None,
     mode=None,
-    voice: str = "plain",
+    voice: str = "mommy",
     project_map: str = "",
 ) -> str:
     from .platforms import default_shell, describe

@@ -232,6 +232,13 @@ class TestConfig:
         assert (loaded.pet, loaded.pet_name, loaded.voice, loaded.animations) == (
             False, "ada", "blunt", False)
 
+    def test_mommy_is_the_default_voice(self):
+        """The product's own voice: the user is the goodboy, she is the
+        mommy -- and it is what you get without asking for it."""
+        from wynxo.config import Config
+
+        assert Config().voice == "mommy"
+
     def test_an_invalid_voice_is_rejected(self):
         from wynxo.config import Config
         from wynxo.schema import ValidationError
