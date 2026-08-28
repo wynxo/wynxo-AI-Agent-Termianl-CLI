@@ -61,6 +61,7 @@ _ACTIVITY = {
     "read_file": "reading", "write_file": "writing file", "edit_file": "editing",
     "list_dir": "listing", "glob": "finding", "grep": "searching",
     "shell": "running", "todo_write": "planning", "launch_application": "launching",
+    "run_tests": "testing",
 }
 _LANGUAGE = {"read_file": "python", "shell": "console"}
 
@@ -178,6 +179,7 @@ COMMANDS = {
     "/apps": "list the applications discovered on this machine (add refresh to rescan)",
     "/pet": "the companion: on | off | name <x> | voice <x> | show <mood>",
     "/animate": "preview the animations: list, or <name> for a scene",
+    "/todo": "plan panel: expanded | compact | hidden (toggle with no arg)",
     "/theme": "colour palette: purple | sakura | midnight | ember | plain | minimal",
     "/fullscreen": "draw on the alternate screen, like vim: on | off",
     "/secrets": "credential protection: on | off | allow <path>",
@@ -450,6 +452,11 @@ class TerminalCallbacks(Callbacks):
         if self.journal is not None:
             self.journal.stage(name, detail)
         self._end_stream()
+        # The pet is a visualisation of the agent state: the stage change
+        # is the state, and the face/scene follows it. One source of truth.
+        pet = getattr(self, "pet", None)
+        if pet is not None:
+            pet.set_activity(name)
         if self.bar is not None:
             self.bar.update(activity=name, detail=detail)
         # Stage changes are transient in chat mode; the pinned activity bar
@@ -468,6 +475,9 @@ class TerminalCallbacks(Callbacks):
         if self.journal is not None:
             self.journal.tool(name, {"summary": summary})
         self._end_stream()
+        pet = getattr(self, "pet", None)
+        if pet is not None:
+            pet.set_activity(_ACTIVITY.get(name, name))
         if self.bar is not None:
             self.bar.update(activity=_ACTIVITY.get(name, name), detail=summary)
             if event is not None:
@@ -571,14 +581,14 @@ class TerminalCallbacks(Callbacks):
         """
         if self.bar is None:
             if self.chat is not None:
-                self.chat.set_todos(rendered)
+                self.chat.set_todos(rendered, title=self.agent.task_state.objective)
             else:
                 self.ui.todos(rendered)
             return
 
         self.bar.set_plan(rendered)
         if self.chat is not None:
-            self.chat.set_todos(rendered)
+            self.chat.set_todos(rendered, title=self.agent.task_state.objective)
         if self.bar.plan_is_complete():
             await self.bar.finish_plan()
 
@@ -775,6 +785,7 @@ class Repl:
         silence_cpr_warning(self.prompt_session.app)
         self.callbacks = TerminalCallbacks(ui, self.prompt_session)
         self.callbacks.journal = self.journal
+        self.callbacks.pet = self.pet
         self.project_info = self.discovery.scan()
         self.agent = Agent(self.client, config, self.policy, workspace, self.callbacks,
                            boundary=self.boundary, memory=self.memory)
@@ -795,6 +806,16 @@ class Repl:
         """The footer's speech line while a dictation runs."""
         self._dictation_task: asyncio.Task | None = None
 
+    def _pet_mood(self) -> str:
+        """The pet's current mood, for the top-right scene."""
+        return self.pet.mood.value if self.pet.enabled else ""
+
+    def _pet_on(self) -> bool:
+        return self.pet.enabled
+
+    def _pet_moving(self) -> bool:
+        return self.pet.animate and not self.motion.reduced
+
     def use_chat_layout(self) -> "tui.ChatUI":
         """Switch rendering into the chat layout.
 
@@ -811,6 +832,9 @@ class Repl:
             on_tools=self.callbacks.toggle_verbose,
             on_dictate=self.start_dictation,
             unicode=self.ui.g.unicode,
+            pet_state=self._pet_mood,
+            pet_enabled=self._pet_on,
+            pet_animate=self._pet_moving,
         )
         self.chat = chat
         self._dictation_state = ""
@@ -1514,6 +1538,8 @@ class Repl:
         # Silence her first: a voice still talking about the thing you just
         # cancelled is the most annoying possible response to Ctrl-C.
         self.speaker.stop()
+        if self.chat is not None:
+            self.chat.notify("✕ stopped")
         if self._task and not self._task.done():
             self._task.cancel()
 
@@ -1680,6 +1706,9 @@ class Repl:
             self.ui.console.print(Text(self.chat.layout_report(), style=MUTED))
             return True
 
+        if name == "/todo":
+            return await self.cmd_todo(args)
+
         if name == "/thinking":
             return await self.cmd_thinking(args)
 
@@ -1687,7 +1716,7 @@ class Repl:
             todo = self.agent.tools.get("todo_write")
             rendered = todo.render() if todo and hasattr(todo, "render") else ""
             if self.chat is not None:
-                self.chat.set_todos(rendered)
+                self.chat.set_todos(rendered, title=self.agent.task_state.objective)
                 self.chat.invalidate()
             else:
                 self.ui.todos(rendered) if rendered else self.ui.info("no plan yet")
@@ -2195,6 +2224,8 @@ class Repl:
         await self.agent.detect_capabilities()
         self.policy = self.agent.policy
         self.ui.success(f"model: {target}")
+        if self.chat is not None:
+            self.chat.notify(f"✦ model: {target}")
         self.journal.note("model switched", model=target)
         if warning := await check_context(self.client, self.config):
             self.ui.warn(warning)
@@ -2809,6 +2840,8 @@ class Repl:
         self.ui.code_theme = self.ui.palette.code_theme
         self.pet.style_name = self.pet.style_name   # keep the face set
         self.ui.success(f"theme: {choice}")
+        if self.chat is not None:
+            self.chat.notify(f"✦ theme: {choice}")
         self._preview_theme()
         return True
 
@@ -2858,6 +2891,22 @@ class Repl:
             f"preview one: /animate <scene>   motion: "
             f"{'on' if not self.motion.reduced else 'off'}"
             + ("  (/animate off for reduced motion)" if not self.motion.reduced else ""))
+        return True
+
+    async def cmd_todo(self, args: list[str]) -> bool:
+        """Collapse the plan panel: expanded | compact | hidden."""
+        if self.chat is None:
+            self.ui.info("the chat layout is not active; the plan panel is there")
+            return True
+        mode = args[0].lower() if args else "toggle"
+        if mode == "toggle":
+            mode = {"expanded": "compact", "compact": "hidden",
+                    "hidden": "expanded"}.get(self.chat.todo_mode, "expanded")
+        if mode in ("expanded", "compact", "hidden"):
+            self.chat.set_todo_mode(mode)
+            self.ui.info(f"plan panel: {mode}")
+        else:
+            self.ui.warn("usage: /todo [expanded|compact|hidden]")
         return True
 
     async def _question(self, question: str, answers: dict[str, str],

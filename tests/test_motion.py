@@ -37,10 +37,13 @@ class TestSceneSelection:
         frames = motion.select(scene, unicode=False)
         assert all(not any(ord(ch) > 127 for ch in frame) for frame in frames)
 
-    def test_compact_frames_on_a_narrow_terminal(self):
+    def test_compact_frames_when_the_full_set_does_not_fit(self):
         scene = motion.scene_for("sparkle")
         assert scene.compact is not None
-        assert motion.select(scene, width=30) == scene.compact
+        widest = max(len(line) for frame in scene.frames
+                     for line in frame.split("\n"))
+        assert motion.select(scene, width=widest - 1) == scene.compact
+        assert motion.select(scene, width=widest) == scene.frames
 
     def test_wide_terminal_keeps_the_full_set(self):
         scene = motion.scene_for("thinking")

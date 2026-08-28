@@ -41,6 +41,7 @@ from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.output import ColorDepth
+from prompt_toolkit.styles import Style, default_ui_style, merge_styles
 from rich.console import Console
 
 MIN_WIDTH = 20
@@ -215,7 +216,10 @@ class ChatUI:
                  on_dictate: Callable[[], None] | None = None,
                  unicode: bool = True, accent: str = "ansimagenta",
                  width: int | None = None,
-                 header: Callable[[], str] | None = None):
+                 header: Callable[[], str] | None = None,
+                 pet_state: Callable[[], str] | None = None,
+                 pet_enabled: Callable[[], bool] | None = None,
+                 pet_animate: Callable[[], bool] | None = None):
         # Started at the real width rather than a default: the banner is
         # drawn before the application has rendered once, and a rule wrapped
         # at 80 in a 120-column terminal stays that way for the session --
@@ -253,9 +257,23 @@ class ChatUI:
         text for this pane can be told too."""
         self._last_width = 0
         self.todo_rendered = ""
+        self.todo_title = ""
         self.todo_frame = 0
+        self.todo_mode = "expanded"
+        """expanded | compact | hidden -- the plan panel's collapse state."""
         self._todo_last_tick = 0.0
         """Rows the pinned block took last time it was drawn."""
+        self._pet_state = pet_state
+        self._pet_enabled = pet_enabled
+        self._pet_animate = pet_animate
+        self._pet_frame = 0
+        self._toast: tuple[str, float] | None = None
+        self._toast_life = 3.5
+        self._float_budget: int | None = None
+        """Rows the top-right block may use, set by the float's height
+        measurement each render. None until a layout has measured it, so
+        direct calls (tests, previews) render everything."""
+        """Seconds a notification stays before it clears itself."""
         self.typed: "asyncio.Future[str] | None" = None
         """Set while a line of free text is being read, by prompt()."""
         self.default = ""
@@ -407,31 +425,184 @@ class ChatUI:
             lines = [""] * (rows - len(lines)) + lines
         return ANSI("\n".join(lines[-rows:]))
 
+    def _pet_lines(self) -> list[str]:
+        """The living pet scene, or [] when it is off.
+
+        Rendered from the mood the CLI reports and the motion scene that
+        mood maps to, advanced one frame per repaint -- the same render
+        that already animates the pet's face, so no extra timer exists.
+        """
+        if self._pet_state is None or self._pet_enabled is None \
+                or self._pet_animate is None:
+            return []
+        try:
+            if not self._pet_enabled():
+                return []
+            mood = self._pet_state()
+        except Exception:
+            return []
+        if not mood:
+            return []
+        from .motion import scene_for, select
+        scene = scene_for(mood)
+        frames = select(scene, unicode=self._unicode, width=30,
+                        reduced=not self._pet_animate())
+        index = (self._pet_frame // 2) % len(frames) if len(frames) > 1 else 0
+        self._pet_frame += 1
+        return [line.rstrip() for line in frames[index].split("\n")
+                if line.strip()]
+
+    def _toast_line(self) -> str:
+        """The current notification, or "" once it has lived its life."""
+        if not self._toast:
+            return ""
+        text, at = self._toast
+        if time.monotonic() - at > self._toast_life:
+            self._toast = None
+            return ""
+        return text
+
+    def notify(self, text: str) -> None:
+        """A transient notification, drawn in the top-right block. It clears
+        itself and never touches the transcript or the composer."""
+        self._toast = (text, time.monotonic())
+        self.invalidate()
+
+    def set_todo_mode(self, mode: str) -> None:
+        """expanded | compact | hidden. Hidden removes the panel but keeps
+        the pet; the composer and transcript are untouched either way."""
+        if mode in ("expanded", "compact", "hidden"):
+            self.todo_mode = mode
+            self.invalidate()
+
     def _todo_fragments(self):
-        """Render the live todo plan in a top-right pinned overlay."""
-        if not self.todo_rendered:
+        """The top-right block: toast, pet, then the plan panel.
+
+        It is a float, so it reserves nothing: no matter how much is drawn
+        here, the composer keeps its row, the transcript keeps its rows,
+        and a busy panel cannot push anything around.
+
+        Every entry is a (style, text) fragment. prompt_toolkit treats a
+        bare list as StyleAndTextTuples and unpacks each element into
+        (style, text, *rest), so a plain string would have its first
+        character read as a color -- the ``✓`` in a toast crashed the whole
+        renderer with "Wrong color format '✓'".
+
+        When the float's measured budget is smaller than the block, the
+        panel falls back to its one-line form rather than letting the
+        window clip a box with its bottom edge missing.
+        """
+        budget = self._float_budget
+        out: list[tuple[str, str]] = []
+        if toast := self._toast_line():
+            out.append(("class:toast", toast))
+        if self.todo_mode != "hidden":
+            room = None if budget is None else max(0, budget - len(out))
+            for line in self._pet_lines()[:room]:
+                out.append(("class:pet", line))
+        if self.todo_mode in ("expanded", "compact") and (
+                budget is None or len(out) < budget):
+            panel = self._todo_panel()
+            room = None if budget is None else max(0, budget - len(out))
+            if budget is not None and self.todo_mode == "expanded" \
+                    and len(panel) > room:
+                panel = self._todo_compact_line()
+            out.extend(panel[:room])
+        return out
+
+    def _todo_panel(self) -> list[tuple[str, str]]:
+        """The plan panel: a bordered box, or the one-line compact form.
+
+        Each row comes back as (style, text) fragments -- markers get their
+        own color (green done, red failed, accent active), everything else
+        stays in the default body style.
+        """
+        summary = self._todo_summary()
+        if summary is None:
             return []
-        lines = [line for line in self.todo_rendered.splitlines() if line.strip()]
-        if not lines:
-            return []
-        lines = lines[: self.TODO_MAX_ROWS - 2]
-        done = sum(line.lstrip().startswith("[x]") for line in lines)
-        title = f"♡ plan {done}/{len(lines)} ♡"
-        body = [title]
-        for line in lines:
+        title, summary_text = summary
+
+        if self.todo_mode == "compact":
+            return self._todo_compact_line()
+
+        inner = self.TODO_WIDTH - 2
+        edge = "─" if self._unicode else "-"
+        if self._unicode:
+            bar, tl, tr, bl, br = "│", "╭", "╮", "╰", "╯"
+        else:
+            bar, tl, tr, bl, br = "|", "+", "+", "+", "+"
+        head = f" ✦ {title} · {summary_text} "
+        top = tl + edge + head + edge * max(0, inner - len(head) - 2) + tr
+        out: list[tuple[str, str]] = [("class:edge", top)]
+        capped = [line for line in self.todo_rendered.splitlines()
+                  if line.strip()][: self.TODO_MAX_ROWS - 2]
+        for line in capped:
             stripped = line.strip()
             if stripped.startswith("[x]"):
-                marker = "✓"
+                marker, label, mclass = "✓", stripped[3:].strip(), "class:ok"
+            elif stripped.startswith("[!]"):
+                marker, label, mclass = "✕", stripped[3:].strip(), "class:fail"
             elif stripped.startswith("[>]"):
                 marker = ("✧", "⋆", "✦", "♡")[self.todo_frame % 4]
+                label, mclass = stripped[3:].strip(), "class:active"
             else:
-                marker = "·"
-            label = stripped[3:].strip() if stripped.startswith(("[x]", "[>]")) else stripped
-            body.append(f"{marker} {label}")
-        return body
+                marker, label, mclass = "·", stripped, "class:todo"
+            # One fragment per row: the flat fragment list must map 1:1 to
+            # visual lines so the float's wrapped window and any test can
+            # trust the shape. The whole row takes the marker's class -- a
+            # done row reads green, a failed one red, the active one accent.
+            row = f" {marker} {label}"
+            pad = max(0, inner - len(row) - 2)
+            out.append((mclass, bar + row + " " * pad + bar))
+        out.append(("class:edge", bl + edge * max(0, inner - 2) + br))
+        return out
 
-    def set_todos(self, rendered: str) -> None:
+    def _float_height(self) -> int:
+        """How tall the top-right block may be, bounded by the terminal.
+
+        On a short screen the block shrinks instead of overflowing: floats
+        overlay, so a block taller than the window would draw over the
+        composer, which is the one thing this panel must never do. The
+        budget is remembered so _todo_fragments can trim its content to it
+        -- the window clips whatever overflows, and a panel whose bottom
+        border was cut off reads as a rendering bug.
+        """
+        _, rows = self.size()
+        height = 1
+        if self._toast:
+            height += 1
+        if self.todo_mode != "hidden":
+            height += 4          # the pet scene block
+        if self.todo_rendered:
+            height += 1 if self.todo_mode == "compact" else self.TODO_MAX_ROWS
+        budget = max(3, min(height, max(3, rows // 2)))
+        self._float_budget = budget
+        return budget
+
+    def _todo_summary(self) -> tuple[str, str] | None:
+        """(title, "done/total · N failed") for the rendered plan, or None."""
+        lines = [line for line in self.todo_rendered.splitlines() if line.strip()]
+        if not lines:
+            return None
+        capped = lines[: self.TODO_MAX_ROWS - 2]
+        done = sum(line.lstrip().startswith("[x]") for line in capped)
+        failed = sum(line.lstrip().startswith("[!]") for line in capped)
+        title = self.todo_title or "plan"
+        summary = f"{done}/{len(capped)}" + (f" · {failed} failed" if failed else "")
+        return title, summary
+
+    def _todo_compact_line(self) -> list[tuple[str, str]]:
+        """The one-line panel form, used directly when the full box cannot
+        fit the measured float budget."""
+        summary = self._todo_summary()
+        if summary is None:
+            return []
+        title, text = summary
+        return [("class:todo-title", f"✦ {title} · {text}")]
+
+    def set_todos(self, rendered: str, title: str = "") -> None:
         self.todo_rendered = rendered or ""
+        self.todo_title = title or ""
         self.todo_frame += 1
         self.invalidate()
 
@@ -532,7 +703,7 @@ class ChatUI:
                 right=0,
                 top=0,
                 width=self.TODO_WIDTH,
-                height=self.TODO_MAX_ROWS,
+                height=self._float_height,
                 content=Window(content=FormattedTextControl(self._todo_fragments),
                                wrap_lines=True),
             )],
@@ -575,6 +746,23 @@ class ChatUI:
             color_depth=ColorDepth.TRUE_COLOR,
             erase_when_done=True,
             output=_output(),
+            # The top-right block's classes. Merged with the default UI
+            # style so the composer, cursor and menus keep their normal
+            # appearance. Accent-colored by default; /theme minimal maps
+            # these to plain styles instead.
+            style=merge_styles([
+                Style.from_dict({
+                    "edge": "ansibrightblack",
+                    "toast": "ansibrightcyan",
+                    "pet": "",
+                    "todo": "",
+                    "todo-title": "bold ansibrightcyan",
+                    "ok": "ansigreen",
+                    "fail": "ansired",
+                    "active": "ansibrightcyan",
+                }),
+                default_ui_style(),
+            ]),
         )
 
     # -- input -------------------------------------------------------------

@@ -10,14 +10,14 @@ from __future__ import annotations
 from ..schema import Field, Schema
 from .base import Tool, ToolResult
 
-STATUSES = ("pending", "in_progress", "done")
-MARKS = {"pending": "[ ]", "in_progress": "[>]", "done": "[x]"}
+STATUSES = ("pending", "in_progress", "done", "failed")
+MARKS = {"pending": "[ ]", "in_progress": "[>]", "done": "[x]", "failed": "[!]"}
 
 
 class TodoItem(Schema):
     task = Field(str, "One concrete step.")
-    status = Field(str, "pending, in_progress or done.", default="pending",
-                   choices=STATUSES)
+    status = Field(str, "pending, in_progress, done or failed.",
+                   default="pending", choices=STATUSES)
 
 
 class TodoInput(Schema):
@@ -30,7 +30,8 @@ class TodoWrite(Tool):
     description = (
         "Record or update your plan as a checklist. Send the whole list each "
         "time -- it replaces the previous one. Use it for anything that takes "
-        "more than two or three steps, and mark exactly one item in_progress."
+        "more than two or three steps, mark exactly one item in_progress, "
+        "and mark an item failed when the step it names did not work."
     )
     Input = TodoInput
     concurrency_safe = False

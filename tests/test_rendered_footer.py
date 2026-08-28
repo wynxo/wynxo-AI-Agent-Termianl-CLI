@@ -422,4 +422,9 @@ class TestThePlanStaysBounded:
         floats = header.floats
         assert floats, "the plan float is how the plan stays off the flow"
         plan_float = floats[0]
-        assert plan_float.get_height() == chat.TODO_MAX_ROWS
+        _, rows = chat.size()
+        height = plan_float.get_height()
+        # Bounded: never more than the plan block plus the pet and toast,
+        # never more than half the screen, and never less than a sliver.
+        assert 3 <= height <= chat.TODO_MAX_ROWS + 6
+        assert height <= max(3, rows // 2)

@@ -125,6 +125,49 @@ SCENES: dict[str, Scene] = {
         fps=4.0,
         ascii=(" =^O.O^=  |\n  -----\n",) * 3,
     ),
+    "searching": Scene(
+        "searching",
+        (
+            " ≽^◉⩊◉^≼\n  ▓▓▓▓\n  ----\n",
+            " ≽^◉⩊◉^≼\n  ----\n  ▓▓▓▓\n",
+        ),
+        label="scanning the project",
+        fps=6.0,
+        ascii=(" =^O.O^=\n  ++++\n  ----\n", " =^O.O^=\n  ----\n  ++++\n"),
+    ),
+    # The coding scene is the little story: the neko hops onto a tiny
+    # terminal, gets inside it, and types until the screen fills.
+    "coding": Scene(
+        "coding",
+        (
+            "   ≽^•⩊•^≼\n  ┌──────┐\n  │ >_    │\n  └──────┘\n",
+            "  ┌──────┐\n  │ ≽^•̀⩊•́^≼ │\n  │ >_     │\n  └──────┘\n",
+            "  ┌──────┐\n  │ ≽^•́⩊•̀^≼ │\n  │ ████░░ │\n  └──────┘\n",
+            "  ┌──────┐\n  │ ≽^≧⩊≦^≼ │\n  │ ██████ │\n  └──────┘\n",
+        ),
+        label="typing at a tiny terminal",
+        fps=5.0,
+        ascii=(
+            "   =^.^=\n  +------+\n  | >_   |\n  +------+\n",
+            "  +------+\n  | =^>.>^= |\n  | >_    |\n  +------+\n",
+            "  +------+\n  | =^>.>^= |\n  | ####  |\n  +------+\n",
+            "  +------+\n  | =^_^=  |\n  | ###### |\n  +------+\n",
+        ),
+        compact=(" ≽^•̀⩊•́^≼ █", " ≽^•́⩊•̀^≼ █", " ≽^≧⩊≦^≼ █"),
+    ),
+    "testing": Scene(
+        "testing",
+        (
+            " ≽^•⩊•^≼  ░░░\n  ──────\n",
+            " ≽^•⩊•^≼  ▓░░\n  ──────\n",
+            " ≽^•⩊•^≼  ▓▓░\n  ──────\n",
+            " ≽^≧⩊≦^≼  ▓▓▓\n  ──────\n",
+        ),
+        label="watching the tests run",
+        fps=6.0,
+        ascii=(" =^.^=  ...\n  -----\n", " =^.^=  ..#\n  -----\n", " =^.^=  .##\n  -----\n", " =^_^=  ###\n  -----\n"),
+        compact=(" ░░░", " ▓░░", " ▓▓░", " ▓▓▓"),
+    ),
     "running": Scene(
         "running",
         (
@@ -185,19 +228,25 @@ SPEECH_SCENES = {
 }
 
 MOOD_SCENES = {
-    "idle": "idle", "thinking": "thinking", "working": "working",
-    "reading": "reading", "running": "running", "happy": "happy",
-    "sad": "error", "asking": "thinking", "sleepy": "sleepy",
+    "idle": "idle", "thinking": "thinking", "working": "coding",
+    "reading": "reading", "searching": "searching", "testing": "testing",
+    "running": "running", "happy": "happy", "sad": "error",
+    "asking": "thinking", "sleepy": "sleepy", "cancelled": "idle",
 }
 
 
 def scene_for(name: str) -> Scene:
-    """The scene for a state name, defaulting to the idle scene."""
+    """The scene for a state name, defaulting to the idle scene.
+
+    Moods resolve through MOOD_SCENES first -- the working mood is the
+    coding scene, for instance -- so the pet's mood always picks the scene
+    that tells the right story. A bare scene name still works for
+    /animate."""
     key = (name or "").strip().lower()
-    if key in SCENES:
-        return SCENES[key]
     if key in MOOD_SCENES:
         return SCENES[MOOD_SCENES[key]]
+    if key in SCENES:
+        return SCENES[key]
     if key in SPEECH_SCENES:
         return SCENES[SPEECH_SCENES[key]]
     return SCENES["idle"]
@@ -206,12 +255,15 @@ def scene_for(name: str) -> Scene:
 def select(scene: Scene, *, unicode: bool = True, width: int = 80,
            reduced: bool = False) -> tuple[str, ...]:
     """The frames that fit here: static under reduced motion, ASCII on a
-    non-unicode terminal, compact on a narrow one, full set otherwise."""
+    non-unicode terminal, compact only when the full set is wider than the
+    space available, full set otherwise."""
     if reduced:
         return (scene.frames[0],)
     if not unicode and scene.ascii:
         return scene.ascii
-    if width < 46 and scene.compact:
+    widest = max(len(line) for frame in scene.frames
+                 for line in frame.split("\n"))
+    if scene.compact and width < widest:
         return scene.compact
     return scene.frames
 

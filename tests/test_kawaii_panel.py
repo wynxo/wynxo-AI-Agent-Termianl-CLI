@@ -12,10 +12,14 @@ def test_todo_panel_shows_progress_and_kawaii_active_marker():
     first = chat._todo_fragments()
     chat.set_todos("[x] inspect\n[>] build\n[ ] verify")
     second = chat._todo_fragments()
-    assert first[0].startswith("♡ plan 1/3 ♡")
-    assert first[1].endswith("inspect")
-    assert first[2][0] in "✧⋆✦♡"
-    assert second[2][0] in "✧⋆✦♡"
+    # Fragments are (style, text); the text is the visible row.
+    top, inspect_row, active_row, _, bottom = [t for _, t in first]
+    assert top.startswith("╭")
+    assert "plan · 1/3" in top
+    assert "✓ inspect" in inspect_row
+    assert active_row[2] in "✧⋆✦♡"
+    assert [t for _, t in second][2][2] in "✧⋆✦♡"
+    assert bottom.startswith("╰")
 
 
 def test_todo_panel_caps_long_plans():

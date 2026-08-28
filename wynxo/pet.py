@@ -23,7 +23,9 @@ class Mood(Enum):
     IDLE = "idle"
     THINKING = "thinking"
     READING = "reading"
+    SEARCHING = "searching"
     WORKING = "working"
+    TESTING = "testing"
     RUNNING = "running"
     ASKING = "asking"
     HAPPY = "happy"
@@ -38,7 +40,9 @@ FACES: dict[Mood, list[str]] = {
     Mood.IDLE:     ["≽^•⩊•^≼", "≽^•⩊•^≼", "≽^•⩊•^≼", "≽^-⩊-^≼"],
     Mood.THINKING: ["≽^˘⩊•^≼", "≽^•⩊˘^≼", "≽^˘⩊•^≼", "≽^•⩊•^≼"],
     Mood.READING:  ["≽^◉⩊◉^≼", "≽^◉⩊◉^≼", "≽^◉⩊◉^≼", "≽^-⩊-^≼"],
+    Mood.SEARCHING: ["≽^◉⩊◉^≼", "≽^◉⩊◉^≼", "≽^•⩊•^≼"],
     Mood.WORKING:  ["≽^•̀⩊•́^≼", "≽^•́⩊•̀^≼"],
+    Mood.TESTING:  ["≽^•⩊•^≼", "≽^•⩊•^≼", "≽^≧⩊≦^≼"],
     Mood.RUNNING:  ["≽^•⩊•^≼ฅ", "≽^•⩊•^≼ﾉ", "≽^•⩊•^≼ฅ", "≽^•⩊•^≼ﾉ"],
     Mood.ASKING:   ["≽^•⩊•^≼?", "≽^•⩊•^≼ ", "≽^•⩊•^≼?", "≽^•⩊•^≼ "],
     Mood.HAPPY:    ["≽^≧⩊≦^≼", "≽^ᵕ⩊ᵕ^≼"],
@@ -50,7 +54,9 @@ FACES_ASCII: dict[Mood, list[str]] = {
     Mood.IDLE:     ["=^.^=", "=^.^=", "=^.^=", "=^-^="],
     Mood.THINKING: ["=^o.^=", "=^.o^=", "=^o.^=", "=^.o^="],
     Mood.READING:  ["=^O.O^=", "=^O.O^=", "=^O.O^=", "=^-.-^="],
+    Mood.SEARCHING: ["=^O.O^=", "=^O.O^=", "=^o.o^="],
     Mood.WORKING:  ["=^>.<^=", "=^>.>^="],
+    Mood.TESTING:  ["=^.^=", "=^.^=", "=^_^="],
     Mood.RUNNING:  ["=^.^=/", "=^.^=-", "=^.^=\\", "=^.^=-"],
     Mood.ASKING:   ["=^.^=?", "=^.^= ", "=^.^=?", "=^.^= "],
     Mood.HAPPY:    ["=^_^=", "=^v^="],
@@ -62,7 +68,9 @@ FACES_KAWAII: dict[Mood, list[str]] = {
     Mood.IDLE:     ["₍ᐢ•ﻌ•ᐢ₎", "₍ᐢ•ﻌ•ᐢ₎", "₍ᐢ•ﻌ•ᐢ₎", "₍ᐢ-ﻌ-ᐢ₎"],
     Mood.THINKING: ["₍ᐢ˘ﻌ•ᐢ₎", "₍ᐢ•ﻌ˘ᐢ₎", "₍ᐢ˘ﻌ•ᐢ₎", "₍ᐢ•ﻌ•ᐢ₎"],
     Mood.READING:  ["₍ᐢ◉ﻌ◉ᐢ₎", "₍ᐢ◉ﻌ◉ᐢ₎", "₍ᐢ◉ﻌ◉ᐢ₎", "₍ᐢ-ﻌ-ᐢ₎"],
+    Mood.SEARCHING: ["₍ᐢ◉ﻌ◉ᐢ₎", "₍ᐢ◉ﻌ◉ᐢ₎", "₍ᐢ•ﻌ•ᐢ₎"],
     Mood.WORKING:  ["₍ᐢ•̀ﻌ•́ᐢ₎", "₍ᐢ•́ﻌ•̀ᐢ₎"],
+    Mood.TESTING:  ["₍ᐢ•ﻌ•ᐢ₎", "₍ᐢ•ﻌ•ᐢ₎", "₍ᐢ≧ﻌ≦ᐢ₎"],
     Mood.RUNNING:  ["ฅ₍ᐢ•ﻌ•ᐢ₎ฅ", "₍ᐢ•ﻌ•ᐢ₎ﾉ ", "ฅ₍ᐢ•ﻌ•ᐢ₎ฅ", "₍ᐢ•ﻌ•ᐢ₎ﾉ "],
     Mood.ASKING:   ["₍ᐢ•ﻌ•ᐢ₎?", "₍ᐢ•ﻌ•ᐢ₎ ", "₍ᐢ•ﻌ•ᐢ₎?", "₍ᐢ•ﻌ•ᐢ₎ "],
     Mood.HAPPY:    ["₍ᐢ≧ﻌ≦ᐢ₎", "₍ᐢᵕﻌᵕᐢ₎"],
@@ -73,7 +81,9 @@ MOOD_STYLES: dict[Mood, str] = {
     Mood.IDLE: "grey62",
     Mood.THINKING: "bright_cyan",
     Mood.READING: "bright_blue",
+    Mood.SEARCHING: "bright_blue",
     Mood.WORKING: "bright_cyan",
+    Mood.TESTING: "yellow",
     Mood.RUNNING: "bright_magenta",
     Mood.ASKING: "yellow",
     Mood.HAPPY: "green",
@@ -91,7 +101,8 @@ ACTIVITY_MOODS: dict[str, Mood] = {
     "reading": Mood.READING,
     "listing": Mood.READING,
     "finding": Mood.READING,
-    "searching": Mood.READING,
+    "searching": Mood.SEARCHING,
+    "testing": Mood.TESTING,
     "writing": Mood.WORKING,
     "writing file": Mood.WORKING,
     "editing": Mood.WORKING,
