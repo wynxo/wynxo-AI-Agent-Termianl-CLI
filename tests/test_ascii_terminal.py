@@ -87,6 +87,47 @@ class TestInputBox:
         assert stream.getvalue() == ""
         assert repl._prompt_message().value == "<b>&gt;</b> "
 
+    def test_short_output_pads_the_box_to_the_bottom(self, monkeypatch):
+        """A short turn leaves the cursor mid-screen; blank lines push the
+        box down so it opens at the bottom, not under the last line."""
+        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
+        monkeypatch.setattr(cli, "terminal_height", lambda: 20)
+        ui = ascii_ui()
+        ui.width = 40
+        ui._lines_since_prompt = 7
+        stream = capture(ui)
+        repl = self._repl(ui)
+        repl._pad_to_bottom = cli.Repl._pad_to_bottom.__get__(repl, type(repl))
+        repl._pad_to_bottom()
+        # 20 rows: 3 belong to the box (edge, input, toolbar), the cursor
+        # sits on row 7, so 10 blank rows separate them.
+        assert stream.getvalue() == "\n" * 10
+
+    def test_a_full_screen_of_output_pads_nothing(self, monkeypatch):
+        """Once the output scrolled the screen the cursor is already at the
+        bottom; padding would only add scrollback."""
+        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
+        monkeypatch.setattr(cli, "terminal_height", lambda: 20)
+        ui = ascii_ui()
+        ui.width = 40
+        ui._lines_since_prompt = 25
+        stream = capture(ui)
+        repl = self._repl(ui)
+        repl._pad_to_bottom = cli.Repl._pad_to_bottom.__get__(repl, type(repl))
+        repl._pad_to_bottom()
+        assert stream.getvalue() == ""
+
+    def test_dumb_terminals_never_pad(self, monkeypatch):
+        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: True)
+        ui = ascii_ui()
+        ui.width = 40
+        ui._lines_since_prompt = 2
+        stream = capture(ui)
+        repl = self._repl(ui)
+        repl._pad_to_bottom = cli.Repl._pad_to_bottom.__get__(repl, type(repl))
+        repl._pad_to_bottom()
+        assert stream.getvalue() == ""
+
     def test_bottom_edge_is_ascii_and_exactly_one_width(self):
         ui = ascii_ui()
         ui.width = 60

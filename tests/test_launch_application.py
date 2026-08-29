@@ -31,10 +31,10 @@ def tool_with(catalog: ApplicationCatalog) -> LaunchApplication:
 def patch_startfile(monkeypatch, launched: list[str], exc: Exception | None = None):
     """Stand in for os.startfile, capturing what would be launched."""
 
-    def fake(path: str) -> None:
+    def fake(path: str, arg: str = "") -> None:
         if exc is not None:
             raise exc
-        launched.append(path)
+        launched.append((path, arg))
 
     monkeypatch.setattr(apps_module, "_startfile", fake)
 
@@ -52,7 +52,7 @@ def test_a_matched_application_is_launched(monkeypatch, tmp_path):
     assert result.metadata["application"] == "Visual Studio Code"
     assert result.metadata["source"] == "start_menu"
     assert len(launched) == 1
-    assert launched[0].endswith("Visual Studio Code.lnk")
+    assert launched[0][0].endswith("Visual Studio Code.lnk")
 
 
 def test_a_successful_launch_is_a_terminal_action(monkeypatch, tmp_path):
@@ -160,7 +160,7 @@ def test_explorer_requested_explicitly_launches_explorer(tmp_path, monkeypatch):
     result = asyncio.run(tool.invoke({"query": "explorer"}))
     assert result.ok
     assert result.metadata["application"] == "File Explorer"
-    assert launched[0].endswith("File Explorer.lnk")
+    assert launched[0][0].endswith("File Explorer.lnk")
 
 
 def test_an_executable_path_cannot_be_launched(tmp_path, monkeypatch):
@@ -179,6 +179,51 @@ def test_an_empty_query_is_refused(tmp_path):
     tool = tool_with(catalog_with(tmp_path, "Steam"))
     result = asyncio.run(tool.invoke({"query": "   "}))
     assert not result.ok
+
+
+# -- opening a file in the launched application --------------------------------
+
+
+def test_a_path_is_handed_to_the_launched_application(monkeypatch, tmp_path):
+    """'create text.py and open it in vscode': the app is still resolved from
+    the catalog, and the path rides along as an argument."""
+    launched = []
+    patch_startfile(monkeypatch, launched)
+    tool = tool_with(catalog_with(tmp_path, "Visual Studio Code"))
+    result = asyncio.run(tool.invoke({
+        "query": "vscode",
+        "path": r"C:\Users\elliot\Desktop\text.py"}))
+    assert result.ok
+    assert result.metadata["application"] == "Visual Studio Code"
+    assert result.metadata["opened"] == r"C:\Users\elliot\Desktop\text.py"
+    assert "text.py" in result.output
+    assert len(launched) == 1
+    assert launched[0][0].endswith("Visual Studio Code.lnk")
+    assert launched[0][1] == r"C:\Users\elliot\Desktop\text.py"
+
+
+def test_launch_without_a_path_passes_no_argument(monkeypatch, tmp_path):
+    launched = []
+    patch_startfile(monkeypatch, launched)
+    tool = tool_with(catalog_with(tmp_path, "Steam"))
+    result = asyncio.run(tool.invoke({"query": "Steam"}))
+    assert result.ok
+    assert "opened" not in result.metadata
+    assert len(launched) == 1
+    assert launched[0][1] == ""
+
+
+def test_a_path_never_resolves_the_application(monkeypatch, tmp_path):
+    """The path is an argument, not a launch target: a path alone must not
+    launch anything, whatever it points at."""
+    launched = []
+    patch_startfile(monkeypatch, launched)
+    tool = tool_with(catalog_with(tmp_path, "Steam"))
+    result = asyncio.run(tool.invoke({
+        "query": r"C:\Windows\System32\cmd.exe",
+        "path": r"C:\Users\elliot\Desktop\text.py"}))
+    assert not result.ok
+    assert launched == []
 
 
 def test_repeated_use_stays_consistent(monkeypatch, tmp_path):
@@ -257,5 +302,5 @@ def test_open_request_flows_through_the_agent_to_the_tool(monkeypatch, tmp_path)
     result = asyncio.run(agent.run("open vscode"))
     assert "opening" in result.content.lower()
     assert len(launched) == 1
-    assert launched[0].endswith("Visual Studio Code.lnk")
+    assert launched[0][0].endswith("Visual Studio Code.lnk")
     assert backend.calls == 2          # tool call + final answer, nothing more

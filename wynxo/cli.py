@@ -1001,6 +1001,7 @@ class Repl:
     async def _loop(self) -> int:
         while True:
             try:
+                self._pad_to_bottom()
                 self._open_box()
                 # The draft is dictation text waiting to be submitted. An
                 # empty draft must stay an empty string -- `or None` would
@@ -1016,6 +1017,9 @@ class Repl:
             except EOFError:
                 break
 
+            # The next box pins itself using how much this turn printed;
+            # start that count fresh here, after the prompt closed.
+            self.ui.reset_prompt_lines()
             text = text.strip()
             if not text:
                 continue
@@ -1361,6 +1365,26 @@ class Repl:
         return HTML(
             '<style fg="%s">%s</style> <b><style fg="%s">&gt;</style></b> '
             % (ACCENT, edge, ACCENT))
+
+    def _pad_to_bottom(self) -> None:
+        """Blank lines that pin the input box to the bottom of the screen.
+
+        After a short turn the cursor sits wherever the output ended, so the
+        box would open mid-screen, floating under the last line. The terminal
+        itself pins prompt_toolkit's toolbar to the bottom row; padding the
+        cursor two rows above it makes the whole box -- top edge, input
+        line, toolbar -- one object anchored at the bottom, the way a shell
+        prompt sits on its own line.
+        """
+        if is_dumb_terminal():
+            return
+        height = terminal_height()
+        # Cursor row after this turn's output, clamped to the last row once
+        # the output scrolled the screen.
+        cursor = min(self.ui.prompt_lines(), height - 1)
+        pad = height - 3 - cursor
+        if pad > 0:
+            self.ui.console.print("\n" * pad, end="", no_wrap=True)
 
     def _open_box(self) -> None:
         """Top edge of the input box, printed just before the prompt.

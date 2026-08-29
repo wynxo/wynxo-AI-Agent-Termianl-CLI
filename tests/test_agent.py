@@ -134,7 +134,7 @@ class TestSystemActionEndsTheTurn:
 
         launched = []
 
-        async def noop_launch(entry):
+        async def noop_launch(entry, open_path=""):
             launched.append(str(entry.path))
 
         monkeypatch.setattr(apps_module, "_launch_entry", noop_launch)

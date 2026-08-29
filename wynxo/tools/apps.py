@@ -4,9 +4,12 @@ The model's job is intent -- *that* the user wants an application opened and
 *what* they called it. This tool's job is everything after that: resolve the
 name against the applications discovered on this machine, launch the real
 shortcut, and report honestly which of those steps happened. It never
-substitutes one application for another, never falls back to Explorer, and
-never accepts a path from the model -- the OS catalog is the only source of
-launch targets. See appcatalog.py for where the applications come from.
+substitutes one application for another and never falls back to Explorer:
+the OS catalog is the only source of launch targets. The optional ``path``
+argument is *not* a launch target -- the application still comes from the
+catalog -- it is merely handed to the resolved application as an argument,
+so the model can open a specific file in the app it launched. See
+appcatalog.py for where the applications come from.
 """
 
 from __future__ import annotations
@@ -28,24 +31,38 @@ class LaunchApplicationInput(Schema):
         "'Visual Studio Code', 'vscode', 'LibreWolf' or 'Steam'. A name, "
         "never a file path.",
     )
+    path = Field(
+        str,
+        "Optional absolute path of a file or folder to open in the "
+        "application, for example 'C:\\\\Users\\\\elliot\\\\Desktop\\\\text.py'. "
+        "The application is still chosen by `query`; this path is only "
+        "handed to it as an argument. Use it when the user asks to open "
+        "a specific file in the application.",
+        default="",
+    )
 
 
 class LaunchApplication(Tool):
     name = "launch_application"
     description = (
-        "Launch a GUI application installed on the user's computer. Provide "
-        "the application name or query exactly as the user described it. The "
-        "system searches the applications actually installed on this machine "
-        "(Start Menu shortcuts on Windows, /Applications on macOS, .desktop "
-        "entries on Linux) and launches a matching application. Never guess "
-        "and never substitute another application; if nothing installed "
-        "matches, the tool says so and you should tell the user.\n\n"
-        "A successful launch completes the request: reply with a short "
-        "confirmation and stop. Do not continue inspecting files, planning "
-        "or running further tools unless the user asked for additional work "
-        "in the same message -- if they did, do that work before launching, "
-        "or launch last."
-    )
+            "Launch a GUI application installed on the user's computer. Provide "
+            "the application name or query exactly as the user described it. The "
+            "system searches the applications actually installed on this machine "
+            "(Start Menu shortcuts on Windows, /Applications on macOS, .desktop "
+            "entries on Linux) and launches a matching application. Never guess "
+            "and never substitute another application; if nothing installed "
+            "matches, the tool says so and you should tell the user.\n\n"
+            "If the user wants a specific file opened in the application (for "
+            "example 'create text.py and open it in VS Code'), pass that file's "
+            "absolute path in the `path` argument as well -- the application is "
+            "still resolved from `query`, and the path is handed to it as an "
+            "argument so it opens with that file loaded.\n\n"
+            "A successful launch completes the request: reply with a short "
+            "confirmation and stop. Do not continue inspecting files, planning "
+            "or running further tools unless the user asked for additional work "
+            "in the same message -- if they did, do that work before launching, "
+            "or launch last."
+        )
     Input = LaunchApplicationInput
     mutating = True
     concurrency_safe = False
@@ -91,70 +108,93 @@ class LaunchApplication(Tool):
                 ambiguous=True, candidates=[c.name for c in resolution.candidates],
                 query=query)
 
-        return await self._launch(resolution.entry)
+        return await self._launch(resolution.entry, (args.path or "").strip())
 
-    async def _launch(self, entry: AppEntry) -> ToolResult:
+    async def _launch(self, entry: AppEntry, open_path: str = "") -> ToolResult:
         try:
-            await _launch_entry(entry)
+            await _launch_entry(entry, open_path)
         except OSError as exc:
             return ToolResult.failure(
                 f"Found '{entry.name}' but launching it failed: {exc}. "
                 "Nothing was launched.",
                 status="failed", application=entry.name,
                 source=entry.source, path=str(entry.path))
+        meta = {
+            "status": "launched", "application": entry.name,
+            "source": entry.source, "path": str(entry.path),
+        }
+        if open_path:
+            meta["opened"] = open_path
         return ToolResult.success(
-            f"Launched {entry.name}. This completes the request -- reply "
-            "with a short confirmation and stop; do not perform further "
-            "tool calls unless the user asked for additional work.",
+            f"Launched {entry.name}" + (f" with {open_path}" if open_path else "") + ". "
+            "This completes the request -- reply with a short confirmation "
+            "and stop; do not perform further tool calls unless the user asked "
+            "for additional work.",
             display=f"launched {entry.name}",
             terminal=True,
-            status="launched", application=entry.name,
-            source=entry.source, path=str(entry.path))
+            **meta)
 
 
-async def _launch_entry(entry: AppEntry) -> None:
+async def _launch_entry(entry: AppEntry, open_path: str = "") -> None:
     """Start the application the way the OS would from its own UI.
 
     A .lnk is started through the shell so its target, arguments and working
     directory arrive exactly as the installer wrote them -- the same thing a
-    double-click does. This call returns once the launch has been handed to
-    the OS; whether the application keeps running is the application's own
-    affair. The launch is detached from wynxo's console: a GUI application's
-    console children (VS Code's node processes are the loud example) must
-    not be able to print into the UI mid-session.
+    double-click does. When ``open_path`` is given it is appended as an
+    argument, so the application opens with that file loaded (ShellExecute
+    and `open -a` both hand extra arguments to the target). This call
+    returns once the launch has been handed to the OS; whether the
+    application keeps running is the application's own affair. The launch
+    is detached from wynxo's console: a GUI application's console children
+    (VS Code's node processes are the loud example) must not be able to
+    print into the UI mid-session.
     """
+    arg = [open_path] if open_path else []
     path = entry.path
     if sys.platform == "win32" and path.suffix.lower() == ".lnk":
-        await asyncio.to_thread(_startfile, str(path))
+        await asyncio.to_thread(_startfile, str(path), arg[0] if arg else "")
         return
     if sys.platform == "darwin" and path.suffix == ".app":
-        await _shell_launch(["open", str(path)])
+        await _shell_launch(["open", "-a", str(path)] + arg)
         return
     if entry.source == "linux_desktop":
-        await _launch_desktop(path)
+        await _launch_desktop(path, arg[0] if arg else "")
         return
-    await _shell_launch([str(path)])
+    await _shell_launch([str(path)] + arg)
 
 
-async def _launch_desktop(path) -> None:
+async def _launch_desktop(path, open_arg: str = "") -> None:
     """A Linux .desktop entry, via whatever the desktop offers.
 
     ``gio launch`` runs the entry as the file manager would, field codes and
     all; ``gtk-launch`` takes the entry id instead. Neither reconstructs the
-    command line by hand, which is where quoting bugs are born.
+    command line by hand, which is where quoting bugs are born. Both accept
+    a file URI argument, so a requested file can be handed to the launched
+    application.
     """
     import shutil
+    arg = [_file_uri(open_arg)] if open_arg else []
     if shutil.which("gio"):
-        await _shell_launch(["gio", "launch", str(path)])
+        await _shell_launch(["gio", "launch", str(path)] + arg)
         return
     if shutil.which("gtk-launch"):
-        await _shell_launch(["gtk-launch", path.stem])
+        await _shell_launch(["gtk-launch", path.stem] + arg)
         return
     raise OSError(
         "no gio or gtk-launch available to start this application")
 
 
-def _startfile(path: str) -> None:
+def _file_uri(path: str) -> str:
+    """A file:// URI for gio/gtk-launch; the raw path if it cannot be
+    expressed as one (relative paths, odd names)."""
+    from pathlib import Path
+    try:
+        return Path(path).resolve().as_uri()
+    except (OSError, ValueError):
+        return path
+
+
+def _startfile(path: str, arg: str = "") -> None:
     """Launch a shortcut, detached from wynxo's console.
 
     os.startfile hands the .lnk to ShellExecute -- exactly what a double-
@@ -163,13 +203,17 @@ def _startfile(path: str) -> None:
     extension host writes deprecation noise to stderr on every start).
     ``cmd /c start`` keeps the same ShellExecute semantics for the shortcut
     while handing the child null handles and a process group of its own, so
-    nothing it prints can reach our screen. Kept as a module function so
-    tests can stand in for it.
+    nothing it prints can reach our screen. A trailing ``arg`` is handed to
+    the shortcut's target, so the application opens with that file loaded.
+    Kept as a module function so tests can stand in for it.
     """
     if os.name == "nt":
         creation = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        argv = ["cmd", "/c", "start", "", path]
+        if arg:
+            argv.append(arg)
         subprocess.Popen(
-            ["cmd", "/c", "start", "", path],
+            argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

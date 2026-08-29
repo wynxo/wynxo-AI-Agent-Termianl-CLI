@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import re
 import sys
 import textwrap
@@ -244,6 +245,42 @@ class UI:
         self.width = terminal_width()
         self.live_ok = True
         """Whether a rich Live may drive the screen."""
+        # Lines printed since the prompt last opened, so the next prompt can
+        # pad itself to the bottom of the screen. Counted at the console so
+        # every print path is covered, wrapping included.
+        self._lines_since_prompt = 0
+        _print = self.console.print
+
+        def _counting_print(renderable=None, *args, **kwargs):
+            if renderable is None:
+                # A bare console.print() is a blank line. Rich renders a
+                # literal None object as the text "None", so it must never
+                # be handed one -- and the blank line does occupy a row.
+                _print(*args, **kwargs)
+                self._lines_since_prompt += 1
+                return
+            _print(renderable, *args, **kwargs)
+            text = renderable.plain if isinstance(renderable, Text) else str(renderable)
+            self._lines_since_prompt += self._wrap_count(text)
+
+        self.console.print = _counting_print  # type: ignore[method-assign]
+
+    def _wrap_count(self, text: str) -> int:
+        """How many terminal lines ``text`` occupies at the current width,
+        wrapping included -- the count the prompt uses to pin itself."""
+        width = max(1, self.width)
+        total = 0
+        for line in text.splitlines():
+            total += max(1, math.ceil(cell_len(line) / width))
+        return total
+
+    def prompt_lines(self) -> int:
+        """Lines printed since the prompt last opened."""
+        return self._lines_since_prompt
+
+    def reset_prompt_lines(self) -> None:
+        """Start counting a fresh turn's output."""
+        self._lines_since_prompt = 0
 
     def refresh_size(self) -> None:
         """Re-read the terminal width after the window changed size.
@@ -302,6 +339,7 @@ class UI:
         self.console.clear()
         self.console.file.write("\x1b[3J")   # erase saved lines
         self.console.file.flush()
+        self._lines_since_prompt = 0
 
     def wake(self, pet, name: str) -> None:
         """A short wake-up before the header.
