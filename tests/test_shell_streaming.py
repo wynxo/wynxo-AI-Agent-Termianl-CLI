@@ -241,8 +241,12 @@ def test_max_output_config_changes_what_is_kept(tmp_path):
     """config.max_command_output_chars must actually reach the shell: the
     hardcoded constant used to make the setting a lie."""
     import sys
+    # This file is POSIX-only (see the skipif above), so the plain shell
+    # spelling is the right one. It used to carry PowerShell's `&` call
+    # operator, which bash rejects outright -- so the test failed on the one
+    # platform it is allowed to run on, and was skipped on the other.
     py = sys.executable
-    big = f"& '{py}' -c \"import sys; [print('x'*80) for _ in range(600)]\""
+    big = f"'{py}' -c \"import sys; [print('x'*80) for _ in range(600)]\""
     full = run(Shell(workspace=tmp_path), big)
     capped = run(Shell(workspace=tmp_path, max_output=2000), big)
     assert full.ok, full.error

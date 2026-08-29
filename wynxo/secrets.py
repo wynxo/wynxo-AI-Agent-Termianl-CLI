@@ -71,9 +71,11 @@ _SAFE_WORDS = {"public", "publickey", "pub", "fingerprint", "id", "name",
 
 _ASSIGNMENT = re.compile(
     r"""(?x)
-    ([A-Za-z_][A-Za-z0-9_.\-]{0,60})      # the name
+    (?P<namequote>["']?)                  # the name may be quoted ...
+    (?P<name>[A-Za-z_][A-Za-z0-9_.\-]{0,60})
+    (?P=namequote)                        # ... and if so, closed the same way
     [ \t]*[:=][ \t]*                      # ... and its value, same line
-    (["']?)([^\s"',;\\`]{6,})\2
+    (?P<quote>["']?)(?P<value>[^\s"',;\\`]{6,})(?P=quote)
     """
 )
 # Spaces and tabs rather than \s: a name and its value are on one line. With
@@ -84,6 +86,17 @@ _ASSIGNMENT = re.compile(
 # Backslashes and backticks end a value for the same reason: they are never
 # part of one, and including them made "export TOKEN=keepme\n" inside a test
 # fixture and `token=self.token` inside a doc comment look like credentials.
+#
+# The name's own quotes are optional but must balance. Without them the
+# pattern required the name to sit hard against the colon, so a bare
+# api_key was caught while the same name in quotes was not -- and JSON is
+# the most common shape a real credential takes. Every service-account.json,
+# every settings.json, every quoted password in a fixture went to the model
+# and into the jsonl transcript in the clear, which is the exact thing this
+# module exists to prevent.
+#
+# (Spelling the JSON form out here as an example would trip the detector on
+# this very file, which the "wynxo can read its own source" test enforces.)
 
 
 def _names_a_secret(name: str) -> bool:
@@ -254,7 +267,8 @@ def redact(text: str) -> tuple[str, int]:
 
     def mask_named(match: re.Match) -> str:
         nonlocal count
-        name, quote, value = match.group(1), match.group(2), match.group(3)
+        name = match.group("name")
+        quote, value = match.group("quote"), match.group("value")
         if not _names_a_secret(name) or _is_placeholder(value):
             return match.group(0)
         if not quote and _looks_like_a_reference(value):

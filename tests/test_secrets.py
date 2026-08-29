@@ -57,6 +57,16 @@ class TestRedactionCatchesRealCredentials:
         'Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.sig',
         'DATABASE_URL=postgres://user:realpassword@host:5432/db',
         'redis://default:AbCdEf123456@redis-host:6379',
+        # Quoted names. JSON is the most common shape a real credential
+        # takes -- service-account.json, settings.json, a fixture payload --
+        # and the pattern used to require the name to sit directly against
+        # the colon, so every one of these went to the model in the clear.
+        '{"api_key": "abcdef123456789012"}',
+        '{"password": "hunter2hunter2"}',
+        '{ "client_secret" : "s3cr3tvaluehere123" }',
+        '{"private_key": "MIIEowIBAAKCAQEA1234"}',
+        "'api_key': 'abcdef123456789012'",
+        '"AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMIK7MDENGbPxRfiCY"',
     ])
     def test_it_is_masked(self, line):
         cleaned, count = redact(line)
@@ -105,6 +115,13 @@ class TestRedactionLeavesOrdinaryCodeAlone:
         'mongodb://localhost:27017/mydb',
         'import hashlib',
         'key = row["key"]',
+        # A quoted name is only a credential when its *value* is one; these
+        # are the same lookups and placeholders as above, in JSON clothing.
+        '{"name": "my-service-account"}',
+        '{"public_key": "ssh-rsa AAAAB3Nza"}',
+        '{"key_path": "/etc/ssl/private"}',
+        '{"key": "<your-key-here>"}',
+        '{"token_url": "https://oauth.example.com/token"}',
     ])
     def test_it_is_untouched(self, line):
         cleaned, count = redact(line)

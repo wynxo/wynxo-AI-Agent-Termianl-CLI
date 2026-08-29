@@ -1,5 +1,5 @@
-# The targets are Linux and Windows (and Termux, which cannot be checked
-# here -- the pure-python job below is the part of it that can be).
+# The targets are Linux, macOS and Windows (and Termux, which cannot be
+# checked here -- the pure-python job below is the part of it that can be).
 #
 # Until this existed, every cross-platform claim in the project rested on
 # someone reading the code.
@@ -30,9 +30,18 @@ jobs:
       # break is Windows-only or everywhere is most of the diagnosis.
       fail-fast: false
       matrix:
-        # Linux and Windows only. macOS is not a target for this project.
-        os: [ubuntu-latest, windows-latest]
+        # The README promises Linux, macOS, Windows and Termux, and the
+        # tree carries real darwin branches (`open -a`, `say`, the Library
+        # paths). Leaving macOS out of the matrix meant that promise was
+        # never once checked.
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python: ["3.10", "3.13"]
+        exclude:
+          # macOS runners are the expensive ones, and a second interpreter
+          # there buys little: the platform differences live in the paths and
+          # the process handling, not in the Python version.
+          - os: macos-latest
+            python: "3.10"
         include:
           # The oldest and newest supported Python on every OS is more
           # matrix than this project needs; the ends are where breakage
