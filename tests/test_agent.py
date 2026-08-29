@@ -55,6 +55,13 @@ class FakeOllama:
                 return httpx.Response(400, json={
                     "error": 'invalid think value: "medium" (must be "high", '
                              '"medium", "low", "max", true, or false)'})
+            if _is_routing_prompt(body.get("messages", [])):
+                # The intent router asks one classification question before
+                # a turn commits to a shape. It is infrastructure, not part
+                # of the scripted conversation, so it is answered here
+                # rather than eating a turn every test would have to budget
+                # for. Tests about routing set self.route.
+                return _routing_response(self.route)
             turn = self.turns.pop(0) if self.turns else {"content": "Done."}
             message = {"role": "assistant", "content": turn.get("content", "")}
             if turn.get("thinking"):
@@ -98,9 +105,37 @@ class RecordingCallbacks(Callbacks):
         return self.permission
 
 
+def _is_routing_prompt(messages: list[dict]) -> bool:
+    return any("Classify the user's message" in str(m.get("content", ""))
+               for m in messages)
+
+
+def _routing_response(route: str):
+    import httpx
+
+    payload = json.dumps({"kind": route}) if route else '{"kind": "coding"}'
+    return httpx.Response(200, text="\n".join([
+        json.dumps({"message": {"role": "assistant", "content": payload},
+                    "done": False}),
+        json.dumps({"message": {"role": "assistant", "content": ""},
+                    "done": True, "prompt_eval_count": 5, "eval_count": 5,
+                    "total_duration": 10 ** 8}),
+    ]))
+
+
 def make_agent(tmp_path, turns, effort="low", capabilities=("tools",),
-               callbacks=None, think_levels=True):
+               callbacks=None, think_levels=True, route="coding"):
+    """An agent wired to a scripted model.
+
+    Where the effort policy plans before it acts, the turn opens with one
+    cheap intent classification -- that is what stops "open the text editor"
+    reaching the planner and coming back as a coding plan. It is a real model
+    call, so a scripted model has to answer it; ``route`` says what it
+    answers. Tests that care about the routing itself pass their own.
+    """
+    policy = resolve(effort)
     fake = FakeOllama(turns, capabilities, think_levels)
+    fake.route = route or "coding"
     config = Config(
         endpoints=[Endpoint(name="t", url="http://fake:11434")],
         active_endpoint="t",
@@ -113,7 +148,7 @@ def make_agent(tmp_path, turns, effort="low", capabilities=("tools",),
     )
     cb = callbacks or RecordingCallbacks()
     agent = Agent(
-        client, config, resolve(effort), tmp_path, cb,
+        client, config, policy, tmp_path, cb,
         registry=build_registry(tmp_path, allow_shell=True),
     )
     agent.permissions.yolo = callbacks is None
@@ -325,6 +360,24 @@ class TestEffortShapesTheLoop:
         result = await agent.run("do it")
         assert "planning" not in cb.stages
         assert result.verify_rounds == 0
+        # "do it" carries no work signal and no greeting shape, so it is one
+        # of the ambiguous requests the router is asked about -- the class
+        # that used to be sent into the coding loop with the engineering
+        # system prompt and come back sounding like a support bot. One
+        # routing call plus the turn itself; still no plan and no verify.
+        assert len(fake.requests) == 2
+        # Matched without the apostrophe: str() of the message list reprs
+        # the content, which backslash-escapes it.
+        assert sum(any("Classify the user" in str(m.get("content", ""))
+                       for m in r["messages"])
+                   for r in fake.requests) == 1
+
+    async def test_a_clear_work_request_is_not_routed(self, tmp_path):
+        """A path, a code fence or "fix"/"run the tests" is work on its face.
+        Asking the model to confirm that would be a round-trip for nothing."""
+        agent, fake, _ = make_agent(
+            tmp_path, [{"content": "Done."}], effort="low")
+        await agent.run("fix the parser in src/foo.py")
         assert len(fake.requests) == 1
         await agent.client.aclose()
 
@@ -849,7 +902,11 @@ class TestSmallTalkIsNotWork:
         """The actual bug, end to end: one model call, no planning stage,
         no tools, and nothing written to disk."""
         agent, fake, cb = make_agent(
-            tmp_path, [{"content": "Hey! How can I help?"}], effort="ultra")
+            tmp_path, [{"content": "Hey! How can I help?"}], effort="ultra",
+            # A greeting is settled without asking the model, so there is no
+            # routing call to answer -- which is the point of the assertion
+            # below that this is exactly one request.
+            route=None)
         result = await agent.run("hello")
 
         assert result.content == "Hey! How can I help?"
@@ -987,7 +1044,11 @@ class TestProviderErrorsNeverEscape:
 
             index = calls["n"]
             calls["n"] += 1
-            if index == fail_after:
+            # This helper always runs at high effort, which opens the turn
+            # with one intent classification before anything else. Callers
+            # count the agent's own calls, so the offset lives here rather
+            # than in every fail_after they pass.
+            if index == fail_after + 1:
                 return httpx.Response(200, text=json.dumps({"error": message}))
             return httpx.Response(200, text="\n".join([
                 json.dumps({"message": {"role": "assistant",

@@ -39,6 +39,9 @@ from .prompts import (
     build_chat_prompt,
     build_system_prompt,
 )
+from . import intent as intent_mod
+from . import safety
+from .intent import Intent
 from .provider import OllamaClient, ProviderError
 from .model import ModelBackend, OllamaBackend
 from .scope import Boundary, Mode
@@ -468,7 +471,14 @@ class Agent:
         stream_content: bool = True,
         temperature: float | None = None,
         num_predict: int | None = None,
+        silent: bool = False,
     ) -> ParsedTurn:
+        """``silent`` suppresses the thinking channel as well as content.
+
+        For infrastructure calls -- the intent router, compaction -- whose
+        reasoning is not part of the user's conversation and should not land
+        in the thinking record they can open with Ctrl-O.
+        """
         content_parts: list[str] = []
         thinking_parts: list[str] = []
         native_calls: list[dict] = []
@@ -491,7 +501,8 @@ class Agent:
         async for chunk in stream:
             if chunk.thinking:
                 thinking_parts.append(chunk.thinking)
-                await self.cb.on_thinking(chunk.thinking)
+                if not silent:
+                    await self.cb.on_thinking(chunk.thinking)
             if chunk.content:
                 content_parts.append(chunk.content)
                 if stream_content:
@@ -603,6 +614,95 @@ class Agent:
                 plan = f"{plan}\n\nAfter self-critique:\n{critique.content.strip()}"
 
         return plan
+
+    def _needs_routing(self, request: str) -> bool:
+        """Whether this turn is worth one classification call.
+
+        Two shapes need it, and nothing else does:
+
+        *A planning policy.* Where ``_plan()`` runs before ``_act()``, "open
+        the text editor" reaches the planner and comes back as a coding plan
+        with a repository scan attached, because nothing has yet established
+        what the request is. Where there is no planning phase the tool loop
+        starts immediately and its terminal-action guard already ends the
+        turn on the launch.
+
+        *An ambiguous message.* A request carrying a real work signal -- a
+        path, a code fence, "fix", "add", "run the tests" -- is work, and
+        asking about it would be a round-trip to confirm the obvious. What is
+        left is the middle: "nice one", "i hate this bug", "do you think rust
+        is better than go", "im so tired today". Those have no work signal
+        and no greeting shape, so the heuristic sent every one of them into
+        the coding loop, where the engineering system prompt is what made the
+        replies sound like a support bot. They are the turns this call is
+        actually for.
+        """
+        if self.policy.plan in ("explicit", "critique"):
+            return True
+        return not _TASK_SIGNAL.search(request or "")
+
+    async def _classify_call(self, prompt: str) -> str:
+        """One cheap, tool-free model call for the intent router.
+
+        Deliberately off the session: the classifier must not see the
+        conversation and must not add to it. Low temperature and a tight
+        token budget because the answer is one small JSON object, and a
+        router that costs as much as the turn it routes is not worth having.
+        """
+        turn = await self._call_model(
+            messages=[{"role": "user", "content": prompt}],
+            use_tools=False, stream_content=False, silent=True,
+            temperature=0.0, num_predict=64)
+        return turn.content or ""
+
+    async def _system_action(self, request: str, decision,
+                             started: float) -> TurnResult:
+        """Launch what was asked for, then stop.
+
+        The whole point of routing before planning: this path never plans,
+        never verifies, never reads the repository and offers exactly one
+        tool. A system action has a terminal state, and reaching it ends the
+        turn -- there is nothing for the agent loop to add.
+        """
+        await self.cb.on_stage("launching")
+        self.session.add_user(request)
+        launcher = self.tools.get("launch_application")
+        if launcher is None:
+            # No launcher on this build; the request is still not coding.
+            self.session.add_assistant(
+                "I cannot launch applications in this session.")
+            return TurnResult(content="I cannot launch applications in this "
+                                      "session.", iterations=1,
+                              elapsed=time.monotonic() - started)
+
+        outcomes = []
+        for target in decision.targets or (request,):
+            result = await launcher.invoke({"query": target})
+            self._note_terminal(result)
+            await self.cb.on_tool_result(
+                launcher.name, result.ok, result.display or target,
+                result.output)
+            self.session.add_tool_result(launcher.name, result.output)
+            outcomes.append(result)
+
+        content = "\n".join(r.output for r in outcomes if r.output).strip()
+        self.session.add_assistant(content)
+        self.session.save()
+        result = TurnResult(content=content, iterations=1,
+                            elapsed=time.monotonic() - started,
+                            errors=[r.error for r in outcomes
+                                    if not r.ok and r.error])
+        result.terminal_action = True
+        if decision.then_coding:
+            # A genuinely combined request. The action is done; the rest of
+            # the message is ordinary work, so it goes through the normal
+            # loop rather than being dropped on the floor.
+            self._terminal_action = False
+            result.terminal_action = False
+            follow = await self._act(first_turn=None)
+            follow.content = f"{content}\n\n{follow.content}".strip()
+            return follow
+        return result
 
     async def _run_tool_calls(self, turn: ParsedTurn) -> bool:
         """Execute a turn's tool calls. Returns False if the user aborted.
@@ -1371,14 +1471,38 @@ class Agent:
         self._warned_over_window = False
         self._recovery_inserted = False
 
-        # "hello" is not a task. Without this the planning scaffold at high
-        # effort turns a greeting into invented work -- see is_small_talk().
-        # Application launching is deliberately NOT short-circuited here: the
-        # model reads the intent ("open vscode" vs "fix the vscode
-        # integration") and calls launch_application with the user's own
-        # words; the OS catalog decides what actually exists.
-        chatting = is_small_talk(request)
+        # What kind of turn is this? Asked once, before anything commits to a
+        # shape.
+        #
+        # Distress is decided first and locally, because a safety boundary
+        # that depends on a model call is a boundary that opens whenever the
+        # provider is slow, unreachable or talked around. The router is never
+        # consulted for these turns.
         distress = is_distress(request)
+        chatting = is_small_talk(request)
+        if distress or chatting:
+            # Already settled, and settled locally. Neither needs a model
+            # call to tell us what it is.
+            decision = Intent(kind=intent_mod.CONVERSATION, source="fallback")
+        elif self._needs_routing(request):
+            decision = await intent_mod.classify(
+                self._classify_call, request, chatting=chatting)
+        else:
+            # A clear work request on a policy that does not plan first.
+            # Both questions the router answers are already settled.
+            decision = Intent(kind=intent_mod.CODING, source="fallback")
+        self.last_intent = decision
+        # Application launching used to be left for the model to reach on its
+        # own somewhere inside the tool loop. At medium effort and above
+        # _plan() runs first, so "open the text editor" was handed to the
+        # planner, which produced a coding plan and scanned the repository
+        # before anyone had established that this was a launch at all. The
+        # terminal-action guard further down was answering "should this turn
+        # stop now?", which is only decidable after a tool has run; "what is
+        # this turn?" has to be answered before the first one does.
+        if decision.is_system_action:
+            return await self._system_action(request, decision, started)
+        chatting = chatting or decision.is_conversation
         initial: ParsedTurn | None = None
         """A turn already obtained (conversation that grew tool calls); the
         tool loop executes it before asking the model again. Currently only
@@ -1408,7 +1532,13 @@ class Agent:
             try:
                 turn = await self._call_model(
                     messages=chat_wire, temperature=0.95, num_predict=200,
-                    use_tools=False)
+                    use_tools=False,
+                    # A safety-sensitive turn is completed before any of it
+                    # is shown. Streaming is the hole in an output boundary:
+                    # by the time a procedural answer is recognisable it is
+                    # already on the user's terminal and cannot be taken
+                    # back. Ordinary conversation still streams.
+                    stream_content=not distress)
             except ProviderError as exc:
                 return TurnResult(content="", elapsed=time.monotonic() - started,
                                   errors=[str(exc)])
@@ -1438,9 +1568,20 @@ class Agent:
                 if turn.tool_calls:
                     turn = ParsedTurn(content=turn.content or "", tool_calls=[])
             await self._warn_if_nothing_came_back(turn)
-            self.session.add_assistant(turn.content)
+            content = turn.content
+            if distress:
+                # Nothing was streamed, so the whole reply is emitted here --
+                # screened first. The runtime decides what reaches the screen
+                # on this turn, not the prompt and not the model's
+                # disposition. Usually that is the model's own words
+                # unchanged; when it is not, it is because they were
+                # procedural.
+                content = safety.screen(content)
+                if content:
+                    await self.cb.on_content(content)
+            self.session.add_assistant(content)
             self.session.save()
-            return TurnResult(content=turn.content, iterations=1,
+            return TurnResult(content=content, iterations=1,
                               elapsed=time.monotonic() - started)
 
         if self.policy.plan == "inline" and initial is None:

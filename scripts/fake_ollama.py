@@ -40,6 +40,27 @@ def plan_for(request: str) -> str:
     )
 
 
+def _routing_answer(text: str) -> dict | None:
+    """The intent router's question, answered.
+
+    Recognised by the shape of the router's prompt rather than by any phrase
+    in the user's message, so this stays a stand-in for a model reading the
+    request rather than a keyword table pretending to be one.
+    """
+    if "Classify the user's message" not in text:
+        return None
+    message = text.rsplit("Message:", 1)[-1].strip().lower()
+    if re.search(r"\b(open|launch|start|run)\b", message):
+        target = re.sub(r".*\b(?:open|launch|start|run)\s+", "", message).strip(" .?!")
+        combined = bool(re.search(r"\b(inspect|review|check|fix|read)\b", message))
+        if combined:
+            target = target.split(" and ")[0].strip()
+        return {"content": json.dumps({"kind": "system_action",
+                                       "targets": [target or "editor"],
+                                       "then_coding": combined})}
+    return {"content": json.dumps({"kind": "coding", "targets": []})}
+
+
 def decide(messages: list[dict], tools: list | None) -> dict:
     """Pick a reply. Deliberately simple -- this is a harness, not a model."""
     last = messages[-1] if messages else {}
@@ -75,6 +96,8 @@ def decide(messages: list[dict], tools: list | None) -> dict:
             args["path"] = "README.md"
         return {"tool_calls": [{"function": {"name": name, "arguments": args}}]}
 
+    if (routed := _routing_answer(text)) is not None:
+        return routed
     if re.search(r"\b(reply with exactly|say ok)\b", low):
         return {"content": "OK"}
     if re.search(r"\d+\s*[*x]\s*\d+", text):
@@ -86,6 +109,13 @@ def decide(messages: list[dict], tools: list | None) -> dict:
         # A plan on request, so the todo panel and its overlay can be driven
         # without a real model. The layout tests need a plan on screen to
         # prove an overlay cannot move the composer.
+        # A launch request, so the system-action path can be driven without
+        # a real model deciding to call it.
+        if re.search(r"\b(open|launch|start|run)\b", low) and "launch_application" in names:
+            target = re.sub(r".*\b(?:open|launch|start|run)\s+", "", text).strip(" .?!")
+            return {"tool_calls": [{"function": {
+                "name": "launch_application",
+                "arguments": {"query": target or "editor"}}}]}
         if "plan" in low and "todo_write" in names:
             return {"tool_calls": [{"function": {
                 "name": "todo_write",
