@@ -44,14 +44,52 @@ from typing import Callable
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.filters import Condition
+from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import (Float, FloatContainer, HSplit, Layout,
-                                   Window)
+from prompt_toolkit.mouse_events import MouseEventType
+from prompt_toolkit.layout import (ConditionalContainer, Float,
+                                   FloatContainer, HSplit, Layout, Window)
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.output.defaults import create_output
+
+
+class _Wheel(FormattedTextControl):
+    """A read-only control that answers the scroll wheel.
+
+    The transcript is not focusable -- focus belongs to the composer and
+    stays there -- and prompt_toolkit routes mouse events to the control
+    under the pointer rather than to the focused one, so the wheel has to be
+    handled here or it does nothing at all.
+    """
+
+    def __init__(self, *args, on_scroll=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._on_scroll = on_scroll
+
+    def mouse_handler(self, mouse_event):
+        if self._on_scroll is None:
+            return NotImplemented
+        if mouse_event.event_type == MouseEventType.SCROLL_UP:
+            self._on_scroll(3)
+            return None
+        if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+            self._on_scroll(-3)
+            return None
+        # Everything else (clicks, drags) is left alone so it can fall
+        # through to the terminal rather than being swallowed here.
+        return NotImplemented
+
+def _visible_width(text: str) -> int:
+    """Cells a styled string occupies, ignoring its escape sequences."""
+    import re
+
+    from rich.cells import cell_len
+
+    return cell_len(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text))
+
 
 MIN_WIDTH = 20
 MAX_SCROLLBACK = 20_000
@@ -185,6 +223,24 @@ class ChatLayout:
         self.buffer = Buffer(completer=completer, complete_while_typing=True,
                              multiline=True, accept_handler=self._accept)
         self._submitted: asyncio.Queue[str] = asyncio.Queue()
+
+        # -- modals ---------------------------------------------------------
+        # Everything that used to open a *second* prompt_toolkit Application
+        # runs in this one instead. Two applications cannot share a terminal:
+        # the second takes the output, and on exit leaves the first with a
+        # screen state its renderer believes is already correct -- which is
+        # why /model shredded the header, overwrote the composer and left the
+        # footer behind.
+        self._picker: dict | None = None
+        """Title, choices, cursor and the future waiting on the answer."""
+        self._ask: dict | None = None
+        """A one-line question borrowing the composer. Its future takes the
+        next submission, so the main loop cannot swallow the answer."""
+
+        self.mouse_on = True
+        """Mouse reporting. On, the wheel scrolls the transcript; off, the
+        terminal does its own drag-select and copy. Toggled with F2."""
+
         self.app = self._build()
 
     # -- the size the layout is reasoning about ---------------------------
@@ -295,7 +351,14 @@ class ChatLayout:
         return ANSI(f"\x1b[2m{bar * width}\x1b[0m")
 
     def _footer_fragments(self):
-        return ANSI(self._footer())
+        text = self._footer()
+        note = " F2 select" if self.mouse_on else " F2 scroll  [select mode]"
+        width, _ = self.size()
+
+        plain = _visible_width(text)
+        if plain + len(note) + 1 <= width:
+            text = text + " " * max(1, width - plain - len(note)) + note
+        return ANSI(text)
 
     def _overlay_fragments(self):
         return ANSI("\n".join(self._overlay()))
@@ -309,14 +372,97 @@ class ChatLayout:
         """The caret, on the first row only; continuation rows get a gutter
         of the same width so multi-line input stays aligned under it."""
         if line_number == 0 and wrap_count == 0:
+            if self._ask is not None:
+                # The question replaces the caret, so it is obvious what the
+                # composer is asking for rather than what it usually accepts.
+                return [("class:caret", f"{self._ask['question']} ")]
             return [("class:caret", "❯ " if self.unicode else "> ")]
         return [("class:caret", "  ")]
 
     # -- input -------------------------------------------------------------
 
     def _accept(self, buffer: Buffer) -> bool:
-        self._submitted.put_nowait(buffer.text)
+        if self._ask is not None and not self._ask["future"].done():
+            # A question is borrowing the composer. Its answer belongs to
+            # whoever asked, not to the main loop -- both await the same
+            # composer, and a shared queue would hand it to whichever
+            # happened to be waiting first.
+            self._ask["future"].set_result(buffer.text)
+        else:
+            self._submitted.put_nowait(buffer.text)
         return False        # False: clear the buffer after accepting
+
+    async def ask(self, question: str, default: str = "") -> str:
+        """Ask for a line of text in the composer, inside this application."""
+        loop = asyncio.get_running_loop()
+        self._ask = {"question": question, "future": loop.create_future()}
+        if default:
+            self.buffer.text = default
+            self.buffer.cursor_position = len(default)
+        self.focus_composer()
+        self.invalidate()
+        try:
+            return await self._ask["future"]
+        finally:
+            self._ask = None
+            self.buffer.reset()
+            self.invalidate()
+
+    async def pick(self, title: str, choices: list, default: int = 0):
+        """An arrow-key chooser, drawn as an overlay in this application.
+
+        Returns the chosen ``Choice.value``, or None when escaped.
+        """
+        loop = asyncio.get_running_loop()
+        self._picker = {"title": title, "choices": choices,
+                        "index": max(0, min(default, len(choices) - 1)),
+                        "future": loop.create_future()}
+        self.invalidate()
+        try:
+            return await self._picker["future"]
+        finally:
+            self._picker = None
+            # Focus goes straight back to the composer: the point of closing
+            # a picker is to carry on typing, not to hunt for the caret.
+            self.focus_composer()
+            self.invalidate()
+
+    def picking(self) -> bool:
+        return self._picker is not None
+
+    def _picker_fragments(self):
+        picker = self._picker
+        if picker is None:
+            return []
+        cursor = "\u276f" if self.unicode else ">"
+        out: list[tuple[str, str]] = []
+        if picker["title"]:
+            out.append(("class:picker.title", f"  {picker['title']}\n"))
+        width, height = self.size()
+        room = max(3, min(len(picker["choices"]), height - 8))
+        first = max(0, min(picker["index"] - room // 2,
+                           len(picker["choices"]) - room))
+        for offset, choice in enumerate(picker["choices"][first:first + room]):
+            i = first + offset
+            selected = i == picker["index"]
+            out.append(("class:picker.cursor", f"  {cursor} " if selected else "    "))
+            label = getattr(choice, "label", str(choice))
+            style = "class:picker.selected" if selected else "class:picker.row"
+            out.append((style, label))
+            if getattr(choice, "badge", ""):
+                out.append(("class:picker.badge", f"  {choice.badge}"))
+            if getattr(choice, "hint", ""):
+                out.append(("class:picker.hint", f"  {choice.hint}"))
+            out.append(("", "\n"))
+        out.append(("class:picker.hint",
+                    "  up/down to move  enter to choose  esc to cancel"))
+        return to_formatted_text(out)
+
+    def _picker_height(self) -> int:
+        if self._picker is None:
+            return 0
+        _, height = self.size()
+        return min(len(self._picker["choices"]) + 2, max(5, height - 6))
 
     async def prompt_async(self, *_args, default: str = "", **_kwargs) -> str:
         """The next submitted line. Same shape as PromptSession.prompt_async."""
@@ -349,6 +495,43 @@ class ChatLayout:
 
     def _keys(self) -> KeyBindings:
         keys = KeyBindings()
+        picking = Condition(self.picking)
+        typing = Condition(lambda: self._picker is None)
+
+        @keys.add("up", filter=picking)
+        def _(event):
+            self._picker["index"] = max(0, self._picker["index"] - 1)
+
+        @keys.add("down", filter=picking)
+        def _(event):
+            self._picker["index"] = min(len(self._picker["choices"]) - 1,
+                                        self._picker["index"] + 1)
+
+        @keys.add("enter", filter=picking)
+        def _(event):
+            picker = self._picker
+            if not picker["future"].done():
+                picker["future"].set_result(
+                    picker["choices"][picker["index"]].value)
+
+        @keys.add("escape", filter=picking)
+        @keys.add("c-c", filter=picking)
+        def _(event):
+            if not self._picker["future"].done():
+                self._picker["future"].set_result(None)
+
+        @keys.add("f2")
+        def _(event):
+            """Hand the mouse back to the terminal, or take it again.
+
+            With reporting on, the wheel scrolls the transcript but the
+            terminal never sees a drag, so click-and-drag selection does
+            nothing. Off, selection and copy work exactly as they do in any
+            other program. Neither is right all the time, so it is a toggle
+            rather than a decision made once for everyone.
+            """
+            self.mouse_on = not self.mouse_on
+            self.invalidate()
 
         @keys.add("pageup")
         def _(event):
@@ -362,7 +545,7 @@ class ChatLayout:
         def _(event):
             self.to_bottom()
 
-        @keys.add("enter")
+        @keys.add("enter", filter=typing)
         def _(event):
             # Enter submits; Alt-Enter (below) inserts a newline. A composer
             # that needed a modifier to send would be wrong for a chat.
@@ -391,8 +574,8 @@ class ChatLayout:
         # unbounded and its preferred is zero, so _divide_heights hands it
         # every row the fixed children did not claim.
         transcript = Window(
-            content=FormattedTextControl(self._transcript_fragments,
-                                         focusable=False),
+            content=_Wheel(self._transcript_fragments, focusable=False,
+                           on_scroll=self.scroll_by),
             wrap_lines=False,          # rich already wrapped to the width
             height=Dimension(min=0, preferred=0, weight=1),
         )
@@ -457,6 +640,16 @@ class ChatLayout:
                 # a menu is what put six blank rows under the old prompt.
                 Float(xcursor=True, ycursor=True,
                       content=CompletionsMenu(max_height=8, scroll_offset=1)),
+                # bottom=3 clears the composer (1), the footer (1) and the
+                # rule (1). At 2 the picker's last row landed on the rule and
+                # the two drew over each other.
+                Float(bottom=3, left=2, right=2,
+                      height=self._picker_height,
+                      content=ConditionalContainer(
+                          Window(content=FormattedTextControl(
+                              self._picker_fragments, focusable=False),
+                              style="class:picker"),
+                          filter=Condition(self.picking))),
             ],
         )
 
@@ -464,7 +657,11 @@ class ChatLayout:
             layout=Layout(root, focused_element=composer),
             key_bindings=self._keys(),
             full_screen=True,
-            mouse_support=True,
+            # A filter, not a flag. Mouse reporting is what lets the wheel
+            # scroll the transcript, and also what stops the terminal from
+            # ever seeing a drag -- which is why selection appeared broken.
+            # F2 hands it back.
+            mouse_support=Condition(lambda: self.mouse_on),
             erase_when_done=True,
             style=self._style(),
             output=create_output(stdout=None),
@@ -478,6 +675,13 @@ class ChatLayout:
             "footer": f"bg:#1c1c1c {self.accent}",
             "caret": f"bold {self.accent}",
             "composer": "",
+            "picker": "bg:#161616",
+            "picker.title": f"bold {self.accent}",
+            "picker.cursor": f"bold {self.accent}",
+            "picker.selected": f"bold {self.accent}",
+            "picker.row": "",
+            "picker.badge": "#7f7f7f",
+            "picker.hint": "#7f7f7f",
         })
 
     # -- running -----------------------------------------------------------

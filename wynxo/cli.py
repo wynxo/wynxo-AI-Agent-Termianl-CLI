@@ -667,6 +667,12 @@ class TerminalCallbacks(Callbacks):
             if pet is not None and pet.enabled:
                 pet.react(Mood.CELEBRATING)
             await self.bar.finish_plan()
+            # finish_plan takes the bar's copy down; the overlay holds its own
+            # rendered lines and would otherwise sit there for the rest of the
+            # session insisting the work is still under way.
+            if self.chat is not None:
+                self.plan_lines.clear()
+                self.chat.invalidate()
 
     async def on_warning(self, message: str) -> None:
         self._end_stream()
@@ -1136,6 +1142,17 @@ class Repl:
         self.prompt_session = chat        # same prompt_async shape
         self.callbacks.prompt_session = chat
         return True
+
+    def _live_chat(self):
+        """The running layout, or None.
+
+        An attribute read is not enough: several code paths reach these
+        helpers on a Repl built with __new__ (stubs in the tests, and the
+        early-exit paths before __init__ finishes), where ``chat`` does not
+        exist yet. Asking in one place keeps that from being rediscovered at
+        every new call site.
+        """
+        return getattr(self, "chat", None)
 
     def _chat_header(self) -> str:
         model = self.config.model
@@ -3549,9 +3566,13 @@ class Repl:
         Returns the key that was answered, or "" for cancelled.
         """
         try:
-            typed = (await self.prompt_session.prompt_async(
-                HTML(f'<style fg="{ACCENT}">  {_escape(question)} </style>')
-            )).strip().lower()
+            chat = self._live_chat()
+            if chat is not None:
+                typed = (await chat.ask(question)).strip().lower()
+            else:
+                typed = (await self.prompt_session.prompt_async(
+                    HTML(f'<style fg="{ACCENT}">  {_escape(question)} </style>')
+                )).strip().lower()
         except (EOFError, KeyboardInterrupt):
             return ""
         if not typed:
@@ -3564,6 +3585,9 @@ class Repl:
     async def _type_in(self, question: str, default: str = "") -> str:
         """Read a line of free text."""
         try:
+            chat = self._live_chat()
+            if chat is not None:
+                return (await chat.ask(question, default=default)).strip()
             return (await self.prompt_session.prompt_async(
                 HTML(f'<style fg="{ACCENT}">  {_escape(question)} </style>'),
                 default=default)).strip()
@@ -3588,6 +3612,18 @@ class Repl:
                    hint=option[1])
             for option in options
         ]
+        chat = self._live_chat()
+        if chat is not None:
+            # Inside the layout the chooser is an overlay in the *same*
+            # application. select.choose() builds a second one, and two
+            # prompt_toolkit applications cannot share a terminal: the
+            # second takes the output and leaves the first believing the
+            # screen already matches its own last frame. That is what tore
+            # the header, the composer and the footer apart after /model.
+            return await chat.pick(
+                title, choices,
+                default=next((i for i, c in enumerate(choices)
+                              if c.value == current), 0))
         if not arrows_supported():
             return NO_PICKER
         return await choose(

@@ -30,6 +30,7 @@ from prompt_toolkit.data_structures import Size
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.mouse_handlers import MouseHandlers
 from prompt_toolkit.layout.screen import Screen, WritePosition
+from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.output import DummyOutput
 
 from wynxo.layout import ChatLayout
@@ -245,3 +246,101 @@ class TestTheOverlayFitsWhatItHolds:
         assert widest <= ChatLayout.TODO_WIDTH, (
             f"the plan panel renders {widest} cells wide but the overlay "
             f"Float is only {ChatLayout.TODO_WIDTH}; the border is clipped")
+
+
+class TestModalsRunInsideTheOneApplication:
+    """The /model corruption, pinned down.
+
+    Two prompt_toolkit Applications cannot share a terminal. The second takes
+    the output, and on exit leaves the first with a screen its renderer
+    believes already matches -- so the header, composer and footer were all
+    left as whatever the picker had drawn over them. Everything that used to
+    open its own Application is an overlay in this one now.
+    """
+
+    async def test_nothing_in_the_layout_starts_a_second_application(self):
+        """The import that would resurrect the bug."""
+        import inspect
+
+        from wynxo import cli
+
+        source = inspect.getsource(cli.Repl._pick)
+        assert "chat.pick(" in source, "the picker must run inside the layout"
+        # select.choose() may still be reached, but only when there is no
+        # layout running to conflict with.
+        assert "self._live_chat()" in source
+
+    async def test_the_picker_is_a_float_and_moves_nothing(self):
+        from wynxo.select import Choice
+
+        ui, before = measure(100, 30, lines=40)
+        ui._picker = {"title": "model", "index": 0,
+                      "choices": [Choice(value=f"m{i}", label=f"model {i}")
+                                  for i in range(12)],
+                      "future": None}
+        assert ui.picking()
+        _, during = measure(100, 30, lines=40)
+        assert during == before, "an open picker changed the geometry"
+
+    async def test_a_question_borrows_the_composer_not_the_main_queue(self):
+        """Both the asker and the REPL loop await the composer. A shared
+        queue would hand the answer to whichever happened to be waiting."""
+        ui, _ = measure(80, 24)
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        ui._ask = {"question": "which one?", "future": loop.create_future()}
+        ui.buffer.text = "the answer"
+        ui._accept(ui.buffer)
+        assert ui._ask["future"].result() == "the answer"
+        assert ui._submitted.empty(), "the main loop must not see it"
+
+    async def test_without_a_question_the_main_loop_gets_it(self):
+        ui, _ = measure(80, 24)
+        ui.buffer.text = "a normal message"
+        ui._accept(ui.buffer)
+        assert ui._submitted.get_nowait() == "a normal message"
+
+
+def _mouse(event_type):
+    """A MouseEvent, whatever this prompt_toolkit requires of one."""
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import (MouseButton, MouseEvent)
+
+    return MouseEvent(position=Point(x=3, y=3), event_type=event_type,
+                      button=MouseButton.NONE, modifiers=frozenset())
+
+
+class TestMouseAndSelection:
+    async def test_mouse_reporting_is_a_filter_not_a_flag(self):
+        """Reporting on is what stops the terminal ever seeing a drag, which
+        is why selection looked broken. It has to be switchable at runtime."""
+        ui, _ = measure(80, 24)
+        assert ui.mouse_on is True
+        ui.mouse_on = False
+        assert ui.app.mouse_support() is False
+        ui.mouse_on = True
+        assert ui.app.mouse_support() is True
+
+    async def test_the_footer_says_which_mode_the_mouse_is_in(self):
+        ui, _ = measure(80, 24)
+        assert "F2" in str(ui._footer_fragments().value)
+        ui.mouse_on = False
+        assert "select mode" in str(ui._footer_fragments().value)
+
+    async def test_the_wheel_scrolls_the_transcript(self):
+        ui, _ = measure(80, 24, lines=200)
+        control = ui._transcript_window.content
+        assert ui.scroll == 0
+        control.mouse_handler(_mouse(MouseEventType.SCROLL_UP))
+        assert ui.scroll > 0, "the wheel must reach the transcript"
+        control.mouse_handler(_mouse(MouseEventType.SCROLL_DOWN))
+        assert ui.scroll == 0
+
+    async def test_clicks_and_drags_are_not_swallowed(self):
+        """Only the wheel is claimed. Anything else falls through, so a
+        terminal that does its own selection still can."""
+        ui, _ = measure(80, 24, lines=50)
+        control = ui._transcript_window.content
+        result = control.mouse_handler(_mouse(MouseEventType.MOUSE_DOWN))
+        assert result is NotImplemented
