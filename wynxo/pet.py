@@ -30,6 +30,12 @@ class Mood(Enum):
     ASKING = "asking"
     HAPPY = "happy"
     SAD = "sad"
+    CELEBRATING = "celebrating"
+    """The plan finished. Distinct from HAPPY, which is a reaction to one
+    good step -- this is the end of the work, and it gets the big face."""
+    SLEEPY = "sleepy"
+    """Idle for a long while. The companion dozing off is a quieter way of
+    saying nothing is happening than a spinner that never stops."""
 
 
 # Frames per mood. The last frame of a cycle is usually a blink, which is what
@@ -47,6 +53,8 @@ FACES: dict[Mood, list[str]] = {
     Mood.ASKING:   ["≽^•⩊•^≼?", "≽^•⩊•^≼ ", "≽^•⩊•^≼?", "≽^•⩊•^≼ "],
     Mood.HAPPY:    ["≽^≧⩊≦^≼", "≽^ᵕ⩊ᵕ^≼"],
     Mood.SAD:      ["≽^╥⩊╥^≼", "≽^╥⩊╥^≼", "≽^×⩊×^≼"],
+    Mood.CELEBRATING: ["≽^≧⩊≦^≼", "≽^◕⩊◕^≼", "≽^≧⩊≦^≼", "≽^ᵕ⩊ᵕ^≼"],
+    Mood.SLEEPY:   ["≽^-⩊-^≼", "≽^-⩊-^≼", "≽^˘⩊˘^≼", "≽^-⩊-^≼"],
 }
 
 FACES_ASCII: dict[Mood, list[str]] = {
@@ -61,6 +69,8 @@ FACES_ASCII: dict[Mood, list[str]] = {
     Mood.ASKING:   ["=^.^=?", "=^.^= ", "=^.^=?", "=^.^= "],
     Mood.HAPPY:    ["=^_^=", "=^v^="],
     Mood.SAD:      ["=^x.x^=", "=^x.x^=", "=^@.@^="],
+    Mood.CELEBRATING: ["\\=^_^=/", "-=^o^=-", "/=^_^=\\", "-=^o^=-"],
+    Mood.SLEEPY:   ["=^-^= ", "=^-^=z", "=^-^=z", "=^-^= "],
 }
 
 # Rounder and fluffier, for the kawaii voice. Paws out.
@@ -75,6 +85,10 @@ FACES_KAWAII: dict[Mood, list[str]] = {
     Mood.ASKING:   ["₍ᐢ•ﻌ•ᐢ₎?", "₍ᐢ•ﻌ•ᐢ₎ ", "₍ᐢ•ﻌ•ᐢ₎?", "₍ᐢ•ﻌ•ᐢ₎ "],
     Mood.HAPPY:    ["₍ᐢ≧ﻌ≦ᐢ₎", "₍ᐢᵕﻌᵕᐢ₎"],
     Mood.SAD:      ["₍ᐢ╥ﻌ╥ᐢ₎", "₍ᐢ╥ﻌ╥ᐢ₎", "₍ᐢ×ﻌ×ᐢ₎"],
+    # The paws come up and the sparkle alternates sides, so the celebration
+    # reads as movement rather than as one loud frame held for a second.
+    Mood.CELEBRATING: ["₍ᐢ≧ﻌ≦ᐢ₎✧", "₍ᐢ◕ﻌ◕ᐢ₎ ", "₍ᐢ≧ﻌ≦ᐢ₎✧", "₍ᐢᵕﻌᵕᐢ₎ "],
+    Mood.SLEEPY:   ["₍ᐢ-ﻌ-ᐢ₎ ", "₍ᐢ-ﻌ-ᐢ₎z", "₍ᐢ˘ﻌ˘ᐢ₎z", "₍ᐢ-ﻌ-ᐢ₎ "],
 }
 
 MOOD_STYLES: dict[Mood, str] = {
@@ -88,6 +102,8 @@ MOOD_STYLES: dict[Mood, str] = {
     Mood.ASKING: "yellow",
     Mood.HAPPY: "green",
     Mood.SAD: "red",
+    Mood.CELEBRATING: "bright_green",
+    Mood.SLEEPY: "grey42",
 }
 
 # Which activity name maps to which mood. Anything unrecognised stays THINKING,

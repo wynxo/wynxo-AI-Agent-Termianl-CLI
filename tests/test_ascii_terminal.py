@@ -60,21 +60,51 @@ class TestInputBox:
         repl = types.SimpleNamespace(ui=ui)
         repl._status_line = lambda: "medium . 0 tok . ctx 0%"
         repl._prompt_note = None
-        repl._open_box = cli.Repl._open_box.__get__(repl, type(repl))
+        repl._echo_prompt = cli.Repl._echo_prompt.__get__(repl, type(repl))
         repl._bottom_toolbar = cli.Repl._bottom_toolbar.__get__(repl, type(repl))
         repl._prompt_message = cli.Repl._prompt_message.__get__(repl, type(repl))
         repl._border_plain = cli.Repl._border_plain.__get__(repl, type(repl))
         return repl
 
-    def test_top_edge_is_ascii(self, monkeypatch):
+    def test_the_top_edge_is_part_of_the_prompt(self, monkeypatch):
+        """The border belongs to prompt_toolkit's own render now.
+
+        It used to be printed separately with console.print while
+        prompt_toolkit drew the closing toolbar. prompt_toolkit reaches the
+        bottom row by emitting newlines, so the two drifted apart: the top
+        border was stranded halfway up the screen with a void of blank rows
+        between it and the rest of the box.
+        """
+        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
+        ui = ascii_ui()
+        ui.width = 40
+        message = self._repl(ui)._prompt_message().value
+        top = message.splitlines()[0]
+        assert "+" + "-" * 38 + "+" in top
+        assert top.isascii()
+
+    def test_the_box_is_never_drawn_into_the_transcript(self, monkeypatch):
+        """Nothing prints a border any more, so no frame can be stranded."""
         monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
         ui = ascii_ui()
         ui.width = 40
         stream = capture(ui)
-        self._repl(ui)._open_box()
-        line = stream.getvalue().strip()
-        assert line.isascii()
-        assert line == "+" + "-" * 38 + "+"
+        self._repl(ui)._echo_prompt("hello")
+        drawn = stream.getvalue()
+        assert "+--" not in drawn and "\u256d" not in drawn
+        assert "> hello" in drawn
+
+    def test_no_cursor_arithmetic_is_emitted(self, monkeypatch):
+        """The old seating wrote raw cursor jumps and guessed the row from
+        how much the turn had printed. It guessed wrong whenever the screen
+        had scrolled, which is most of the time."""
+        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
+        ui = ascii_ui()
+        ui.width = 40
+        ui._lines_since_prompt = 7
+        stream = capture(ui)
+        self._repl(ui)._echo_prompt("hi")
+        assert "\x1b[" not in stream.getvalue().replace("\x1b[0m", "")
 
     def test_dumb_terminals_get_no_frame_at_all(self, monkeypatch):
         """prompt_toolkit draws no toolbar there, so an opening edge would
@@ -84,75 +114,8 @@ class TestInputBox:
         ui.width = 40
         stream = capture(ui)
         repl = self._repl(ui)
-        repl._open_box()
-        assert stream.getvalue() == ""
         assert repl._prompt_message().value == "<b>&gt;</b> "
-
-    def test_short_output_moves_the_cursor_to_the_bottom(
-            self, monkeypatch):
-        """A short turn leaves the cursor mid-screen; the box is seated by
-        moving the cursor down, not by printing blank rows (which would wall
-        up the scrollback)."""
-        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
-        monkeypatch.setattr(cli, "terminal_height", lambda: 20)
-        ui = ascii_ui()
-        ui.width = 40
-        ui._lines_since_prompt = 7
-        stream = capture(ui)
-        repl = self._repl(ui)
-        repl._pad_to_bottom = cli.Repl._pad_to_bottom.__get__(repl, type(repl))
-        repl._pad_to_bottom()
-        # 20 rows, 3 belong to the box; cursor on row 7 -> move down 10.
-        assert stream.getvalue() == "\x1b[10B"
-
-    def test_a_full_screen_of_output_moves_nothing(self, monkeypatch):
-        """Once the output scrolled the screen the cursor is already at the
-        bottom; a move would only overshoot."""
-        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
-        monkeypatch.setattr(cli, "terminal_height", lambda: 20)
-        ui = ascii_ui()
-        ui.width = 40
-        ui._lines_since_prompt = 25
-        stream = capture(ui)
-        repl = self._repl(ui)
-        repl._pad_to_bottom = cli.Repl._pad_to_bottom.__get__(repl, type(repl))
-        repl._pad_to_bottom()
-        assert stream.getvalue() == ""
-
-    def test_the_move_never_lands_above_the_box_rows(self, monkeypatch):
-        """A huge output can only push the cursor to the last row; the box
-        still has room for all three of its rows."""
-        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
-        monkeypatch.setattr(cli, "terminal_height", lambda: 5)
-        ui = ascii_ui()
-        ui.width = 40
-        ui._lines_since_prompt = 100
-        stream = capture(ui)
-        repl = self._repl(ui)
-        repl._pad_to_bottom = cli.Repl._pad_to_bottom.__get__(repl, type(repl))
-        repl._pad_to_bottom()
-        assert stream.getvalue() == ""
-
-    def test_dumb_terminals_never_move(self, monkeypatch):
-        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: True)
-        ui = ascii_ui()
-        ui.width = 40
-        ui._lines_since_prompt = 2
-        stream = capture(ui)
-        repl = self._repl(ui)
-        repl._pad_to_bottom = cli.Repl._pad_to_bottom.__get__(repl, type(repl))
-        repl._pad_to_bottom()
-        assert stream.getvalue() == ""
-
-    def test_dumb_terminals_never_pad(self, monkeypatch):
-        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: True)
-        ui = ascii_ui()
-        ui.width = 40
-        ui._lines_since_prompt = 2
-        stream = capture(ui)
-        repl = self._repl(ui)
-        repl._pad_to_bottom = cli.Repl._pad_to_bottom.__get__(repl, type(repl))
-        repl._pad_to_bottom()
+        repl._echo_prompt("hello")
         assert stream.getvalue() == ""
 
     def test_bottom_edge_is_ascii_and_exactly_one_width(self):

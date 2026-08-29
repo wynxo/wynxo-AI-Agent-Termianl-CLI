@@ -1234,6 +1234,10 @@ class ActivityBar:
         plan is one thing that changes, not a stream of panels."""
         self.plan_done_frame = 0
         """Non-zero while the completion animation is playing."""
+        self.corner = None
+        """A CornerPlan when the terminal can pin one. The plan lives in the
+        top-right corner there instead of in this strip, so it stops shoving
+        the answer and the composer around every time a step ticks off."""
         self.lead: Text | None = None
         self.tool_events: list = []
         self.max_tool_events = 6
@@ -1418,6 +1422,8 @@ class ActivityBar:
     def set_plan(self, rendered: str) -> None:
         self.plan = rendered or ""
         self.plan_done_frame = 0
+        if self.corner is not None:
+            self.corner.set(self.plan)
         self.refresh()
 
     def plan_is_complete(self) -> bool:
@@ -1437,15 +1443,23 @@ class ActivityBar:
             return
         for frame in range(1, self.PLAN_DONE_FRAMES + 1):
             self.plan_done_frame = frame
+            if self.corner is not None:
+                self.corner.pulse(frame)
             self.refresh()
             await asyncio.sleep(0.06)
         self.plan = ""
         self.plan_done_frame = 0
+        if self.corner is not None:
+            self.corner.clear()
         self.refresh()
 
     def _plan_panel(self):
-        """The pinned plan, or None when there is nothing to show."""
-        if not self.plan:
+        """The plan drawn inline, for terminals that cannot pin a corner.
+
+        Where CornerPlan armed, the plan is up in the top-right and drawing
+        it again here would show it twice.
+        """
+        if not self.plan or (self.corner is not None and self.corner.armed):
             return None
         g = self.ui.g
         body = Text()
@@ -1522,6 +1536,12 @@ class ActivityBar:
         if live is not None:
             with contextlib.suppress(Exception):
                 live.stop()
+        if self.corner is not None:
+            # The scrolling region must not outlive the turn: the composer
+            # is drawn below it, and a stale region would keep the top rows
+            # frozen for the rest of the session -- and after wynxo exits.
+            with contextlib.suppress(Exception):
+                self.corner.clear()
 
     def __enter__(self) -> "ActivityBar":
         self.start()
