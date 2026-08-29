@@ -22,7 +22,8 @@ from .config import (
     normalise_url,
 )
 from .effort import ORDER, resolve
-from .discovery import Found, private_subnets, scan_loopback, scan_subnets, verify
+from .discovery import (Found, private_subnets, scan_device, scan_loopback,
+                        scan_subnets, verify)
 from .provider import OllamaClient, ProviderError, inspect_all
 from .select import (
     HINT, HINT_ASCII, Choice, choose, silence_cpr_warning,
@@ -73,6 +74,10 @@ async def ask_endpoint(ui: UI, prompt_session: PromptSession) -> Endpoint:
     found: list[Found] = []
     with ui.status("checking this machine...") as status:
         found = await scan_loopback()
+        # The machine's own LAN address too: Ollama started with
+        # OLLAMA_HOST=0.0.0.0 answers on it, and that is the address the
+        # other boxes would use.
+        found.extend(await scan_device())
 
         subnets = private_subnets()
         if subnets:

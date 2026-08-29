@@ -161,6 +161,22 @@ async def scan_loopback() -> list[Found]:
     return out
 
 
+async def scan_device(port: int = OLLAMA_PORT, timeout: float = 1.5) -> list[Found]:
+    """Ollama serving on this machine's own LAN addresses.
+
+    scan_subnets deliberately skips the scanner's own IPs, but Ollama
+    started with ``OLLAMA_HOST=0.0.0.0`` answers on them too -- and that is
+    the address another machine would use to reach it, so it deserves a
+    suggestion of its own rather than being invisible to discovery.
+    """
+    out = []
+    for address in local_ipv4_addresses():
+        url = f"http://{address}:{port}"
+        if version := await verify(url, timeout=timeout):
+            out.append(Found(url, version, True))
+    return out
+
+
 async def scan_subnets(networks=None, port: int = OLLAMA_PORT, on_progress=None) -> list[Found]:
     networks = networks if networks is not None else private_subnets()
     if not networks: return []
@@ -179,5 +195,7 @@ async def scan_subnets(networks=None, port: int = OLLAMA_PORT, on_progress=None)
 
 async def discover(on_progress=None, scan_network: bool = True) -> list[Found]:
     found = await scan_loopback()
-    if scan_network: found.extend(await scan_subnets(on_progress=on_progress))
+    found.extend(await scan_device())
+    if scan_network:
+        found.extend(await scan_subnets(on_progress=on_progress))
     return found

@@ -1,10 +1,8 @@
 # Project map
 
-144 source files.
+149 source files.
 
 .github/check_pure_python.py
-desktop/main.py
-desktop/test.py
 get.sh
 install.py
 install.sh
@@ -24,13 +22,17 @@ tests/test_chat_layout.py
 tests/test_checkpoints.py
 tests/test_code_streaming.py
 tests/test_coding_agent_tools.py
+tests/test_coerce_schema.py
 tests/test_config.py
 tests/test_context_guard.py
 tests/test_doctor.py
 tests/test_doctor_regression.py
 tests/test_edit_engine.py
+tests/test_editing.py
+tests/test_gh.py
+tests/test_gh_tool.py
 tests/test_install.py
-tests/test_kawaii_panel.py
+tests/test_journal.py
 tests/test_keys.py
 tests/test_launch_application.py
 tests/test_live_ui.py
@@ -40,6 +42,7 @@ tests/test_memory_and_apps.py
 tests/test_mentions.py
 tests/test_model_picker.py
 tests/test_motion.py
+tests/test_openai_client.py
 tests/test_parallel_tools.py
 tests/test_parsing.py
 tests/test_pet.py
@@ -56,32 +59,34 @@ tests/test_queue_commands.py
 tests/test_regex_cost.py
 tests/test_reliability_stress.py
 tests/test_remaining_ux.py
-tests/test_rendered_footer.py
 tests/test_rendering.py
 tests/test_repo_scope_stream.py
+tests/test_review.py
 tests/test_scope.py
 tests/test_second_pass_reliability.py
 tests/test_secrets.py
 tests/test_session_compaction.py
 tests/test_session_recovery.py
+tests/test_shell_background.py
+tests/test_shell_clean.py
 tests/test_shell_output_cap.py
 tests/test_shell_streaming.py
 tests/test_speech_duo.py
 tests/test_status.py
 tests/test_stdin.py
 tests/test_stt.py
+tests/test_stt_devices.py
 tests/test_task_state.py
 tests/test_terminal_handoff.py
 tests/test_testing.py
 tests/test_theme_log_select.py
 tests/test_thinking_panel.py
-tests/test_todo_pet.py
 tests/test_tools.py
-tests/test_tui_interaction_overhaul.py
-tests/test_tui_speech.py
 tests/test_uninstall.py
 tests/test_user_workflow_completion.py
+tests/test_web_search.py
 tests/test_windows_launcher.py
+tests/test_wizard.py
 uninstall.py
 uninstall.sh
 wynxo/__init__.py
@@ -100,8 +105,8 @@ wynxo/duo.py
 wynxo/editing.py
 wynxo/effort.py
 wynxo/events.py
+wynxo/gh.py
 wynxo/journal.py
-wynxo/kawaii_effects.py
 wynxo/keys.py
 wynxo/logo.py
 wynxo/memory.py
@@ -136,13 +141,13 @@ wynxo/tools/apps.py
 wynxo/tools/base.py
 wynxo/tools/dev.py
 wynxo/tools/files.py
-wynxo/tools/fs_extra.py
+wynxo/tools/github_tool.py
 wynxo/tools/memory_tool.py
 wynxo/tools/navigation_tool.py
 wynxo/tools/search.py
 wynxo/tools/shell.py
 wynxo/tools/todo.py
-wynxo/tui.py
+wynxo/tools/web.py
 wynxo/ui.py
 wynxo/windows_launcher.py
 wynxo/wizard.py

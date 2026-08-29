@@ -878,8 +878,20 @@ class Repl:
             status.fail("ollama", self.client.base_url)
             status.close()
             self.ui.error(str(exc))
-            self.ui.console.print(server_help())
-            return False
+            # The configured server is dead. Before giving up, discover
+            # every Ollama that *is* answering -- loopback, this machine's
+            # own LAN address, and the network -- and let the user pick.
+            picked = await self._offer_endpoint_discovery()
+            if picked is None:
+                self.ui.console.print(server_help())
+                return False
+            self._adopt_endpoint(picked)
+            try:
+                version = await self.client.ping()
+            except ProviderError as exc2:
+                self.ui.error(str(exc2))
+                self.ui.console.print(server_help())
+                return False
 
         info = None
         try:
@@ -936,6 +948,51 @@ class Repl:
             self.ui.console.print()
         return True
 
+    async def _offer_endpoint_discovery(self) -> str | None:
+        """The configured server answered nothing: look on this machine and
+        the LAN, show every hit, and let the user pick one (or type an
+        address). Returns the chosen URL, or None to give up."""
+        from .discovery import discover
+
+        with self.ui.status("looking for Ollama on this machine and the LAN..."):
+            found = await discover()
+        if not found:
+            self.ui.warn("nothing answering on this machine or the network.")
+            return None
+        self.ui.console.print(f"  [{ACCENT}]Found Ollama on:[/]")
+        for i, hit in enumerate(found, 1):
+            self.ui.console.print(
+                f"    [bold]{i}[/]  {hit.url}  "
+                f"[{MUTED}]v{hit.version} {self.ui.g.dot} {hit.where}[/]")
+        self.ui.console.print()
+        answers = {str(i): hit.url for i, hit in enumerate(found, 1)}
+        answers["m"] = "type a different address"
+        picked = await self._question(
+            f"where does Ollama serve? [1-{len(found)} or m]:",
+            answers, default="1")
+        if not picked:
+            return None
+        if picked == "m":
+            raw = await self._type_in("address:", "")
+            if not raw:
+                return None
+            return normalise_url(raw if "://" in raw else f"http://{raw}")
+        return found[int(picked) - 1].url
+
+    def _adopt_endpoint(self, url: str) -> None:
+        """Point this session at a discovered server, and remember it."""
+        url = normalise_url(url)
+        for endpoint in self.config.endpoints:
+            if endpoint.url == url:
+                self.config.active_endpoint = endpoint.name
+                break
+        else:
+            name = f"discovered-{len(self.config.endpoints) + 1}"
+            self.config.endpoints.append(Endpoint(name=name, url=url))
+            self.config.active_endpoint = name
+        self.config.save()
+        self.client = make_client(self.config)
+
     async def start(self) -> int:
         if not await self._connect():
             return 1
@@ -945,7 +1002,11 @@ class Repl:
         while True:
             try:
                 self._open_box()
-                draft = self._dictation_draft or None
+                # The draft is dictation text waiting to be submitted. An
+                # empty draft must stay an empty string -- `or None` would
+                # pass None as prompt_toolkit's default, and Document(None)
+                # is a TypeError on every startup.
+                draft = self._dictation_draft or ""
                 self._dictation_draft = ""
                 text = await self.prompt_session.prompt_async(
                     self._prompt_message, bottom_toolbar=self._bottom_toolbar,
