@@ -177,6 +177,7 @@ COMMANDS = {
     "/tools": "list the tools the agent can call",
     "/apps": "list the applications discovered on this machine (add refresh to rescan)",
     "/pet": "the companion: on | off | name <x> | voice <x> | show <mood>",
+    "/mommy": "mommy-style talking: on | off (no argument toggles)",
     "/animate": "preview the animations: list, or <name> for a scene",
     "/todo": "show the current plan",
     "/dictate": "record one spoken message onto the prompt (Ctrl-R)",
@@ -224,6 +225,7 @@ _SUBCOMMAND_VALUES: dict[str, tuple[str, ...]] = {
                 "catboy", "plain", "minimal"),
     "/log": ("tail", "list", "off"),
     "/pet": ("on", "off", "still", "name", "voice"),
+    "/mommy": ("on", "off"),
     "/copy": ("last",),
     "/gh": ("status", "login", "open", "ls", "cat", "edit",
              "branch", "pr", "close"),
@@ -717,6 +719,13 @@ class Repl:
         self.boundary = resolve_scope(workspace, scope)
         self.mode = mode
         self.memory = Memory(workspace)
+        self._prompt_note: tuple[str, float] | None = None
+        """A transient line for the bottom toolbar: (message, expiry).
+
+        Key-bindings that change state (Ctrl-E effort) must not print into
+        the live prompt -- prompt_toolkit would render the input below the
+        stray line, wedging it inside the box. They park the change here
+        instead, and the toolbar shows it until it expires."""
         self.discovery = Discovery(workspace)
         self.journal = Journal.open(
             self.agent_session_id(), enabled=config.log)
@@ -1380,9 +1389,12 @@ class Repl:
             return
         height = terminal_height()
         # Cursor row after this turn's output, clamped to the last row once
-        # the output scrolled the screen.
+        # the output scrolled the screen. Capped so a short turn never leaves
+        # a wall of blank rows between the output and the box -- a handful of
+        # lines pins the box to the lower screen, and only output that ends
+        # near the bottom earns a full pin.
         cursor = min(self.ui.prompt_lines(), height - 1)
-        pad = height - 3 - cursor
+        pad = min(height - 3 - cursor, 8)
         if pad > 0:
             self.ui.console.print("\n" * pad, end="", no_wrap=True)
 
@@ -1423,9 +1435,21 @@ class Repl:
             head = 3 + cell_len(status) + 1 + fill
             return head + (1 + cell_len(tail) + 3 if tail else 1)
 
+        # A transient note (Ctrl-E effort changes) replaces the hints for a
+        # moment; the hints return once it expires.
+        note = ""
+        if self._prompt_note is not None:
+            message, until = self._prompt_note
+            if time.monotonic() < until:
+                note = message
+            else:
+                self._prompt_note = None
+
         # The hints that fit, most useful first. ^C stop must survive the
         # longest, so it is trimmed last rather than with the rest.
         base = ["^O think", "^T detail", "^E effort", "^R talk"]
+        if note:
+            base = [note]
         hint = ""
         for keep in range(len(base), -1, -1):
             candidate = "  ".join(base[:keep] + ["^C stop"])
@@ -1499,7 +1523,12 @@ class Repl:
         return True
 
     def _shift_effort(self, delta: int) -> None:
-        """Step the effort level without typing a command."""
+        """Step the effort level without typing a command.
+
+        The change is shown in the toolbar, not printed: this runs from a
+        key binding while the prompt is on screen, and a printed line would
+        wedge itself between the box edge and the input.
+        """
         policy = self.policy.bump(delta)
         if policy.name == self.policy.name:
             return
@@ -1507,7 +1536,8 @@ class Repl:
         self.agent.set_effort(policy)
         self.policy = self.agent.policy
         self.pet.set_pace(self.policy.name)
-        self.ui.info(f"effort: {self.policy.name} -- {self.policy.headline}")
+        self._prompt_note = (f"effort: {self.policy.name} -- "
+                             f"{self.policy.headline}", time.monotonic() + 3)
 
     def _arm_resize(self) -> None:
         """Keep ui.width honest when the terminal changes size.
@@ -1752,6 +1782,9 @@ class Repl:
 
         if name == "/pet":
             return await self.cmd_pet(args)
+
+        if name == "/mommy":
+            return self.cmd_mommy(args)
 
         if name == "/animate":
             return await self.cmd_animate(args)
@@ -3617,16 +3650,57 @@ class Repl:
             if choice not in VOICES:
                 self.ui.warn(f"unknown voice; choose one of {', '.join(VOICES)}")
                 return True
-            self.config.voice = choice
-            self.config.save()
-            self.pet.style_name = ("kawaii" if choice == "kawaii"
-                                   else "mommy" if choice == "mommy"
-                                   else "default")
-            self.agent.refresh_system_prompt()
-            self.ui.success(f"voice: {choice} -- {_voice_summary(choice)}")
+            self._set_voice(choice)
             return True
 
         self.ui.warn("usage: /pet [on|off|still|animate|show <mood>|name <x>|voice <x>]")
+        return True
+
+    def _set_voice(self, choice: str) -> None:
+        """Switch how the agent talks, everywhere the voice lives.
+
+        One call instead of the four places a voice change must land in:
+        the saved config, the pet's style, the talker's persona, and the
+        agent's system prompt. Missing one of them means the new voice is
+        spoken by half the program.
+        """
+        from .prompts import VOICES
+
+        self.config.voice = choice
+        self.config.save()
+        self.pet.style_name = ("kawaii" if choice == "kawaii"
+                               else "mommy" if choice == "mommy"
+                               else "default")
+        if self.talker is not None:
+            self.talker.voice_block = VOICES.get(choice, "")
+        self.agent.refresh_system_prompt()
+        self.ui.success(f"voice: {choice} -- {_voice_summary(choice)}")
+
+    def cmd_mommy(self, args: list[str]) -> bool:
+        """Mommy-style talking, on or off; no argument toggles.
+
+        A single-word convenience over the full voice picker: on is the
+        doting mommy persona, off is the plain professional voice. The
+        engineering underneath is identical either way.
+        """
+        current = self.config.voice
+        if not args or args[0].lower() in ("toggle", "t"):
+            want = "plain" if current == "mommy" else "mommy"
+        else:
+            action = args[0].lower()
+            if action in ("on", "mommy"):
+                want = "mommy"
+            elif action in ("off", "plain", "default"):
+                want = "plain"
+            else:
+                self.ui.warn(
+                    f"usage: /mommy [on|off]  (now: {_voice_summary(current)})")
+                return True
+        if want == current:
+            self.ui.info(
+                f"mommy style already {'on' if want == 'mommy' else 'off'}")
+            return True
+        self._set_voice(want)
         return True
 
     def cmd_memory(self, args: list[str]) -> bool:

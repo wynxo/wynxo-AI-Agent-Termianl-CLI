@@ -717,11 +717,21 @@ sound.** For actual audio see [Speaking out loud](#speaking-out-loud).
 
 | voice | sounds like |
 |---|---|
-| `plain` | direct and professional **(default)** |
+| `mommy` | warm and doting -- your goodboy, her mommy **(default)** |
+| `plain` | direct and professional |
 | `warm` | friendly, still honest about failures |
 | `mentor` | explains the reasoning behind decisions |
 | `blunt` | the fewest words that say what happened |
 | `kawaii` | cheerful and affectionate, same engineering underneath |
+
+The mommy voice is the default; turn it off with a single command when you
+want plain, professional talking:
+
+```
+/mommy off               plain, direct talking
+/mommy on                back to the doting mommy persona
+/mommy                   toggle
+```
 
 Every voice except `plain` carries the same floor, which no personality can
 override: never soften a failure, never imply something worked when it did

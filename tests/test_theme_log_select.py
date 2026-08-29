@@ -284,7 +284,7 @@ class TestCommandCompleter:
 
     def test_a_prefix_offers_every_command_that_matches(self):
         got = {c.text for c in self.complete("/mo")}
-        assert got == {"/model", "/mode"}
+        assert got == {"/model", "/mode", "/mommy"}
 
     def test_each_suggestion_carries_what_it_does(self):
         """A bare list of names is not much help if you cannot remember

@@ -59,6 +59,7 @@ class TestInputBox:
         """A stand-in with only what the border methods reach for."""
         repl = types.SimpleNamespace(ui=ui)
         repl._status_line = lambda: "medium . 0 tok . ctx 0%"
+        repl._prompt_note = None
         repl._open_box = cli.Repl._open_box.__get__(repl, type(repl))
         repl._bottom_toolbar = cli.Repl._bottom_toolbar.__get__(repl, type(repl))
         repl._prompt_message = cli.Repl._prompt_message.__get__(repl, type(repl))
@@ -100,8 +101,9 @@ class TestInputBox:
         repl._pad_to_bottom = cli.Repl._pad_to_bottom.__get__(repl, type(repl))
         repl._pad_to_bottom()
         # 20 rows: 3 belong to the box (edge, input, toolbar), the cursor
-        # sits on row 7, so 10 blank rows separate them.
-        assert stream.getvalue() == "\n" * 10
+        # sits on row 7, so 10 blank rows would separate them -- but the
+        # padding is capped at 8, so a short turn never opens a wall.
+        assert stream.getvalue() == "\n" * 8
 
     def test_a_full_screen_of_output_pads_nothing(self, monkeypatch):
         """Once the output scrolled the screen the cursor is already at the
@@ -116,6 +118,22 @@ class TestInputBox:
         repl._pad_to_bottom = cli.Repl._pad_to_bottom.__get__(repl, type(repl))
         repl._pad_to_bottom()
         assert stream.getvalue() == ""
+
+    def test_padding_is_capped_so_short_turns_do_not_open_a_wall(
+            self, monkeypatch):
+        """A fresh session has almost no output; padding it all the way to
+        the bottom would open a wall of blank rows. The cap keeps the box
+        in the lower screen without the void."""
+        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
+        monkeypatch.setattr(cli, "terminal_height", lambda: 20)
+        ui = ascii_ui()
+        ui.width = 40
+        ui._lines_since_prompt = 0
+        stream = capture(ui)
+        repl = self._repl(ui)
+        repl._pad_to_bottom = cli.Repl._pad_to_bottom.__get__(repl, type(repl))
+        repl._pad_to_bottom()
+        assert stream.getvalue() == "\n" * 8
 
     def test_dumb_terminals_never_pad(self, monkeypatch):
         monkeypatch.setattr(cli, "is_dumb_terminal", lambda: True)
