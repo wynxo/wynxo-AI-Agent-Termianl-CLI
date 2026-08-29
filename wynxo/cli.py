@@ -33,6 +33,7 @@ from .task_state import TaskState
 from .discovery import Discovery
 from .config import Config, Endpoint, data_dir, is_configured, load, normalise_url
 from .corner import CornerPlan
+from .layout import ChatLayout
 from .doctor import run_doctor
 from .effort import ORDER, resolve
 from .permissions import Decision
@@ -68,7 +69,7 @@ _LANGUAGE = {"read_file": "python", "shell": "console"}
 LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail", "ctrl+c": "stop"}
 from .platforms import (
     is_dumb_terminal, ollama_server_help as server_help,
-    suspicious_workspace, terminal_height)
+    suspicious_workspace, terminal_height, terminal_width)
 from .wizard import probe, run_wizard
 
 # Short forms for the prefixes that are genuinely ambiguous. An exact command
@@ -320,6 +321,10 @@ class TerminalCallbacks(Callbacks):
         """Set while a turn runs. It holds the terminal in cbreak mode, so it
         must be stopped before prompt_toolkit is asked to read a line --
         otherwise both read stdin and keystrokes go to whichever wins."""
+        self.chat = None
+        """The full-screen layout, when one is running. Set by Repl."""
+        self.plan_lines: list[str] = []
+        """The plan, rendered, for the layout's overlay Float."""
         self.streamer: CodeStreamer | None = None
         self.verbose_tools = False
         """Ctrl-T: show full tool output instead of a one-line summary."""
@@ -645,6 +650,14 @@ class TerminalCallbacks(Callbacks):
             return
 
         self.bar.set_plan(rendered)
+        if self.chat is not None:
+            # In the full-screen layout the plan is an overlay Float, so it
+            # is handed over as rendered lines rather than drawn into rows
+            # the vertical split would have to account for.
+            from .corner import panel_lines
+
+            self.plan_lines[:] = panel_lines(rendered, self.ui)
+            self.chat.invalidate()
         if self.bar.plan_is_complete():
             # Every step ticked is the one moment in a turn worth a face of
             # its own: HAPPY is the reaction to a single good step, this is
@@ -850,6 +863,10 @@ class Repl:
         # even start. Only the classic path ever reaches for it.
         self.prompt_session: PromptSession | None = _LazyPromptSession(
             self._make_prompt_session)
+        self.chat: ChatLayout | None = None
+        """The full-screen layout, when this terminal can run one. It owns
+        the composer's geometry; the classic prompt above is the fallback
+        for a dumb terminal, a pipe, or -p."""
         self.callbacks = TerminalCallbacks(ui, self.prompt_session)
         self.callbacks.journal = self.journal
         self.callbacks.pet = self.pet
@@ -1055,11 +1072,124 @@ class Repl:
         self.client = make_client(self.config)
 
     async def start(self) -> int:
+        # Before _connect, so the banner, the greeting and any connection
+        # trouble are written into the transcript rather than onto the real
+        # screen -- which the full-screen application would then paint over,
+        # losing the whole startup on the first frame.
+        self._start_chat()
         if not await self._connect():
+            # The application never started, so everything _connect said is
+            # sitting in the transcript with nothing to draw it.
+            if self.chat is not None:
+                self.chat.flush_to_terminal()
             return 1
         return await self._loop()
 
+    def _start_chat(self) -> bool:
+        """Bring up the full-screen layout, if this terminal can host one.
+
+        Returns False for a dumb terminal, a pipe or a console that will not
+        give prompt_toolkit a screen -- the classic scrolling prompt still
+        works there, and half a layout is worse than none.
+        """
+        # getattr, not self.chat: start_with() reaches this on objects built
+        # with __new__ (a stubbed Repl in the tests), where __init__ never
+        # ran and the attribute does not exist yet.
+        if getattr(self, "chat", None) is not None:
+            return True
+        if is_dumb_terminal() or not sys.stdout.isatty():
+            return False
+        try:
+            chat = ChatLayout(
+                completer=CommandCompleter(
+                    lambda: self.workspace,
+                    model_names_getter=lambda: self._model_names),
+                unicode=self.ui.g.unicode,
+                accent=ACCENT,
+                header=self._chat_header,
+                footer=self._chat_footer,
+                overlay=self._chat_overlay,
+                key_bindings=self._prompt_bindings,
+                # The real width now, not the 80-column default: the banner
+                # and the first panels are drawn before the application has
+                # rendered once, and rich keeps whatever width it wrapped
+                # them at for the rest of the session.
+                width=terminal_width(),
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            # A console that cannot be opened (Git Bash, mintty, a remote
+            # shell with TERM set and no screen buffer) raises here rather
+            # than degrading. That is exactly when the classic prompt earns
+            # its keep.
+            #
+            # Deliberately not `except Exception`: a bare one caught a
+            # NameError in this very function and silently served the old
+            # scrolling prompt instead, which looks identical to the layout
+            # simply not being supported. A bug in the layout must surface
+            # as a bug, not as a downgrade nobody notices.
+            self.ui.warn(f"falling back to the scrolling prompt: {exc}")
+            return False
+        self.chat = chat
+        # Everything wynxo draws now lands in the scrollable region.
+        self.ui.attach(chat.transcript)
+        self.callbacks.chat = chat
+        self.prompt_session = chat        # same prompt_async shape
+        self.callbacks.prompt_session = chat
+        return True
+
+    def _chat_header(self) -> str:
+        model = self.config.model
+        where = self.ui.shorten_path(str(self.workspace))
+        dot = f" {self.ui.g.dot} "
+        return (f"\x1b[1m wynxo\x1b[0m{dot}{model}{dot}"
+                f"{self.policy.name}{dot}{where}")
+
+    def _chat_footer(self) -> str:
+        return " " + self._status_line()
+
+    def _chat_overlay(self) -> list[str]:
+        """The plan panel, as an overlay. It is a Float, so however tall it
+        gets it cannot move the composer or the footer."""
+        return self.callbacks.plan_lines
+
     async def _loop(self) -> int:
+        try:
+            return await self._run_loop()
+        finally:
+            # She stops when wynxo does. A speech process is a child that
+            # outlives its parent, so quitting mid-sentence used to leave the
+            # voice talking to an empty terminal. In a finally at the
+            # outermost level: the teardown used to sit at the bottom of the
+            # prompt loop, where a chat-layout path around it would have
+            # skipped it silently.
+            self.speaker.stop()
+            await self.client.aclose()
+            # The pet signs off -- a warm end, but never louder than a plain
+            # "bye" when it is disabled.
+            farewell = self.pet.remark("bye")
+            if farewell:
+                self.ui.console.print(f"  {self.pet.name} — {farewell}")
+            else:
+                self.ui.console.print(f"  [{MUTED}]bye[/]")
+
+    async def _run_loop(self) -> int:
+        chatting = self._start_chat()
+        if chatting and self.chat is not None:
+            # The application runs for the whole session rather than once per
+            # prompt. That is what keeps the composer on screen while a turn
+            # is being answered: the classic prompt has to be released before
+            # the agent can print anything, which is why it used to vanish
+            # for the length of every reply.
+            runner = asyncio.create_task(self.chat.run())
+            try:
+                return await self._prompt_loop()
+            finally:
+                self.chat.stop()
+                with contextlib.suppress(Exception):
+                    await runner
+        return await self._prompt_loop()
+
+    async def _prompt_loop(self) -> int:
         while True:
             try:
                 # The draft is dictation text waiting to be submitted. An
@@ -1094,23 +1224,14 @@ class Repl:
             if await self._guarded(self._drain_queue()) is False:
                 break
 
-        # She stops when wynxo does. A speech process is a child that
-        # outlives its parent, so quitting mid-sentence used to leave the
-        # voice talking to an empty terminal.
-        self.speaker.stop()
-        await self.client.aclose()
-        # The pet signs off -- a warm end, but never louder than a plain
-        # "bye" when it is disabled.
-        farewell = self.pet.remark("bye")
-        if farewell:
-            self.ui.console.print(f"  {self.pet.name} — {farewell}")
-        else:
-            self.ui.console.print(f"  [{MUTED}]bye[/]")
         return 0
 
     async def start_with(self, prompt: str) -> int:
         """Run one prompt, then drop into the REPL. `wynxo "fix the tests"`."""
+        self._start_chat()
         if not await self._connect():
+            if self.chat is not None:
+                self.chat.flush_to_terminal()
             return 1
         await self.turn(prompt)
         return await self._loop()
@@ -1179,7 +1300,8 @@ class Repl:
         # out of the scroll; otherwise it falls back to riding in the bottom
         # strip, which is where it used to live all the time.
         corner = CornerPlan(self.ui)
-        bar.corner = corner if corner.usable() else None
+        bar.corner = (None if self.chat is not None
+                      else (corner if corner.usable() else None))
         review_mark = self.agent.checkpoints.mark()
         bar.animate = self.config.animations
         bar.queued = self.pending.preview(ellipsis=self.ui.g.ellipsis)
@@ -1219,7 +1341,16 @@ class Repl:
             await self._talk(await self.talker.opening(text))
         self._task = asyncio.ensure_future(self.agent.run(text))
         bar.start()
-        watcher.start()
+        # Only one thing may read stdin. The watcher holds the terminal in
+        # cbreak mode and reads it directly, which is right for the scrolling
+        # prompt -- there is nothing else reading during a turn. Under the
+        # chat layout prompt_toolkit's application is running the whole time
+        # and owns the input, so starting the watcher there would race it for
+        # every keystroke: characters meant for the composer would vanish and
+        # the mid-turn bindings would fire at random. The same shortcuts are
+        # bound inside the layout instead, where they cost no second reader.
+        if self.chat is None:
+            watcher.start()
         try:
             result = await self._task
         except (asyncio.CancelledError, Interrupted):
@@ -1236,7 +1367,8 @@ class Repl:
             # flushed to the real scrollback before the bar stops -- it is a
             # transient Live, which erases its render area on stop, taking an
             # unflushed line with it.
-            watcher.stop()
+            if self.chat is None:
+                watcher.stop()
             self.callbacks._end_stream()
             bar.stop()
             self.callbacks.bar = None

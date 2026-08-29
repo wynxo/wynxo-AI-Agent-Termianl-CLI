@@ -81,8 +81,20 @@ def decide(messages: list[dict], tools: list | None) -> dict:
         return {"content": "391.", "thinking": "17 * 23 = 17*20 + 17*3 = 340 + 51 = 391."}
 
     # An actual request: look at the project first.
-    if tools and re.search(r"\b(read|open|show|what|explain|look|find|fix|add|list)\b", low):
+    if tools and re.search(r"\b(read|open|show|what|explain|look|find|fix|add|list|plan|build)\b", low):
         names = {t["function"]["name"] for t in tools}
+        # A plan on request, so the todo panel and its overlay can be driven
+        # without a real model. The layout tests need a plan on screen to
+        # prove an overlay cannot move the composer.
+        if "plan" in low and "todo_write" in names:
+            return {"tool_calls": [{"function": {
+                "name": "todo_write",
+                "arguments": {"items": [
+                    {"task": "read the parser", "status": "done"},
+                    {"task": "add the retry path", "status": "in_progress"},
+                    {"task": "run the tests", "status": "pending"},
+                    {"task": "write it up", "status": "pending"},
+                ]}}}]}
         quoted = re.search(r"[\w/\\.-]+\.\w{1,5}", text)
         if quoted and "read_file" in names:
             return {"tool_calls": [{"function": {"name": "read_file",

@@ -265,6 +265,35 @@ class UI:
 
         self.console.print = _counting_print  # type: ignore[method-assign]
 
+    def attach(self, transcript) -> None:
+        """Send everything this UI draws into the chat transcript instead of
+        straight at the terminal.
+
+        Every render path in wynxo goes through ``ui.console``, so swapping
+        that one object moves panels, diffs, syntax highlighting, tool cards
+        and the pet into the scrollable region without any of them knowing.
+        Each print is drained immediately so the transcript is never a frame
+        behind what the agent has already said.
+
+        The live region is switched off at the same time: a rich ``Live``
+        drives the real screen with cursor moves, and inside a full-screen
+        application those land on rows prompt_toolkit owns.
+        """
+        self.transcript = transcript
+        self.live_ok = False
+        self.width = transcript.width
+        _print = transcript.console.print
+
+        def _draining_print(renderable=None, *args, **kwargs):
+            if renderable is None:
+                _print(*args, **kwargs)
+            else:
+                _print(renderable, *args, **kwargs)
+            transcript.drain()
+
+        transcript.console.print = _draining_print  # type: ignore[method-assign]
+        self.console = transcript.console
+
     def _wrap_count(self, text: str) -> int:
         """How many terminal lines ``text`` occupies at the current width,
         wrapping included -- the count the prompt uses to pin itself."""

@@ -1,11 +1,9 @@
-"""The fullscreen chat layout is gone.
+"""The chat layout, and the scrolling prompt it falls back to.
 
-wynxo always runs the scrolling prompt: output goes to the terminal's real
-scrollback, the mouse is never captured, so scrolling, drag-select and copy
-are the terminal's own. The tests here guard that the layout really is
-gone -- no config knob, no CLI flag, no reachable code path -- and that
-everything that used to be routed through it still works in the classic
-prompt.
+The composer's geometry is owned by a real layout now (see wynxo/layout.py
+and tests/test_layout_geometry.py). This file guards the two things around
+it: that the scrolling prompt still works everywhere the layout cannot run,
+and that only one of the two ever reads the terminal at a time.
 """
 
 from __future__ import annotations
@@ -13,52 +11,48 @@ from __future__ import annotations
 import asyncio
 import re
 
-import pytest
 
 from wynxo.cli import CommandCompleter
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
-class TestNoLayoutOptionRemains:
-    def test_there_is_no_layout_option_anymore(self):
-        """The fullscreen chat layout is gone: wynxo always runs the
-        scrolling prompt, so no config knob and no CLI flag may exist for
-        switching layouts."""
+class TestOnlyOneReaderAtATime:
+    """stdin has exactly one owner. Getting this wrong is invisible in a
+    screenshot and maddening in use: keystrokes meant for the composer are
+    swallowed and the mid-turn shortcuts fire at random."""
+
+    def test_the_watcher_is_skipped_under_the_chat_layout(self):
+        """prompt_toolkit's application owns the input for the whole session
+        there, so a second raw reader would race it for every keypress."""
+        import inspect
+
+        from wynxo.cli import Repl
+
+        source = inspect.getsource(Repl._turn_locked)
+        assert "if self.chat is None:" in source, (
+            "the key watcher must be gated on the layout not running")
+        assert "watcher.start()" in source
+
+    def test_the_watcher_still_runs_for_the_scrolling_prompt(self, tmp_path):
+        """Nothing else reads the terminal there, so it must start."""
+        from wynxo.cli import Repl
         from wynxo.config import Config
+        from wynxo.ui import UI
 
-        assert not hasattr(Config(), "chat_layout")
+        repl = Repl(Config(), tmp_path, UI())
+        assert repl.chat is None, "no layout until _start_chat runs"
 
-    def test_the_layout_flags_no_longer_exist(self):
-        from wynxo.cli import build_parser
+    def test_a_dumb_terminal_never_gets_a_layout(self, tmp_path, monkeypatch):
+        from wynxo import cli
+        from wynxo.cli import Repl
+        from wynxo.config import Config
+        from wynxo.ui import UI
 
-        parser = build_parser()
-        with pytest.raises(SystemExit):
-            parser.parse_args(["--chat"])
-        with pytest.raises(SystemExit):
-            parser.parse_args(["--classic"])
-
-    def test_no_running_code_reaches_the_layout(self):
-        """Nothing in the package may import the deleted module -- an
-        import in cli.py would resurrect the whole subsystem."""
-        import pathlib
-
-        root = pathlib.Path(__file__).resolve().parent.parent
-        banned = ("from .tui import", "from . import tui",
-                  "import tui", "from wynxo.tui import", "import wynxo.tui")
-        offenders = []
-        for path in (root / "wynxo").rglob("*.py"):
-            if "site-packages" in str(path):
-                continue
-            text = path.read_text(encoding="utf-8", errors="ignore")
-            for line in text.splitlines():
-                stripped = line.strip()
-                if stripped.startswith("#") or stripped.startswith('"""'):
-                    continue
-                if any(stripped.startswith(b) or stripped.endswith(b)
-                       for b in banned):
-                    offenders.append(f"{path}: {line}")
-        assert not offenders, "the chat layout module is gone; nothing may import it:\n" + "\n".join(offenders)
+        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: True)
+        repl = Repl(Config(), tmp_path, UI())
+        assert repl._start_chat() is False
+        assert repl.chat is None
 
 
 class TestTheClassicPath:
@@ -100,9 +94,9 @@ class TestTheClassicPath:
         assert repl.prompt_session is not None
         assert type(repl.prompt_session).__name__ == "_LazyPromptSession"
 
-    def test_the_watcher_always_runs_during_a_turn(self):
-        """With the layout gone there is nothing else reading the terminal,
-        so the key watcher must start unconditionally."""
+    def test_the_watcher_is_still_built_for_every_turn(self):
+        """The scrolling prompt has no other terminal reader, so the watcher
+        is what makes ^O, ^T and ^C work mid-answer there."""
         import inspect
 
         from wynxo.cli import Repl
@@ -110,8 +104,7 @@ class TestTheClassicPath:
         source = (inspect.getsource(Repl.turn)
                   + inspect.getsource(Repl._turn_locked))
         assert "watcher.start()" in source, "the classic REPL needs its key watcher"
-        assert "self.chat" not in source, (
-            "no chat-layout guard may remain in the turn path")
+        assert "KeyWatcher(" in source
 
 
 class TestCommandSuggestions:

@@ -289,3 +289,28 @@ class CornerPlan:
         self.release()
         self.arm()
         self.paint()
+
+
+def panel_lines(rendered: str, ui) -> list[str]:
+    """The plan as ANSI lines, for the chat layout's overlay Float.
+
+    The corner panel paints itself with absolute cursor moves, which is the
+    right mechanism inside a scrolling terminal and the wrong one inside a
+    full-screen application -- there the plan is a Float, and a Float wants
+    text, not positioning. Same rendering either way, so the two views of the
+    plan cannot drift apart.
+    """
+    from rich.text import Text
+
+    panel = CornerPlan(ui)
+    panel.items = parse(rendered)
+    if not panel.items:
+        return []
+    out = []
+    for markup in panel.lines():
+        segments = ui.console.render(Text.from_markup(markup))
+        out.append("".join(
+            segment.text if segment.style is None
+            else segment.style.render(segment.text)
+            for segment in segments if segment.text != "\n"))
+    return out
