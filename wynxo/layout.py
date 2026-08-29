@@ -96,6 +96,32 @@ MAX_SCROLLBACK = 20_000
 """Lines kept. Past this the oldest go; a terminal does the same."""
 
 
+class _Sink(io.StringIO):
+    """Where Rich writes, and the only door into the transcript.
+
+    Rich has two output paths, and wrapping only one of them was a bug you
+    could watch happen: ``Console.print`` went through the wrapper and
+    appeared immediately, while the streamers -- which write to
+    ``console.file`` directly, a character at a time, because that is how you
+    colour a partial line -- accumulated here silently and did not become
+    rows until some unrelated print flushed them. Streaming arrived in
+    lumps.
+
+    Draining on write instead of on print means there is one door rather
+    than two, and no Rich code path can be added later that quietly misses
+    it.
+    """
+
+    def __init__(self, on_write):
+        super().__init__()
+        self._on_write = on_write
+
+    def write(self, text: str) -> int:
+        written = super().write(text)
+        self._on_write()
+        return written
+
+
 class Transcript:
     """The conversation, as lines of ANSI, with a rich Console writing in.
 
@@ -105,7 +131,8 @@ class Transcript:
     """
 
     def __init__(self, width: int = 80):
-        self._buffer = io.StringIO()
+        self._buffer = _Sink(self._sink_wrote)
+        self._draining = False
         self.lines: list[str] = []
         self.width = max(MIN_WIDTH, width)
         self.console = self._make_console()
@@ -137,18 +164,37 @@ class Transcript:
         # better with its own scrollback.
         self.console.width = width
 
+    def _sink_wrote(self) -> None:
+        """Rich wrote something. Turn whole lines into rows straight away.
+
+        A partial last line is left in the sink: a streamer writes a word at
+        a time, and promoting a half-written line to a row would make every
+        word its own row.
+        """
+        if self._draining:
+            return          # a drain that prints would re-enter
+        if "\n" in self._buffer.getvalue():
+            self.drain()
+
     def drain(self) -> None:
         """Move whatever rich has written into the visible transcript."""
         text = self._buffer.getvalue()
         if not text:
             return
+        # Only complete lines become rows; whatever follows the last newline
+        # is a partial line still being written, and goes back in the sink.
+        head, sep, tail = text.rpartition("\n")
+        if not sep:
+            return
         self._buffer.seek(0)
         self._buffer.truncate(0)
-        # A trailing newline means "the line ended", not "there is a blank
-        # line after it" -- splitting naively would double every gap.
-        pieces = text.split("\n")
-        if pieces and pieces[-1] == "":
-            pieces.pop()
+        self._draining = True
+        try:
+            if tail:
+                self._buffer.write(tail)
+        finally:
+            self._draining = False
+        pieces = head.split("\n")
         self.lines.extend(pieces)
         if len(self.lines) > MAX_SCROLLBACK:
             del self.lines[: len(self.lines) - MAX_SCROLLBACK]

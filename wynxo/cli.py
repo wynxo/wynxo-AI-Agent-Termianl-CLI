@@ -1155,11 +1155,14 @@ class Repl:
         return getattr(self, "chat", None)
 
     def _chat_header(self) -> str:
+        """The identity row. Rebuilt every frame, so /model and /effort are
+        reflected here rather than in a line printed once and left stale."""
         model = self.config.model
         where = self.ui.shorten_path(str(self.workspace))
+        server = str(self.client.base_url).replace("http://", "")
         dot = f" {self.ui.g.dot} "
         return (f"\x1b[1m wynxo\x1b[0m{dot}{model}{dot}"
-                f"{self.policy.name}{dot}{where}")
+                f"{self.policy.name}{dot}{where}{dot}\x1b[2m{server}\x1b[0m")
 
     def _chat_footer(self) -> str:
         return " " + self._status_line()

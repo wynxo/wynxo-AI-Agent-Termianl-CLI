@@ -344,3 +344,97 @@ class TestMouseAndSelection:
         control = ui._transcript_window.content
         result = control.mouse_handler(_mouse(MouseEventType.MOUSE_DOWN))
         assert result is NotImplemented
+
+
+class TestOneOwnerOfTerminalState:
+    """Three renderers exist in this repo: prompt_toolkit's full-screen
+    application, Rich, and corner.py's raw ANSI scroll-region painter. Only
+    one may touch terminal state at a time, and in full-screen that is
+    prompt_toolkit.
+    """
+
+    def test_the_scroll_region_painter_is_never_armed_in_fullscreen(self):
+        """corner.py sets DECSTBM and paints with absolute cursor moves.
+        Inside an application that owns the screen those land on rows
+        prompt_toolkit believes it controls."""
+        import inspect
+
+        from wynxo.cli import Repl
+
+        source = inspect.getsource(Repl._turn_locked)
+        assert "None if self.chat is not None" in source, (
+            "the corner painter must be disabled whenever a layout is running")
+
+    def test_rich_cannot_clear_the_screen_from_inside_the_layout(self):
+        """UI.clear() writes ESC[3J at a terminal. Attached to a transcript
+        there is no terminal to clear, and the escape would land in the
+        conversation as content."""
+
+        from wynxo.layout import Transcript
+        from wynxo.ui import UI
+
+        ui = UI()
+        transcript = Transcript(80)
+        ui.attach(transcript)
+        transcript.console.print("something said earlier")
+        ui.clear()
+        assert transcript.lines == []
+        assert "\x1b[3J" not in "".join(transcript.lines)
+        assert "\x1b[3J" not in transcript._buffer.getvalue()
+
+    def test_the_live_region_is_off_once_attached(self):
+        """A Rich Live drives the real screen with cursor moves."""
+        from wynxo.layout import Transcript
+        from wynxo.ui import UI
+
+        ui = UI()
+        assert ui.live_ok is True
+        ui.attach(Transcript(80))
+        assert ui.live_ok is False
+
+
+class TestRichReachesTheTranscriptByOneDoor:
+    """Rich writes two ways: Console.print, and console.file.write directly
+    from the streamers. Wrapping only the first was a bug you could watch --
+    streamed text sat in the buffer until an unrelated print flushed it, so
+    it arrived in lumps instead of as it was written."""
+
+    def _attached(self):
+        from wynxo.layout import Transcript
+        from wynxo.ui import UI
+
+        ui = UI()
+        transcript = Transcript(80)
+        ui.attach(transcript)
+        return ui, transcript
+
+    def test_print_becomes_a_row_immediately(self):
+        _, transcript = self._attached()
+        transcript.console.print("a printed line")
+        assert any("a printed line" in line for line in transcript.lines)
+
+    def test_a_direct_write_becomes_a_row_immediately(self):
+        """The path the streamers actually use."""
+        _, transcript = self._attached()
+        transcript.console.file.write("a streamed line\n")
+        assert any("a streamed line" in line for line in transcript.lines)
+
+    def test_a_partial_line_is_held_until_it_ends(self):
+        """A streamer writes a word at a time; promoting a half-written line
+        would make every word its own row."""
+        _, transcript = self._attached()
+        transcript.console.file.write("half a line")
+        assert not any("half a line" in line for line in transcript.lines)
+        transcript.console.file.write(" and the rest\n")
+        assert any("half a line and the rest" in line
+                   for line in transcript.lines)
+
+    def test_the_streamers_arrive_as_they_are_written(self):
+        """End to end through the real CodeStreamer."""
+        from wynxo.ui import CodeStreamer
+
+        ui, transcript = self._attached()
+        streamer = CodeStreamer(ui)
+        streamer.feed("first streamed line\n")
+        assert any("first streamed line" in line for line in transcript.lines), (
+            "streamed output must not wait for an unrelated print to flush it")

@@ -229,6 +229,10 @@ class UI:
             legacy_windows=False if sys.platform == "win32" else None,
         )
         self.g = Glyphs(_supports_unicode())
+        self.transcript = None
+        """Set by attach() when the full-screen layout owns the screen. Its
+        presence is what tells this UI it is drawing into a region rather
+        than at a terminal."""
         self.bar: "ActivityBar | None" = None
         """The pinned bar, while a turn is running. Streamed text has
         to be handed to it rather than written straight out, or its
@@ -282,16 +286,12 @@ class UI:
         self.transcript = transcript
         self.live_ok = False
         self.width = transcript.width
-        _print = transcript.console.print
-
-        def _draining_print(renderable=None, *args, **kwargs):
-            if renderable is None:
-                _print(*args, **kwargs)
-            else:
-                _print(renderable, *args, **kwargs)
-            transcript.drain()
-
-        transcript.console.print = _draining_print  # type: ignore[method-assign]
+        # No print wrapper: the transcript's sink drains on every write, so
+        # Console.print and the streamers' direct console.file.write both
+        # arrive by the same door. Wrapping print alone was the bug -- the
+        # streamers bypassed it and their output sat in the buffer until an
+        # unrelated print happened to flush it, which is why streaming
+        # arrived in lumps instead of as it was written.
         self.console = transcript.console
 
     def _wrap_count(self, text: str) -> int:
@@ -331,6 +331,13 @@ class UI:
         server address goes before the project path does, because the path is
         the one you actually need to see.
         """
+        if self.transcript is not None:
+            # The layout has a header row carrying the same identity, and it
+            # updates when the model changes -- which a line printed once
+            # into the transcript cannot. Printing both put two headers on
+            # screen, one of them permanently stale.
+            self.rule()
+            return
         server = endpoint.split(" (")[0].replace("http://", "").replace("https://", "")
         parts = [model, f"{effort_meter(effort, self.g.unicode)} {effort}",
                  self.shorten_path(workspace), server]
@@ -363,6 +370,14 @@ class UI:
         Scrollback too: clearing only the visible rows leaves the previous
         session one scroll away, which is worse than not clearing at all.
         """
+        if self.transcript is not None:
+            # Inside the full-screen layout there is no terminal to clear:
+            # prompt_toolkit owns the screen, and a clear sequence written
+            # here would land in the transcript as content -- a stray
+            # "\x1b[3J" printed into the conversation. Clearing means
+            # emptying the conversation.
+            self.transcript.clear()
+            return
         if not self.console.is_terminal:
             return
         self.console.clear()
