@@ -23,7 +23,6 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.rule import Rule
-from rich.status import Status
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -38,6 +37,7 @@ from .theme import Palette, resolve as resolve_theme
 PALETTE: Palette = resolve_theme("purple")
 ACCENT = PALETTE.accent
 MUTED = PALETTE.muted
+FAINT = PALETTE.faint
 GOOD = PALETTE.good
 WARN = PALETTE.warn
 BAD = PALETTE.bad
@@ -73,7 +73,7 @@ MIN_ACTIVITY_WIDTH = 16
 # colour, and blindly overwriting it printed a raw "[#f0c674]" on screen
 # instead of "[ WARN ]". Keep these in step with the imports.
 _COLOUR_CONSUMERS = {
-    "wynxo.cli": ("ACCENT", "MUTED"),
+    "wynxo.cli": ("ACCENT", "FAINT", "MUTED"),
     "wynxo.wizard": ("ACCENT", "MUTED"),
     "wynxo.doctor": ("ACCENT", "BAD", "GOOD", "MUTED", "WARN"),
 }
@@ -81,10 +81,11 @@ _COLOUR_CONSUMERS = {
 
 def apply_palette(palette: Palette) -> None:
     """Rebind the module colours, everywhere they were imported to."""
-    global PALETTE, ACCENT, MUTED, GOOD, WARN, BAD, BAR_STYLE, BAR_ACCENT, BAR_DIM
+    global PALETTE, ACCENT, MUTED, FAINT, GOOD, WARN, BAD, BAR_STYLE, BAR_ACCENT, BAR_DIM
     PALETTE = palette
     ACCENT = palette.accent
     MUTED = palette.muted
+    FAINT = palette.faint
     GOOD = palette.good
     WARN = palette.warn
     BAD = palette.bad
@@ -188,7 +189,9 @@ class _SaidOnce:
     """What a spinner becomes where nothing can repaint.
 
     Carries the same shape as rich's Status -- a context manager with an
-    update() -- so no caller has to know which one it got.
+    update() -- so no caller has to know which one it got. Used when the
+    live region is unavailable: a pipe, a captured stream, or a forced-off
+    live flag in tests.
     """
 
     def __init__(self, ui: "UI", message: str):
@@ -240,12 +243,18 @@ class UI:
         """Phone-width terminals get a stacked layout instead of tables."""
         self.width = terminal_width()
         self.live_ok = True
-        """Whether a rich Live may drive the screen. False under the chat
-        layout, where the activity bar is drawn into the pinned status row
-        instead -- a Live there would emit cursor moves into the transcript
-        buffer and shred it."""
-        self.on_refresh: "Callable[[], None] | None" = None
-        """Set by the chat layout so an in-place update repaints the pane."""
+        """Whether a rich Live may drive the screen."""
+
+    def refresh_size(self) -> None:
+        """Re-read the terminal width after the window changed size.
+
+        The width is captured at construction and by anything that wraps to
+        it (the transcript, the activity bar). prompt_toolkit re-renders the
+        prompt on resize itself; this keeps wynxo's own measure honest so
+        the next draw from either picks up the new width.
+        """
+        self.width = terminal_width()
+        self.narrow = self.width < 60
 
     # -- chrome ------------------------------------------------------------
 
@@ -257,7 +266,8 @@ class UI:
         the one you actually need to see.
         """
         server = endpoint.split(" (")[0].replace("http://", "").replace("https://", "")
-        parts = [model, effort, self.shorten_path(workspace), server]
+        parts = [model, f"{effort_meter(effort, self.g.unicode)} {effort}",
+                 self.shorten_path(workspace), server]
 
         separator = f"  {self.g.dot}  "
         prefix = "  wynxo"
@@ -303,10 +313,10 @@ class UI:
         if not (pet and pet.enabled and pet.animate and self.console.is_terminal):
             return
         if not self.live_ok:
-            # The chat layout's transcript is a buffer of finished lines, and
-            # a Live writes cursor moves and carriage returns to redraw in
-            # place -- which land in that buffer as literal "?25l" and "^M"
-            # rather than as an animation. One still frame instead.
+            # Where the live region cannot repaint (a captured stream, a
+            # forced-off live flag), a Live would write cursor moves and
+            # carriage returns into the output as literal "?25l" and "^M".
+            # One still frame instead.
             self.console.print()
             self.console.print(f"  {pet.padded()}  {pet.name} is awake",
                                style=pet.style())
@@ -375,7 +385,15 @@ class UI:
             for piece in pieces:
                 if not first:
                     out.append("\n")
-                out.append((head if first else hang) + piece, style=style)
+                if first and marker:
+                    # The marker gets the emphasis (bold), the words keep the
+                    # status colour, so the "!" reads as a marker and the
+                    # prose as the message.
+                    out.append("  ", style=style)
+                    out.append(marker, style=f"bold {style}")
+                    out.append(" " + piece, style=style)
+                else:
+                    out.append((head if first else hang) + piece, style=style)
                 first = False
         self.console.print(out)
 
@@ -400,23 +418,6 @@ class UI:
         self.console.print()
         self.console.print(Markdown(text, code_theme=self.code_theme))
         self.console.print()
-
-    def thinking(self, text: str) -> None:
-        if not (self.show_thinking and text.strip()):
-            return
-        preview = sanitise(text).strip()
-        if len(preview) > 1600:
-            preview = preview[:1600] + "\n[...]"
-        self.console.print(
-            Panel(
-                Text(preview, style="italic " + MUTED),
-                title="thinking",
-                title_align="left",
-                border_style=MUTED,
-                box=self.box,
-                padding=(0, 1),
-            )
-        )
 
     # -- tools -------------------------------------------------------------
 
@@ -546,11 +547,9 @@ class UI:
         """A spinner while something slow happens.
 
         rich's Status is a Live: it hides the cursor, redraws in place and
-        carriage-returns over itself. Sent to a buffer of finished lines --
-        which is what the console is under the chat layout -- those arrive as
-        literal "?25l", "?25h" and "^M" in the middle of the conversation.
-        That is what /model looked like: two spinners' worth of escape codes
-        printed into the transcript before the picker even opened.
+        carriage-returns over itself. Sent to a stream that cannot repaint
+        (a pipe, a captured stream) those arrive as literal "?25l", "?25h"
+        and "^M" in the middle of the output.
 
         So where a Live cannot go, the message is simply said once. It is the
         same information, minus the animation.
@@ -558,9 +557,6 @@ class UI:
         if not self.live_ok:
             return _SaidOnce(self, message)
         return self.console.status(Text(message, style=MUTED), spinner="dots")
-
-    def stream_chunk(self, text: str) -> None:
-        self.console.print(text, end="", markup=False, highlight=False)
 
     def table(self, columns: Iterable[str], rows: Iterable[Iterable[str]], title: str = "") -> None:
         columns = list(columns)
@@ -588,32 +584,6 @@ class UI:
         for row in rows:
             table.add_row(*row)
         self.console.print(table)
-
-    def stats(self, usage, elapsed: float, effort: str, context_pct: float) -> None:
-        speed = usage.tokens_per_second()
-        bits = [
-            f"{effort}",
-            f"{usage.completion_tokens} tok",
-            f"{speed:.0f} tok/s" if speed else "",
-            f"{elapsed:.1f}s",
-            f"ctx {context_pct:.0f}%",
-        ]
-        bits = [b for b in bits if b]
-
-        # Narrow terminals get the short version rather than a wrapped line.
-        # Effort and context also sit in the pinned bar, so they go first.
-        sep = f" {self.g.dot} "
-
-        def line(parts):
-            return "  " + sep.join(parts)
-
-        for drop in (f"{effort}", f"ctx {context_pct:.0f}%", f"{speed:.0f} tok/s"):
-            if len(line(bits)) <= self.width:
-                break
-            if drop in bits:
-                bits.remove(drop)
-        self.console.print(Text(line(bits), style=MUTED))
-
 
 class CodeStreamer:
     """Renders streamed assistant text as it arrives.
@@ -1339,6 +1309,8 @@ class ActivityBar:
         # counter is the point of this bar, so a long file path must lose its
         # tail rather than push the numbers off the end.
         candidates = self._segments()
+        if self.model:
+            candidates.append((self.model, BAR_DIM))
         if self.hint:
             candidates.append((self.hint, BAR_DIM))
         # While the user is typing, their own keystrokes are the most
@@ -1370,7 +1342,7 @@ class ActivityBar:
 
     def start(self) -> None:
         if not self.ui.live_ok:
-            return       # the chat layout paints this row itself
+            return       # nowhere to repaint: the caller prints instead
         if not self.ui.console.is_terminal:
             return
         self._live = Live(self, console=self.ui.console,
@@ -1472,10 +1444,6 @@ class ActivityBar:
         self.refresh()
 
     def refresh(self) -> None:
-        if self.ui.on_refresh is not None:
-            # Chat layout: the bar lives in the pinned status row, so a
-            # repaint is the pane's job rather than Live's.
-            self.ui.on_refresh()
         if self._live is not None:
             # Nudge Live to repaint now. The renderable is self, so the
             # content is recomputed either way -- this only skips the wait

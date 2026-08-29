@@ -4,18 +4,28 @@ import asyncio
 from pathlib import Path
 
 from wynxo.tools import build_registry
-from wynxo.tools.base import ToolResult
-from wynxo.tools.dev import GitDiff, GitLog, GitStatus, RunTests
+from wynxo.tools.dev import Git, RunTests
 from wynxo.tools.files import EditFile
 
 
 def test_registry_exposes_coding_agent_tools(tmp_path: Path):
     names = set(build_registry(tmp_path).names())
     assert {
-        "read_file", "write_file", "edit_file", "list_directory",
-        "find_files", "search_text", "shell", "git_status", "git_diff",
-        "git_log", "run_tests",
+        "read_file", "write_file", "edit_file", "list_dir",
+        "glob", "grep", "shell", "git", "run_tests",
     } <= names
+
+
+def test_git_tool_has_one_action_parameter(tmp_path: Path):
+    """status/diff/log are one tool with an action, not three near-copies:
+    a smaller schema is easier for small models to pick from."""
+    schema = Git(tmp_path).ollama_schema()
+    assert schema["function"]["name"] == "git"
+    params = schema["function"]["parameters"]["properties"]
+    assert "action" in params
+    assert "status" in params["action"]["enum"]
+    assert "diff" in params["action"]["enum"]
+    assert "log" in params["action"]["enum"]
 
 
 def test_edit_reports_stale_or_ambiguous_content(tmp_path: Path):
@@ -52,11 +62,11 @@ async def _git_init(path: Path) -> None:
     await proc.wait()
 
 
-def test_git_tools_are_read_only_and_structured(tmp_path: Path):
+def test_git_tool_actions_are_read_only_and_structured(tmp_path: Path):
     asyncio.run(_git_init(tmp_path))
-    status = asyncio.run(GitStatus(tmp_path).invoke({}))
-    diff = asyncio.run(GitDiff(tmp_path).invoke({}))
-    log = asyncio.run(GitLog(tmp_path).invoke({}))
+    status = asyncio.run(Git(tmp_path).invoke({"action": "status"}))
+    diff = asyncio.run(Git(tmp_path).invoke({"action": "diff"}))
+    log = asyncio.run(Git(tmp_path).invoke({"action": "log"}))
     assert status.metadata["exit_code"] == 0
     assert diff.metadata["exit_code"] == 0
     assert log.metadata["exit_code"] != 0 or "fatal" in log.output.lower()

@@ -113,3 +113,22 @@ class TestActivityBar:
         bar = ActivityBar(UI(), "low")
         bar.update(detail="x" * 300)
         assert len(bar._render().plain) < 200
+
+    def test_model_shows_when_there_is_room(self):
+        """The model is part of the bar's identity: who is doing the work,
+        not just how fast."""
+        bar = ActivityBar(UI(), "medium", model="qwen3-coder:30b")
+        bar.update(activity="thinking", tokens=10)
+        assert "qwen3-coder:30b" in bar._render().plain
+
+    def test_model_gives_way_on_a_narrow_screen(self):
+        """The counter is the point of the bar; the model name is the first
+        thing dropped when the strip runs out of room."""
+        ui = UI()
+        ui.width = 46
+        bar = ActivityBar(ui, "low", "^O thinking  ^T detail",
+                          model="qwen3-coder:30b")
+        bar.update(tokens=812)
+        rendered = bar._render().plain
+        assert "qwen3-coder:30b" not in rendered
+        assert "812 tok" in rendered

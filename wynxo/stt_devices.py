@@ -21,10 +21,10 @@ The recorder's shape is the whole answer to the classic dictation bugs:
 
 from __future__ import annotations
 
+import array
 import asyncio
 import io
 import math
-import struct
 import tempfile
 import wave
 from pathlib import Path

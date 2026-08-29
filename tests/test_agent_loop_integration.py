@@ -6,7 +6,6 @@ from pathlib import Path
 from wynxo.agent import Agent, Callbacks
 from wynxo.config import Config
 from wynxo.effort import resolve
-from wynxo.parsing import ToolCall
 from wynxo.provider import Chunk
 from wynxo.scope import Boundary, Scope
 from wynxo.tools import build_registry
@@ -112,7 +111,7 @@ def test_failed_verification_is_retested_and_report_is_clean(tmp_path: Path):
         boundary=Boundary(scope=Scope.FOLDER, root=tmp_path),
     )
     agent.backend = backend
-    result = asyncio.run(agent.run("Find the bug, fix it, and run the tests."))
+    asyncio.run(agent.run("Find the bug, fix it, and run the tests."))
     assert (tmp_path / "bug.py").read_text().endswith("return 2\n")
     # The retest ran and passed after the fix.
     test_results = [e for e in events.events if e[0] == "result" and e[1] == "tests"]

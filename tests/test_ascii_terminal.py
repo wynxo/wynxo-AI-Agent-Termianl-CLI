@@ -109,6 +109,53 @@ class TestInputBox:
         ui = ascii_ui()
         assert "|" in self._repl(ui)._prompt_message().value
 
+    def test_prompt_edge_uses_the_palette_accent(self, monkeypatch):
+        """The caret matches the frame around it: one hue, not a cyan
+        caret inside a violet box."""
+        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
+        from wynxo.ui import ACCENT
+
+        ui = UI()
+        ui.g = Glyphs(True)
+        value = self._repl(ui)._prompt_message().value
+        assert f'fg="{ACCENT}"' in value
+        assert "ansicyan" not in value
+
+    def test_toolbar_frame_follows_the_theme(self):
+        """/theme recolours the whole box -- top edge, bottom edge and
+        caret all move together now."""
+        from wynxo.theme import resolve
+        from wynxo.ui import apply_palette, _ansi_of
+
+        ui = UI()
+        ui.g = Glyphs(True)
+        ui.width = 100
+        repl = self._repl(ui)
+        value = repl._bottom_toolbar().value
+        assert value.startswith(_ansi_of("#b47cff"))     # purple accent
+        apply_palette(resolve("midnight"))
+        value = repl._bottom_toolbar().value
+        assert value.startswith(_ansi_of("#6ec7ff"))     # midnight accent
+
+    def test_the_hint_trims_rather_than_vanishing(self):
+        """The binding hints give way gradually, and the stop hint is the
+        last to go: it is the one you most need to remember."""
+        ui = UI()
+        ui.g = Glyphs(True)
+        repl = self._repl(ui)
+        ui.width = 100
+        full = repl._border_plain()
+        assert "^O think" in full and "^R talk" in full and "^C stop" in full
+        ui.width = 60
+        mid = repl._border_plain()
+        assert "^O think" in mid and "^R talk" not in mid
+        assert "^C stop" in mid
+        ui.width = 40
+        tight = repl._border_plain()
+        assert "^O think" not in tight and "^C stop" in tight
+        ui.width = 30
+        assert "^C stop" not in repl._border_plain()
+
     def test_unicode_terminals_still_get_the_rounded_box(self):
         ui = UI()
         ui.g = Glyphs(True)
@@ -146,34 +193,6 @@ class TestBanner:
                       "medium", "/home/me/projects/wynxo")
             head = stream.getvalue().splitlines()[1]
             assert len(head) <= width, (width, head)
-
-
-class TestStatsLine:
-    class _Usage:
-        completion_tokens = 83
-
-        def tokens_per_second(self):
-            return 14.0
-
-    def test_narrow_terminals_drop_fields_instead_of_wrapping(self):
-        for width in (24, 30, 36, 44, 80):
-            ui = UI()
-            ui.width = width
-            stream = capture(ui)
-            ui.stats(self._Usage(), 3.4, "medium", 6.0)
-            line = stream.getvalue().strip("\n")
-            assert len(line) <= width, (width, line)
-            # The token count is the one thing that always survives.
-            assert "83 tok" in line
-
-    def test_wide_terminals_keep_everything(self):
-        ui = UI()
-        ui.width = 80
-        stream = capture(ui)
-        ui.stats(self._Usage(), 3.4, "medium", 6.0)
-        line = stream.getvalue()
-        for bit in ("medium", "83 tok", "14 tok/s", "3.4s", "ctx 6%"):
-            assert bit in line
 
 
 class TestPicker:

@@ -7,11 +7,23 @@ it has to fit, it has to be brief, and it has to know when not to run.
 from __future__ import annotations
 
 import asyncio
+import io
 
 import pytest
+from rich.console import Console
 
 from wynxo import logo
 from wynxo.ui import UI
+
+
+class _Page:
+    """A rich console to a buffer, in place of the deleted Transcript."""
+
+    def __init__(self, width: int = 80):
+        self.buffer = io.StringIO()
+        self.console = Console(file=self.buffer, width=width,
+                               force_terminal=True, highlight=False,
+                               legacy_windows=False)
 
 
 class TestFittingTheTerminal:
@@ -116,17 +128,14 @@ class TestWhenNotToRun:
         assert asyncio.run(logo.play(UI(), "no-such-logo")) is False
 
     def test_it_falls_back_to_a_still_frame(self):
-        """Everywhere a repainting widget cannot go -- which includes the
-        chat layout's transcript -- it is still coloured, just not moving."""
-        from wynxo.tui import Transcript
-
-        page = Transcript(width=80)
+        """Everywhere a repainting widget cannot go it is still coloured,
+        just not moving."""
+        page = _Page(width=80)
         ui = UI()
         ui.console = page.console
         ui.live_ok = False
         assert asyncio.run(logo.play(ui, "wyn", animations=True)) is True
-        page.drain()
-        body = "\n".join(page.lines)
+        body = page.buffer.getvalue()
         assert "\x1b[" in body, "the still frame lost its colour"
         assert "?25" not in body and "\r" not in body
 
@@ -137,14 +146,11 @@ class TestWhenNotToRun:
 
 class TestTheHeightCap:
     def test_it_measures_the_screen_not_the_console(self, monkeypatch):
-        """Under the chat layout the console is a buffer with a nominal
-        height of ten thousand. Asking it reported a screen big enough for
-        any logo, so the cap never applied and the picture filled the
-        window."""
-        from wynxo.tui import Transcript
-
+        """The cap measures the real terminal rows, not the console's
+        nominal height -- a buffered console must not report a screen big
+        enough for any logo."""
         ui = UI()
-        ui.console = Transcript(width=80).console
+        ui.console = _Page(width=80).console
         assert logo._rows(ui) < 1_000
 
     def test_the_logo_takes_at_most_half_the_screen(self, monkeypatch):

@@ -6,18 +6,19 @@ from pathlib import Path
 
 from ..memory import Memory
 from ..scope import Boundary
-from .base import Tool, ToolResult
+from .base import Tool
 from .files import EditFile, ListDir, MultiEdit, ReadFile, WriteFile
-from .fs_extra import FindFiles, ListDirectory, SearchText
-from .dev import GitDiff, GitLog, GitStatus, RunTests
+from .dev import Git, RunTests
 from ..secrets import Shield
 from .memory_tool import Remember
 from .search import Glob, Grep
-from .shell import Shell
+from .shell import BackgroundPoll, Shell
 from .todo import TodoWrite
 from .apps import LaunchApplication
 from .appcatalog import ApplicationCatalog
 from .navigation_tool import NavigateSymbols
+from .github_tool import GitHubRead, GitHubWrite
+from .web import WebSearch
 
 __all__ = ["Tool", "ToolResult", "Registry", "build_registry"]
 
@@ -75,16 +76,15 @@ def build_registry(
         TodoWrite(workspace, boundary, shield),
         LaunchApplication(workspace, boundary, shield, catalog=app_catalog),
         NavigateSymbols(workspace, boundary, shield),
+        GitHubRead(workspace, boundary, shield),
+        GitHubWrite(workspace, boundary, shield),
         Remember(workspace, boundary, memory, shield),
-        ListDirectory(workspace, boundary, shield),
-        FindFiles(workspace, boundary, shield),
-        SearchText(workspace, boundary, shield),
-        GitStatus(workspace, boundary, shield),
-        GitDiff(workspace, boundary, shield),
-        GitLog(workspace, boundary, shield),
+        Git(workspace, boundary, shield),
         RunTests(workspace, boundary, shield),
+        WebSearch(workspace, boundary, shield),
     ]
     if allow_shell:
+        tools.append(BackgroundPoll(workspace, boundary, shield))
         kwargs = {}
         if shell_max_output:
             kwargs["max_output"] = shell_max_output

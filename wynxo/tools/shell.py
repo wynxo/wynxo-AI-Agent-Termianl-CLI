@@ -62,11 +62,20 @@ def _signal_group(process, terminate: bool) -> None:
 
 
 def _clean(raw: bytes) -> str:
-    """One line of output, as text. Carriage returns are collapsed so a
-    progress bar reads as its final state rather than every frame at once."""
+    """Output as text. Carriage returns are collapsed so a progress bar
+    reads as its final state rather than every frame at once.
+
+    Windows child processes commonly end lines with CRLF, and a pipe can
+    add extra carriage returns (PowerShell turning ``\n`` into ``\r\n``);
+    those are line endings, not progress-bar frames, so they are stripped
+    *before* the lone-``\r`` collapse. Without that a ``\r\r\n`` line
+    collapsed to an empty string on Windows.
+    """
     text = raw.decode("utf-8", "replace")
+    text = re.sub(r"\r+(\n|$)", r"\1", text)   # CRLF / trailing CR -> LF / end
     if "\r" in text:
-        text = text.split("\r")[-1] or text.rstrip("\r")
+        # A genuine in-place redraw: keep only the final frame.
+        text = text.split("\r")[-1]
     return text.rstrip("\n")
 
 # Commands that are almost never what a confused model meant, and are
@@ -157,6 +166,10 @@ class ShellInput(Schema):
     command = Field(str, "The command line to run.")
     timeout = Field(int, "Seconds before the command is killed.", default=120, ge=1, le=900)
     cwd = Field(str, "Working directory, relative to the project root.", default="")
+    background = Field(bool, "Start the command and return immediately with a "
+                             "job id, instead of waiting for it to finish. "
+                             "Poll it later with background_poll.",
+                       default=False)
 
 
 class Shell(Tool):
@@ -221,6 +234,9 @@ class Shell(Tool):
             )
         except OSError as exc:
             return ToolResult.failure(f"Could not start {shell}: {exc}")
+
+        if args.background:
+            return await _launch_background(process, command)
 
         try:
             output, timed_out = await self._stream(process, args.timeout)
@@ -394,3 +410,127 @@ class Shell(Tool):
             await asyncio.wait_for(asyncio.shield(process.wait()), timeout=5.0)
         except (asyncio.TimeoutError, ProcessLookupError, asyncio.CancelledError):
             pass
+
+
+# -- background jobs ---------------------------------------------------------
+#
+# shell(background=true) returns a job id and keeps the process alive; the
+# agent polls with background_poll and keeps chatting in between. The store
+# is process-local and per-interpreter: a job cannot outlive its session,
+# which is exactly the boundary a background job should respect.
+
+_BACKGROUND: dict[str, dict] = {}
+"""job id -> job state, for the lifetime of this interpreter."""
+
+
+async def _launch_background(process, command: str) -> ToolResult:
+    """Register a running process as a pollable job and return immediately."""
+    import uuid
+
+    job_id = uuid.uuid4().hex[:8]
+    job = {
+        "process": process,
+        "command": command,
+        "output": bytearray(),
+        "done": asyncio.Event(),
+        "exit_code": None,
+        "timed_out": False,
+    }
+    _BACKGROUND[job_id] = job
+    asyncio.get_running_loop().create_task(_background_reader(job))
+    return ToolResult.success(
+        f"Started in the background as job {job_id}: {command}\n"
+        "Poll with background_poll(job_id).",
+        display=f"$ {command} &  (job {job_id})",
+        job_id=job_id, command=command,
+    )
+
+
+async def _background_reader(job: dict) -> None:
+    """Drain the process's output into the job buffer until it exits."""
+    process = job["process"]
+    try:
+        while True:
+            chunk = await process.stdout.read(4096)
+            if not chunk:
+                break
+            # Bounded like the foreground path: a chatty job must not grow
+            # without limit in memory while nobody is looking at it.
+            if len(job["output"]) < MAX_OUTPUT:
+                job["output"].extend(chunk[:max(0, MAX_OUTPUT - len(job["output"]))])
+        await process.wait()
+    except (asyncio.CancelledError, ProcessLookupError, OSError):
+        pass
+    finally:
+        job["exit_code"] = process.returncode
+        job["done"].set()
+        try:
+            if process.stdout is not None:
+                process.stdout.close()
+        except Exception:
+            pass
+
+
+def _job_output(job: dict) -> str:
+    return _clean(bytes(job["output"])).strip()
+
+
+class BackgroundPollInput(Schema):
+    job_id = Field(str, "The job id returned by shell(background=true).")
+    kill = Field(bool, "Set true to stop the job and its whole process group.",
+                 default=False)
+
+
+class BackgroundPoll(Tool):
+    name = "background_poll"
+    description = (
+        "Check on a command started in the background with "
+        "shell(background=true): whether it has finished, and what it has "
+        "printed so far. Set kill=true to stop it. Use it to run long "
+        "builds or installs while continuing to work."
+    )
+    Input = BackgroundPollInput
+    mutating = True      # kill=true changes the world
+    concurrency_safe = False
+
+    async def run(self, args: BackgroundPollInput) -> ToolResult:
+        job = _BACKGROUND.get(args.job_id)
+        if job is None:
+            return ToolResult.failure(
+                f"No background job {args.job_id!r}. Jobs live only for the "
+                "lifetime of this session.")
+        process = job["process"]
+        if args.kill and process.returncode is None:
+            _signal_group(process, terminate=True)
+            try:
+                await asyncio.wait_for(asyncio.shield(process.wait()),
+                                       timeout=5.0)
+            except (asyncio.TimeoutError, ProcessLookupError,
+                    asyncio.CancelledError):
+                _signal_group(process, terminate=False)
+            await job["done"].wait()
+            return ToolResult.success(
+                f"Killed job {args.job_id}: {job['command']}",
+                job_id=args.job_id, exit_code=job["exit_code"],
+                finished=True)
+        if not job["done"].is_set():
+            tail = _job_output(job)
+            return ToolResult.success(
+                f"Job {args.job_id} is still running: {job['command']}"
+                + (f"\n\n{tail[-2000:]}" if tail else ""),
+                job_id=args.job_id, finished=False,
+                exit_code=None, stdout=tail)
+        output = _job_output(job)
+        code = job["exit_code"] or 0
+        if code == 0:
+            return ToolResult.success(
+                output or "(no output)",
+                job_id=args.job_id, finished=True, exit_code=0,
+                stdout=output)
+        return ToolResult(
+            ok=False,
+            output=f"exit code {code}\n{output or '(no output)'}",
+            error=f"exit code {code}",
+            metadata={"job_id": args.job_id, "finished": True,
+                      "exit_code": code, "output": output},
+        )

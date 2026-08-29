@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.9", "pytest-cov>=5.0"]
 
 [project.scripts]
 wynxo = "wynxo.bootstrap:main"
@@ -27,3 +27,14 @@ include = ["wynxo*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+# The F set (pyflakes) is the class of bug this project keeps tripping on:
+# undefined names, unused imports, dangling __all__ entries, f-strings
+# without placeholders. Everything beyond it is style, which the tests and
+# review already cover; turning the rest on would be a migration, not a
+# guard.
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["F"]

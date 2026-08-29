@@ -254,7 +254,6 @@ class Agent:
         self.cb = callbacks or Callbacks()
         self.boundary = boundary
         self.memory = memory or Memory(workspace)
-        self.checkpoints = Checkpoints()
         self._turn_mark = 0
         self._warned_over_window = False
         """Said once per turn: it is the same news on every iteration."""
@@ -297,6 +296,10 @@ class Agent:
         already established."""
 
         self.session = Session(workspace=workspace)
+        # The undo stack rides with the session: it is created after the
+        # session so it can persist under the same id, and a restarted
+        # session keeps its undo history.
+        self.checkpoints = Checkpoints(session_id=self.session.session_id)
         self.refresh_system_prompt()
 
     # -- setup -------------------------------------------------------------

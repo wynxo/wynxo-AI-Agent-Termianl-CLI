@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 
 from wynxo.cli import TerminalCallbacks
-from wynxo.tui import ChatUI
 from wynxo.ui import UI
 
 
@@ -40,15 +39,3 @@ def test_concurrent_status_callbacks_are_serialized():
 
     asyncio.run(run())
     assert maximum == 1
-
-
-def test_composer_geometry_always_reserves_footer():
-    chat = ChatUI(status=lambda: "Thinking…", width=80)
-    chat.size = lambda: (80, 24)
-    assert chat.transcript_rows() + chat.status_rows() + chat.HEADER_ROWS + chat.COMPOSER_ROWS == 24
-
-
-def test_tiny_terminal_keeps_transcript_nonnegative():
-    chat = ChatUI(status=lambda: "\n".join(["x"] * 100), width=20)
-    chat.size = lambda: (20, 4)
-    assert chat.transcript_rows() >= 1

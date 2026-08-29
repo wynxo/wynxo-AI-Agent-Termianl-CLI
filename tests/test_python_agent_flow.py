@@ -7,6 +7,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from wynxo.agent import Agent, Callbacks
 from wynxo.config import Config
 from wynxo.effort import resolve

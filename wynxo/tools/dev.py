@@ -1,12 +1,9 @@
-"""Developer workflow tools: repository inspection, git, and tests."""
+"""Developer workflow tools: git, and tests."""
 
 from __future__ import annotations
 
-import asyncio
 import os
-import subprocess
 import time
-from pathlib import Path
 
 from ..schema import Field, Schema
 from .. import testing
@@ -14,42 +11,37 @@ from .base import Tool, ToolResult
 from .shell import Shell
 
 
-class RepoInput(Schema):
+class GitInput(Schema):
+    action = Field(str, "What to look at: status, diff, or log.", default="status",
+                   choices=("status", "diff", "log"))
     path = Field(str, "Repository path, relative to the workspace.", default=".")
 
 
-class GitStatus(Tool):
-    name = "git_status"
-    description = "Show the current branch and working-tree changes without modifying anything."
-    Input = RepoInput
+_COMMANDS = {
+    "status": "status --short --branch",
+    "diff": "diff --no-ext-diff",
+    "log": "log -8 --oneline --decorate",
+}
 
-    async def run(self, args: RepoInput) -> ToolResult:
-        return await self._git("status --short --branch", args.path)
 
-    async def _git(self, command: str, path: str) -> ToolResult:
+class Git(Tool):
+    name = "git"
+    description = "Inspect the repository: status (branch and working-tree changes), " \
+                  "diff (uncommitted changes), or log (recent commits). Read-only."
+    Input = GitInput
+
+    async def run(self, args: GitInput) -> ToolResult:
+        command = _COMMANDS.get(args.action, _COMMANDS["status"])
         shell = Shell(self.workspace, self.boundary, self.shield)
-        return await shell.invoke({"command": f"git -C {self._quote(path)} {command}", "timeout": 30})
+        return await shell.invoke({
+            "command": f"git -C {self._quote(args.path)} {command}",
+            "timeout": 30,
+        })
 
     @staticmethod
     def _quote(path: str) -> str:
         import shlex
         return shlex.quote(path) if os.name != "nt" else '"' + path.replace('"', '\\"') + '"'
-
-
-class GitDiff(GitStatus):
-    name = "git_diff"
-    description = "Inspect the uncommitted diff, optionally including staged changes."
-
-    async def run(self, args: RepoInput) -> ToolResult:
-        return await self._git("diff --no-ext-diff", args.path)
-
-
-class GitLog(GitStatus):
-    name = "git_log"
-    description = "Show recent commits for understanding project history."
-
-    async def run(self, args: RepoInput) -> ToolResult:
-        return await self._git("log -8 --oneline --decorate", args.path)
 
 
 class TestsInput(Schema):

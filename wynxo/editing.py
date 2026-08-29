@@ -19,8 +19,15 @@ def diff_stats(diff: str) -> DiffStats:
 
 
 def replacement_ratio(before: str, after: str) -> float:
-    """Approximate how much of a file an edit replaces."""
-    total = max(1, len(before))
+    """Approximate how much of a file an edit replaces.
+
+    Measured in content characters (newlines excluded): an unchanged line
+    contributes its length to ``common``, everything else counts as
+    replaced. Using the raw byte length of ``before`` as the denominator
+    would let the newline characters dominate on small files -- an
+    unchanged ``a\\nb\\nc\\n`` would score 0.5 and trip a ``large_rewrite``
+    flag on a no-op edit."""
+    total = max(1, sum(len(line) for line in before.splitlines()))
     common = 0
     for left, right in zip(before.splitlines(), after.splitlines()):
         if left == right:

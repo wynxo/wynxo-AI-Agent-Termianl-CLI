@@ -972,7 +972,6 @@ class TestProviderErrorsNeverEscape:
         target = tmp_path / "out.py"
         agent = self.failing(tmp_path, fail_after=2)
         # Patch the mock to write a file on the 2nd call (index 1).
-        original_handler = agent.client._client._transport.handler
         calls = {"n": 0}
         _fail_after = 2
         def handler_with_write(request: httpx.Request) -> httpx.Response:

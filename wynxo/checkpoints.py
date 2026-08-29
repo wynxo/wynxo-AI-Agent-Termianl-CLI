@@ -2,18 +2,28 @@
 
 Every write is snapshotted before it happens, so a bad edit is one ``/undo``
 away rather than a question of what the file used to look like. Snapshots are
-in memory and per-session: this is an undo button, not a backup system, and
-pretending otherwise would invite people to rely on it for the wrong thing.
+bounded and per-session, and persist to disk with the session so the undo
+button still works after a restart -- this is an undo button, not a backup
+system, and the disk copy is deliberately capped well below what a real
+backup would need.
 """
 
 from __future__ import annotations
 
+import base64
+import contextlib
+import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .config import data_dir
+
 MAX_SNAPSHOTS = 100
 MAX_FILE_BYTES = 2_000_000
+MAX_DISK_BYTES = 20_000_000
+"""The persisted undo stack is trimmed to stay under this. A real backup
+system would need far more; an undo button needs the last few edits."""
 
 
 def _read(path: Path) -> str:
@@ -46,8 +56,99 @@ class Snapshot:
 
 
 class Checkpoints:
-    def __init__(self) -> None:
+    def __init__(self, session_id: str | None = None) -> None:
         self._stack: list[Snapshot] = []
+        self._session_id = session_id
+        if session_id:
+            self._load()
+
+    # -- persistence --------------------------------------------------------
+
+    def _store(self) -> Path | None:
+        """Where this session's undo stack lives, if one is configured."""
+        if not self._session_id:
+            return None
+        directory = data_dir() / "checkpoints"
+        return directory / f"{self._session_id}.json"
+
+    @staticmethod
+    def _encode(content: str | None) -> str | None:
+        """Surrogates (from surrogateescape) are not valid JSON, so the
+        content is carried as base64 of its UTF-8+surrogateescape bytes."""
+        if content is None:
+            return None
+        raw = content.encode("utf-8", "surrogateescape")
+        return base64.b64encode(raw).decode("ascii")
+
+    @staticmethod
+    def _decode(encoded: str | None) -> str | None:
+        if encoded is None:
+            return None
+        raw = base64.b64decode(encoded.encode("ascii"))
+        return raw.decode("utf-8", "surrogateescape")
+
+    def _save(self) -> None:
+        """Write the stack to disk, trimming old snapshots under the budget."""
+        path = self._store()
+        if path is None:
+            return
+        # Trim from the oldest until the serialized whole fits -- a giant
+        # binary file snapped mid-edit should not wedge the store forever.
+        stack = list(self._stack)
+
+        def serialise(snapshots: list[Snapshot]) -> str:
+            return json.dumps([
+                {"path": str(s.path),
+                 "content": self._encode(s.content),
+                 "tool": s.tool,
+                 "when": s.when,
+                 "label": s.label,
+                 "expected": self._encode(s.expected)}
+                for s in snapshots
+            ])
+
+        payload = "[]"
+        while stack:
+            try:
+                payload = serialise(stack)
+            except (TypeError, ValueError):
+                stack.pop(0)
+                continue
+            if len(payload) <= MAX_DISK_BYTES:
+                break
+            stack.pop(0)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(payload + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
+    def _load(self) -> None:
+        """Restore the stack from disk, if a previous session left one."""
+        path = self._store()
+        if path is None or not path.exists():
+            return
+        try:
+            rows = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            return
+        if not isinstance(rows, list):
+            return
+        self._stack = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            content = self._decode(row.get("content"))
+            expected = self._decode(row.get("expected"))
+            self._stack.append(Snapshot(
+                path=Path(str(row.get("path", ""))),
+                content=content,
+                tool=str(row.get("tool", "?")),
+                when=float(row.get("when", 0.0)),
+                label=str(row.get("label", "")),
+                expected=expected,
+            ))
+        self._stack = self._stack[-MAX_SNAPSHOTS:]
 
     def __len__(self) -> int:
         return len(self._stack)
@@ -79,6 +180,7 @@ class Checkpoints:
         self._stack.append(Snapshot(path=path, content=content, tool=tool, label=label))
         if len(self._stack) > MAX_SNAPSHOTS:
             self._stack.pop(0)
+        self._save()
 
     def mark_expected(self, path: Path) -> None:
         """Record what ``path`` holds right now as the state the agent left.
@@ -86,6 +188,10 @@ class Checkpoints:
         Called after a successful edit. Undo compares the file against this
         before reverting: if it differs, the file changed after the agent
         was done with it, and undoing would overwrite someone else's work.
+
+        Persisted: the whole point of ``expected`` is to survive a restart --
+        without it, an undo after resuming the session would silently
+        overwrite whatever the user changed in between.
         """
         for snapshot in reversed(self._stack):
             if snapshot.path == path:
@@ -93,14 +199,22 @@ class Checkpoints:
                     snapshot.expected = _read(snapshot.path)
                 except OSError:
                     snapshot.expected = None
+                self._save()
                 return
 
     def undo(self) -> tuple[bool, str]:
-        """Revert the most recent change, refusing if the file drifted since it."""
+        """Revert the most recent change, refusing if the file drifted since it.
+
+        A refusal must not consume the snapshot: if the file drifted (someone
+        changed it after the agent was done), undoing over it is refused, but
+        the record has to survive so the undo is still possible once the
+        conflict is resolved. Popping first meant the first refusal silently
+        destroyed the undo history.
+        """
         if not self._stack:
             return False, "Nothing to undo."
 
-        snapshot = self._stack.pop()
+        snapshot = self._stack[-1]
         name = snapshot.label or snapshot.path.name
 
         try:
@@ -121,6 +235,15 @@ class Checkpoints:
                 current = _read(snapshot.path)
                 if current == snapshot.content:
                     return False, f"{name} is already at its checkpoint state."
+        except OSError as exc:
+            return False, f"Could not undo {name}: {exc}"
+
+        # Validated: now it is actually being undone, and only now does the
+        # record leave the stack.
+        self._stack.pop()
+        self._save()
+
+        try:
             if snapshot.existed:
                 snapshot.path.parent.mkdir(parents=True, exist_ok=True)
                 with snapshot.path.open("w", encoding="utf-8", newline="",
@@ -132,6 +255,10 @@ class Checkpoints:
                 return True, f"Deleted {name}, which {snapshot.tool} had created."
             return True, f"{name} was already gone."
         except OSError as exc:
+            # The write failed; put the record back so the user can retry
+            # rather than silently losing the ability to undo.
+            self._stack.append(snapshot)
+            self._save()
             return False, f"Could not undo {name}: {exc}"
 
     def mark(self) -> int:
@@ -163,8 +290,15 @@ class Checkpoints:
             ok, message = self.undo()
             if ok:
                 reverted += 1
-            else:
-                problems.append(message)
+                continue
+            # undo() refuses without consuming the snapshot, so a drifted
+            # file would keep the loop spinning forever. A bulk revert is
+            # not a single /undo: skip the blocked change, record why, and
+            # keep going with the older ones.
+            problems.append(message)
+            if len(self._stack) > mark:
+                self._stack.pop()
+                self._save()
         return reverted, problems
 
     def peek(self) -> Snapshot | None:
@@ -175,3 +309,6 @@ class Checkpoints:
 
     def clear(self) -> None:
         self._stack.clear()
+        with contextlib.suppress(OSError):
+            if path := self._store():
+                path.unlink(missing_ok=True)

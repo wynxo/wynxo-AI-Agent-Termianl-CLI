@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 import uuid
@@ -209,6 +210,7 @@ class Session:
                     default=str,
                 ),
             )
+            self.prune()
             return path
         except OSError:
             # Never let a full disk or a read-only home directory end a session.
@@ -243,7 +245,30 @@ class Session:
         )
         return session
 
-    @staticmethod
+    def prune(self, keep: int = 30) -> None:
+        """Keep the newest sessions; delete the rest.
+
+        Sessions are written after every turn, so a store that never sheds
+        old files grows without bound -- a few hundred turns of one project
+        leaves hundreds of JSON files the /sessions list has to read on
+        every resume. Called after each save: the store stays bounded at
+        ``keep`` sessions, newest by file mtime first.
+        """
+        directory = data_dir() / "sessions"
+        if not directory.is_dir():
+            return
+
+        def mtime(path: Path) -> float:
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        old = sorted(directory.glob("*.json"), key=mtime, reverse=True)[keep:]
+        for path in old:
+            with contextlib.suppress(OSError):
+                path.unlink()
+
     def recent(limit: int = 20) -> list[dict]:
         directory = data_dir() / "sessions"
         if not directory.is_dir():

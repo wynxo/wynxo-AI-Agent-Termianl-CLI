@@ -27,6 +27,7 @@ the synthesiser -- see the tests for the shapes that matters for.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import os
 import re
 import shutil
@@ -106,10 +107,34 @@ def _powershell() -> str | None:
     return None
 
 
+def _edge_tts_here() -> list[str] | None:
+    """The argv that runs edge-tts in this interpreter, or None.
+
+    Suites by importability rather than PATH: ``python -m edge_tts`` works
+    the moment ``pip install edge-tts`` put the package in the same
+    interpreter wynxo runs in, which is the setup where a PATH-only check
+    silently misses it and wynxo falls back to the robotic SAPI voice.
+    """
+    try:
+        if importlib.util.find_spec("edge_tts") is None:
+            return None
+    except (ImportError, ValueError):
+        return None
+    return [sys.executable, "-m", "edge_tts"]
+
+
 def available() -> list[Engine]:
     """Every engine that could speak on this machine, best first."""
     found: list[Engine] = []
     for engine in ENGINES:
+        if engine.name == "edge-tts":
+            # Available when the module is importable in this interpreter
+            # (run via ``python -m edge_tts``) *or* a bare binary is on
+            # PATH -- either way it beats the robotic SAPI voice.
+            if _edge_tts_here() or (engine.binary
+                                    and shutil.which(engine.binary)):
+                found.append(engine)
+            continue
         if engine.name == "powershell":
             if is_windows() and _powershell():
                 found.append(engine)
@@ -153,6 +178,73 @@ def install_hint() -> str:
             "sudo dnf install espeak-ng     (Fedora)\n"
             "For a far better voice, install piper: "
             "https://github.com/rhasspy/piper")
+
+
+# Warm female Microsoft neural voices, best first. edge-tts speaks these
+# over the network; the list stays short because browsing all six hundred
+# machine voices is not choosing. 'voice' lets them pick one, and a custom
+# name can always be typed in.
+MOMMY_VOICES: list[tuple[str, str]] = [
+    ("en-US-JennyNeural", "warm, soft -- the mommy default"),
+    ("en-GB-SoniaNeural", "British, very natural"),
+    ("en-CA-ClaraNeural", "warm and friendly"),
+    ("en-US-AriaNeural", "clear and expressive"),
+    ("en-US-MichelleNeural", "warm and calm"),
+    ("en-GB-LibbyNeural", "warm British"),
+    ("en-AU-NatashaNeural", "warm Australian"),
+]
+
+
+def _pip(argv: list[str]) -> tuple[bool, str]:
+    """Run pip through the interpreter wynxo runs with."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip"] + argv,
+            capture_output=True, text=True, timeout=600)
+    except Exception as exc:            # noqa: BLE001 - one message, any cause
+        return False, str(exc)
+    return proc.returncode == 0, (proc.stdout or "") + (proc.stderr or "")
+
+
+def install_edge_tts() -> tuple[bool, str]:
+    """Bring Microsoft's neural voices into this interpreter.
+
+    Returns (installed_ok, detail). Installs into the same interpreter
+    wynxo runs in, which is exactly where ``python -m edge_tts`` looks,
+    so a success makes the voices available without a PATH change.
+    """
+    if _edge_tts_here() is not None:
+        return True, "already installed"
+    ok, out = _pip(["install", "-q", "edge-tts"])
+    if _edge_tts_here() is not None:
+        return True, "installed"
+    return False, (out or "pip exited without installing.").strip()[-400:]
+
+
+async def list_edge_voices() -> list[tuple[str, str]]:
+    """The female neural voices edge-tts can presently use, newest first.
+
+    Fetched live from Microsoft's list so the picker is never out of date;
+    empty when offline or edge-tts is missing.
+    """
+    try:
+        import edge_tts
+        voices = await edge_tts.list_voices()
+    except Exception:
+        return []
+    female = [v for v in voices
+              if str(v.get("Gender", "")).lower() == "female"]
+    ordered = sorted(female,
+                     key=lambda v: (str(v.get("Locale", "")),
+                                    str(v.get("ShortName", ""))))
+    out: list[tuple[str, str]] = []
+    for v in ordered:
+        name = v.get("ShortName")
+        if not name:
+            continue
+        hint = f"{v.get('Locale', '')}  {v.get('FriendlyName', '')}".strip()
+        out.append((str(name), hint))
+    return out
 
 
 # -- what is worth saying --------------------------------------------------
@@ -309,8 +401,13 @@ def command(engine: Engine, text: str, voice: str = "", rate: int = 0,
     if engine.name == "edge-tts":
         # Two steps: synthesise to a file, then play it. The synthesis half
         # is here; the Speaker owns the play half so it can clean up the
-        # file afterwards.
-        return ["edge-tts", "--voice", voice or "en-US-AriaNeural",
+        # file afterwards. Run through ``python -m edge_tts`` in *this*
+        # interpreter when it is importable, so the neural voice works
+        # without the venv's Scripts dir being on PATH -- the usual way a
+        # robotic Zira sneaks in. Fall back to a bare ``edge-tts`` binary
+        # that happens to be on PATH.
+        launcher = _edge_tts_here() or ["edge-tts"]
+        return [*launcher, "--voice", voice or "en-US-AriaNeural",
                 "--text", text, "--write-media"]
 
     return None

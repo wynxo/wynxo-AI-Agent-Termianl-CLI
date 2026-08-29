@@ -449,6 +449,284 @@ class OllamaClient:
         return f"Ollama returned {status}: {text}"
 
 
+class OpenAIClient:
+    """An OpenAI-compatible ``/v1/chat/completions`` server.
+
+    Same surface as :class:`OllamaClient` -- ``ping``, ``list_models``,
+    ``show``, ``chat``, ``aclose`` -- so the agent does not care which it
+    is talking to. This is what lets wynxo work against any OpenAI style
+    endpoint: a real OpenAI account, a self-hosted gateway, or Ollama's
+    own OpenAI shim at ``localhost:11434/v1``.
+    """
+
+    def __init__(self, config: Config):
+        self.config = config
+        self.think_levels_supported = True   # attribute parity with Ollama
+        ep = config.endpoint()
+        self.base_url = ep.url
+        headers = {"Content-Type": "application/json"}
+        if ep.api_key:
+            headers["Authorization"] = f"Bearer {ep.api_key}"
+        self._client = httpx.AsyncClient(
+            base_url=self.base_url,
+            headers=headers,
+            timeout=httpx.Timeout(
+                connect=10.0, read=config.request_timeout, write=60.0,
+                pool=10.0,
+            ),
+        )
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def __aenter__(self) -> "OpenAIClient":
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await self.aclose()
+
+    async def ping(self) -> str:
+        """Return a label or raise something readable if unreachable."""
+        try:
+            r = await self._client.get(_OpenAI_MODELS_PATH, timeout=10.0)
+            r.raise_for_status()
+            return "openai-compatible"
+        except httpx.HTTPError as exc:
+            raise ProviderError(
+                f"Cannot reach an OpenAI-compatible server at {self.base_url}\n"
+                f"  ({exc})"
+            ) from exc
+
+    async def list_models(self) -> list[ModelInfo]:
+        try:
+            r = await self._client.get(_OpenAI_MODELS_PATH, timeout=30.0)
+            r.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"Could not list models: {exc}") from exc
+        out = [
+            ModelInfo(name=m.get("id", "?"))
+            for m in r.json().get("data", []) if isinstance(m, dict)
+        ]
+        out.sort(key=lambda m: m.name)
+        return out
+
+    async def show(self, model: str) -> ModelInfo:
+        """The OpenAI protocol exposes no capability metadata, so capabilities
+        are 'unknown' -- callers treat that as assume-it-works, which is the
+        right default for a server with no introspection endpoint."""
+        return ModelInfo(name=model, capabilities=None)
+
+    async def pull(self, model: str) -> AsyncIterator[str]:
+        raise ProviderError(
+            f"{self.base_url} is OpenAI-compatible; it has no pull."
+            " Install the model with the provider's own tooling."
+        )
+
+    async def chat(
+        self,
+        messages: list[dict],
+        *,
+        model: str | None = None,
+        tools: list[dict] | None = None,
+        think: bool | str | None = None,
+        temperature: float = 0.4,
+        num_predict: int = -1,
+        num_ctx: int | None = None,
+        stream: bool = True,
+        extra_options: dict[str, Any] | None = None,
+    ) -> AsyncIterator[Chunk]:
+        """Stream one assistant turn over ``/chat/completions``.
+
+        Ollama-specific options (``think``, ``keep_alive``, ``num_ctx``
+        under ``options``) are accepted and ignored -- the OpenAI protocol
+        has no direct equivalents, and reasoning is often enabled on the
+        model's side already.
+        """
+        payload: dict[str, Any] = {
+            "model": model or self.config.model,
+            "messages": _openai_messages(messages),
+            "stream": True,
+            "temperature": temperature,
+        }
+        if tools:
+            # The registry's tool schemas are already the OpenAI shape
+            # ({type, function:{name, description, parameters}}).
+            payload["tools"] = tools
+        if num_predict and num_predict > 0:
+            payload["max_completion_tokens"] = num_predict
+        if extra_options:
+            for key, value in extra_options.items():
+                if key in ("keep_alive", "num_ctx"):
+                    continue      # Ollama-only
+                payload[key] = value
+
+        async def body() -> AsyncIterator[Chunk]:
+            calls: dict[int, dict] = {}
+            prompt_tokens = 0
+            completion_tokens = 0
+            async with self._client.stream(
+                "POST", _OpenAI_CHAT_PATH, json=payload,
+                timeout=self.config.request_timeout,
+            ) as response:
+                if response.status_code >= 400:
+                    body = (await response.aread()).decode("utf-8", "replace")
+                    raise ProviderError(
+                        self._explain_error(response.status_code, body, payload))
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    usage = obj.get("usage")
+                    if isinstance(usage, dict):
+                        prompt_tokens = as_int(usage.get("prompt_tokens"))
+                        completion_tokens = as_int(usage.get("completion_tokens"))
+                    choices = obj.get("choices")
+                    if not isinstance(choices, list) or not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    if content := as_text(delta.get("content")):
+                        yield Chunk(content=content)
+                    if thinking := as_text(delta.get("reasoning")) \
+                          or as_text(delta.get("thinking")):
+                        yield Chunk(thinking=thinking)
+                    for call in delta.get("tool_calls") or []:
+                        index = call.get("index", 0)
+                        acc = calls.setdefault(
+                            index, {"id": "", "name": "", "arguments": []})
+                        if call.get("id"):
+                            acc["id"] = call["id"]
+                        fn = call.get("function") or {}
+                        if fn.get("name"):
+                            acc["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            acc["arguments"].append(fn["arguments"])
+                # Flush whatever accumulated before [DONE] / stream end.
+                # A plain turn never touches ``calls``, so emitting it
+            # unfiltered is safe either way -- only genuine delta tool_calls
+            # populate it, and they must survive the trailing [DONE].
+            tool_calls: list[dict] = []
+            for acc in calls.values():
+                if not acc["name"]:
+                    continue
+                tool_calls.append({
+                    "id": acc["id"] or f"call_{len(tool_calls)}",
+                    "type": "function",
+                    "function": {
+                        "name": acc["name"],
+                        "arguments": "".join(acc["arguments"]),
+                    },
+                })
+            yield Chunk(
+                tool_calls=tool_calls,
+                done=True,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+
+        # A single attempt: OpenAI is a network round trip without Ollama's
+        # model-loading drops, so the transient-retry loop is unnecessary.
+        try:
+            async for chunk in body():
+                yield chunk
+        except httpx.ReadTimeout as exc:
+            raise ProviderError(
+                f"The model did not respond within "
+                f"{self.config.request_timeout:.0f}s (raise `request_timeout` "
+                "in your config, or use a smaller model)."
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise ProviderError(
+                f"Request to {self.base_url} failed: {exc}") from exc
+
+    def _explain_error(self, status: int, body: str, payload: dict) -> str:
+        text = body.strip()
+        try:
+            text = json.loads(body).get("error", text)
+        except json.JSONDecodeError:
+            pass
+        if status == 404 or "model not found" in text.lower():
+            return (
+                f"The server does not have {payload.get('model', '?')!r}.\n"
+                "  Install it with the provider's own tooling, then run /model."
+            )
+        if status == 401:
+            return (
+                f"{self.base_url} rejected the request with 401.\n"
+                "  Check the endpoint's API key / authentication."
+            )
+        return f"The server returned {status}: {text}"
+
+
+def _openai_messages(messages: list[dict]) -> list[dict]:
+    """Translate wynxo's Ollama-shaped conversation into OpenAI wire format.
+
+    wynxo stores assistant tool calls and ``role: tool`` results; the OpenAI
+    protocol wants ``type: function`` on every call, ``function.arguments``
+    as a JSON string, and a matching ``tool_call_id`` on each tool result -
+    the call id is carried through so the pair lines up.
+    """
+    out: list[dict] = []
+    for message in messages:
+        role = message.get("role", "user")
+        if role == "assistant":
+            item: dict[str, Any] = {
+                "role": "assistant",
+                "content": message.get("content") or None,
+            }
+            calls = message.get("tool_calls")
+            if isinstance(calls, list) and calls:
+                openai_calls = []
+                for index, call in enumerate(calls):
+                    function = call.get("function") or {}
+                    arguments = function.get("arguments", "{}")
+                    if not isinstance(arguments, str):
+                        arguments = json.dumps(arguments, default=str)
+                    openai_calls.append({
+                        "id": call.get("id") or f"call_{index}",
+                        "type": "function",
+                        "function": {
+                            "name": function.get("name", "?"),
+                            "arguments": arguments,
+                        },
+                    })
+                item["tool_calls"] = openai_calls
+            out.append(item)
+        elif role == "tool":
+            out.append({
+                "role": "tool",
+                "tool_call_id": message.get("tool_call_id")
+                               or message.get("id") or "call_0",
+                "content": message.get("content") or "",
+            })
+        else:
+            out.append({"role": role, "content": message.get("content") or ""})
+    return out
+
+
+_OpenAI_CHAT_PATH = "/v1/chat/completions"
+_OpenAI_MODELS_PATH = "/v1/models"
+"""The OpenAI protocol paths. ``normalise_url`` strips a trailing /v1 as
+an Ollama artefact, so the client adds it back on to the bare host."""
+
+
+def make_client(config: Config) -> "OllamaClient | OpenAIClient":
+    """Pick the right client for the configured endpoint.
+
+    ``endpoint.kind`` decides: 'openai' for any OpenAI-compatible /v1 server,
+    'ollama' or the 'auto' default for native Ollama (the richer endpoint).
+    """
+    if config.endpoint().kind == "openai":
+        return OpenAIClient(config)
+    return OllamaClient(config)
+
+
 async def inspect_all(client: "OllamaClient", models: list[ModelInfo],
                       timeout: float = 20.0) -> list[ModelInfo]:
     """Fill in capabilities and context length for every model, concurrently.

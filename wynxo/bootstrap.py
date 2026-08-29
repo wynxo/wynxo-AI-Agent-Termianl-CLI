@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import sys
-
 
 def main():
     """Start the CLI.
 
-    The chat layout -- composer pinned to the bottom, conversation flowing
-    above it -- is the product's default wherever the terminal can host it,
-    Windows included. ``--classic`` opts out to the scrolling prompt; that
-    decision belongs to cli.apply_flags with the rest of the run flags, so
-    bootstrap has no business overriding it for one platform.
+    wynxo always runs the scrolling prompt: output goes to the terminal's
+    own scrollback and the mouse is never captured, so scrolling, selecting
+    and copying behave exactly like any other command-line program. The
+    layout decision lives entirely in cli; bootstrap only delegates.
     """
     from .cli import main as cli_main
     return cli_main()

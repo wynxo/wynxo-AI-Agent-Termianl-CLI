@@ -286,3 +286,117 @@ class TestUndoNeverClobbersUserChanges:
         assert "changed after" in message
         assert created.read_text() == "user edited it\n", \
             "deleting would destroy the user's edit"
+
+
+class TestPersistence:
+    """The undo stack rides with the session: a restart keeps it."""
+
+    def test_stack_survives_a_restart(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("wynxo.checkpoints.data_dir",
+                            lambda: tmp_path / "data")
+        target = tmp_path / "a.py"
+        target.write_text("original\n")
+
+        first = Checkpoints(session_id="abc123")
+        first.capture(target, "edit_file")
+        target.write_text("changed\n")
+
+        restarted = Checkpoints(session_id="abc123")
+        assert len(restarted) == 1
+        done, _ = restarted.undo()
+        assert done and target.read_text() == "original\n"
+
+    def test_surrogate_content_round_trips_through_disk(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("wynxo.checkpoints.data_dir",
+                            lambda: tmp_path / "data")
+        target = tmp_path / "odd.bin"
+        raw = b"byte \xff\xfe here"
+        target.write_bytes(raw)
+
+        first = Checkpoints(session_id="bin1")
+        first.capture(target, "write_file")
+        target.write_bytes(b"changed\n")
+
+        restarted = Checkpoints(session_id="bin1")
+        done, _ = restarted.undo()
+        assert done
+        assert target.read_bytes() == raw
+
+    def test_a_session_without_an_id_never_touches_disk(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("wynxo.checkpoints.data_dir",
+                            lambda: tmp_path / "data")
+        checkpoints = Checkpoints()
+        checkpoints.capture(tmp_path / "x.py", "write_file")
+        assert not (tmp_path / "data").exists()
+
+    def test_clear_removes_the_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("wynxo.checkpoints.data_dir",
+                            lambda: tmp_path / "data")
+        checkpoints = Checkpoints(session_id="gone")
+        checkpoints.capture(tmp_path / "x.py", "write_file")
+        checkpoints.clear()
+        assert len(checkpoints) == 0
+        assert not (tmp_path / "data" / "checkpoints" / "gone.json").exists()
+
+
+class TestUndoSurvivesRefusal:
+    """A refused undo must not destroy the undo record."""
+
+    def test_drift_refusal_keeps_the_record(self, tmp_path):
+        import wynxo.checkpoints as ckmod
+
+        ckmod.data_dir = lambda: tmp_path
+        from wynxo.checkpoints import Checkpoints
+
+        ck = Checkpoints("s1")
+        f = tmp_path / "a.txt"
+        f.write_text("one")
+        ck.capture(f, "write_file")
+        f.write_text("two")
+        ck.mark_expected(f)
+        f.write_text("USER EDIT")
+
+        ok, msg = ck.undo()
+        assert not ok and "changed after" in msg
+        assert len(ck) == 1, "the refusal must not consume the snapshot"
+
+        f.write_text("two")          # user resolves their own edit
+        ok, msg = ck.undo()
+        assert ok and f.read_text() == "one"
+
+    def test_expected_state_persists_across_restart(self, tmp_path):
+        import wynxo.checkpoints as ckmod
+
+        ckmod.data_dir = lambda: tmp_path
+        from wynxo.checkpoints import Checkpoints
+
+        ck = Checkpoints("s2")
+        f = tmp_path / "b.txt"
+        f.write_text("one")
+        ck.capture(f, "write_file")
+        f.write_text("two")
+        ck.mark_expected(f)
+
+        fresh = Checkpoints("s2")
+        assert fresh.peek().expected == "two"
+
+    def test_bulk_revert_skips_a_drifted_file_and_finishes(self, tmp_path):
+        """revert_since must not spin forever when one file drifted."""
+        import wynxo.checkpoints as ckmod
+
+        ckmod.data_dir = lambda: tmp_path
+        from wynxo.checkpoints import Checkpoints
+
+        ck = Checkpoints("s")
+        f = tmp_path / "a.txt"
+        f.write_text("one"); ck.capture(f, "write_file"); f.write_text("two")
+        ck.mark_expected(f)
+        g = tmp_path / "b.txt"
+        g.write_text("x"); ck.capture(g, "write_file"); g.write_text("y")
+        ck.mark_expected(g)
+        f.write_text("USER EDIT")          # drift only a.txt
+
+        reverted, problems = ck.revert_since(0)
+        assert reverted == 1
+        assert len(problems) == 1 and "changed after" in problems[0]
+        assert g.read_text() == "x", "the clean file must still be reverted"

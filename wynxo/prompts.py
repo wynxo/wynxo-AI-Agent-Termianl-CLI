@@ -389,6 +389,18 @@ def build_system_prompt(
     return "\n".join(p for p in parts if p.strip())
 
 
+REVIEW_PROMPT = """Below is a git diff of changes not yet reviewed.
+
+Review it the way a careful senior engineer would review a pull request.
+Find what is actually likely to bite, not style nits: correctness bugs,
+missed edge cases, security or secrets handling, error paths that fail
+loud or not at all, dead or duplicated logic, and tests that are missing
+for the riskiest change. Be specific -- name the file and the line or
+behaviour. Keep it tight: a short list of the few things that matter,
+ordered by severity, rather than a line-by-line walkthrough. If the change
+is genuinely fine, say so plainly instead of manufacturing problems.
+"""
+
 COMMIT_PROMPT = """Below is the output of `git diff --staged` for a change \
 that is about to be committed.
 

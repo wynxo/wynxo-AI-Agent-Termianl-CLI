@@ -214,6 +214,31 @@ class TestVoice:
         assert greet
         assert "goodboy" in greet or "mommy" in greet
 
+    def test_every_voice_has_a_farewell(self):
+        from wynxo.pet import REMARKS, REMARKS_KAWAII, REMARKS_MOMMY
+        assert "bye" in REMARKS and REMARKS["bye"]
+        assert "bye" in REMARKS_KAWAII and REMARKS_KAWAII["bye"]
+        assert "bye" in REMARKS_MOMMY and REMARKS_MOMMY["bye"]
+
+    def test_every_voice_has_a_proud_moment(self):
+        from wynxo.pet import REMARKS, REMARKS_KAWAII, REMARKS_MOMMY
+        assert "proud" in REMARKS and REMARKS["proud"]
+        assert "proud" in REMARKS_KAWAII and REMARKS_KAWAII["proud"]
+        assert "proud" in REMARKS_MOMMY and REMARKS_MOMMY["proud"]
+
+    def test_mommy_farewell_keeps_the_affection(self):
+        pet = Pet()
+        pet.style_name = "mommy"
+        bye = pet.remark("bye")
+        assert bye
+        assert "goodboy" in bye or "mommy" in bye
+
+    def test_farewell_is_silent_when_the_pet_is_off(self):
+        pet = Pet()
+        pet.enabled = False
+        assert pet.remark("bye") == ""
+        assert pet.remark("proud") == ""
+
     def test_mommy_pet_uses_the_round_face_set(self):
         pet = Pet()
         pet.style_name = "mommy"

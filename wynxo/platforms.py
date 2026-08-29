@@ -252,6 +252,62 @@ def suspicious_workspace(path: Path) -> str | None:
     return None
 
 
+# -- clipboard ------------------------------------------------------------
+
+def copy_to_clipboard(text: str) -> bool:
+    """Put text on the system clipboard, best effort per platform.
+
+    The chat layout holds the terminal with mouse reporting on, so the
+    usual drag-to-select does not reach the conversation; this is the
+    reliable way to get text out of it. Uses only tools that are already on
+    the machine -- nothing is installed -- and falls back along the list
+    until one of them accepts the text.
+    """
+    import subprocess
+
+    if not text:
+        return False
+    commands: list[list[str]] = []
+    if is_windows():
+        # Set-Clipboard handles full Unicode; `clip` is the fallback when
+        # PowerShell is not available. The text travels in an environment
+        # variable so no codepage can mangle it.
+        commands = [
+            ["powershell", "-NoProfile", "-NonInteractive",
+             "-Command", "$env:WYNXO_COPY | Set-Clipboard"],
+            ["clip"],
+        ]
+    elif is_termux():
+        commands = [["termux-clipboard-set"]]
+    elif is_macos():
+        commands = [["pbcopy"]]
+    else:
+        for tool in ("wl-copy", "xclip", "xsel"):
+            if shutil.which(tool):
+                commands = [
+                    [tool, "-selection", "clipboard"] if tool == "xclip"
+                    else [tool, "--clipboard", "--input"] if tool == "xsel"
+                    else [tool],
+                ]
+                break
+    for command in commands:
+        env = dict(os.environ)
+        data: bytes | None = b""
+        if command[0] == "powershell":
+            env["WYNXO_COPY"] = text
+        else:
+            data = text.encode("utf-8", "replace")
+        try:
+            proc = subprocess.run(command, input=data, env=env,
+                                  stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=10)
+        except Exception:
+            continue
+        if proc.returncode == 0:
+            return True
+    return False
+
+
 # -- setup hints -----------------------------------------------------------
 
 def ollama_server_help() -> str:

@@ -59,6 +59,11 @@ class Endpoint(Schema):
     url = Field(str, "Base URL.", default=DEFAULT_ENDPOINT, transform=lambda v: normalise_url(v))
     api_key = Field(str, "Bearer token, when the server sits behind a proxy that "
                          "requires auth.", default=None)
+    kind = Field(str, "What protocol this server speaks. auto means native Ollama "
+                      "(its richer /api); set 'openai' for any OpenAI-compatible "
+                      "/v1 server -- a real OpenAI account, a self-hosted "
+                      "gateway, or Ollama's own OpenAI shim.",
+                 default="auto", choices=("auto", "ollama", "openai"))
 
 
 class Config(Schema):
@@ -95,10 +100,6 @@ class Config(Schema):
     clear_on_start = Field(bool, "Clear the terminal when wynxo opens.", default=True)
     logo = Field(str, "Which start-up logo to show, or 'off' for none.",
                  default="wyn")
-    chat_layout = Field(bool, "Pin the composer to the bottom of the screen "
-                              "with the conversation above it, the way a chat "
-                              "application does, instead of a prompt that "
-                              "scrolls away.", default=True)
     log = Field(bool, "Write a session transcript for debugging.", default=True)
     voice = Field(str, "How the agent talks: plain, warm, mentor, blunt, "
                        "kawaii or mommy.",
@@ -120,8 +121,6 @@ class Config(Schema):
     talker = Field(str, "A small, fast model that does the talking while the "
                         "main model codes. Empty means one model does both.",
                    default="")
-    coder = Field(str, "Model that does the actual work when a talker is set. "
-                       "Empty means whatever `model` is.", default="")
 
     # -- speech ------------------------------------------------------------
     speak = Field(bool, "Read answers out loud. You type; she talks.",

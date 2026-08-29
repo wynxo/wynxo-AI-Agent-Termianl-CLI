@@ -12,6 +12,7 @@ import stat
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
@@ -24,9 +25,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from . import __version__
 from . import config as config_module
 from . import logo
-from . import stt
 from . import stt_devices
-from . import tui
 from .agent import Agent, Callbacks, Interrupted
 from .events import ToolEvent
 from .task_state import TaskState
@@ -35,7 +34,7 @@ from .config import Config, Endpoint, data_dir, is_configured, load, normalise_u
 from .doctor import run_doctor
 from .effort import ORDER, resolve
 from .permissions import Decision
-from .provider import OllamaClient, ProviderError, check_context
+from .provider import ProviderError, check_context, make_client
 from .queue import Pending
 from .session import Session
 from .keys import KeyWatcher, describe_bindings
@@ -49,11 +48,10 @@ from .scope import Mode, Scope, resolve as resolve_scope
 from .status import Status, WARN
 from .tools import build_registry
 from .tools.appcatalog import ApplicationCatalog
-from rich.markup import escape
 from rich.text import Text
 
-from .ui import (ACCENT, BAR_ACCENT, MUTED, ActivityBar, CodeStreamer,
-                 ThoughtStreamer, UI, effort_meter)
+from .ui import (ACCENT, BAR_ACCENT, FAINT, MUTED, ActivityBar, CodeStreamer,
+                 ThoughtStreamer, UI, _ansi_of, effort_meter)
 
 # What the activity bar says while each tool runs.
 _ACTIVITY = {
@@ -65,7 +63,7 @@ _ACTIVITY = {
 _LANGUAGE = {"read_file": "python", "shell": "console"}
 
 # Keys that work *while the agent is running*, not just at the prompt.
-LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail"}
+LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail", "ctrl+c": "stop"}
 from .platforms import (
     is_dumb_terminal, ollama_server_help as server_help,
     suspicious_workspace, terminal_height)
@@ -147,6 +145,7 @@ def _theme_summary(name: str) -> str:
         "kawaii": "soft candy pink with sparkles",
         "midnight": "cool blue",
         "ember": "warm orange",
+        "catboy": "soft pastel blue and pink",
         "plain": "your terminal's own 16 colours",
         "minimal": "plain grey, no animation (reduced motion)",
     }.get(name, "")
@@ -179,7 +178,8 @@ COMMANDS = {
     "/apps": "list the applications discovered on this machine (add refresh to rescan)",
     "/pet": "the companion: on | off | name <x> | voice <x> | show <mood>",
     "/animate": "preview the animations: list, or <name> for a scene",
-    "/todo": "plan panel: expanded | compact | hidden (toggle with no arg)",
+    "/todo": "show the current plan",
+    "/dictate": "record one spoken message onto the prompt (Ctrl-R)",
     "/theme": "colour palette: purple | sakura | midnight | ember | plain | minimal",
     "/secrets": "credential protection: on | off | allow <path>",
     "/logo": "the start-up logo: pick one, or off",
@@ -191,12 +191,15 @@ COMMANDS = {
     "/cd": "work in another directory",
     "/repo": "clone a GitHub repo and work in it",
     "/undo": "revert the last file change",
+    "/copy": "copy the conversation to the clipboard (/copy last = last answer)",
     "/memory": "show, add to, or forget long-term memory",
     "/thinking": "show or hide the model's reasoning",
     "/plan": "show the current plan",
     "/new": "start a new chat: fresh history, screen and log",
     "/resume": "pick up an earlier conversation where it stopped",
+    "/gh": "work on a GitHub repo in the cloud: status | open | ls | cat | edit | branch | pr | close",
     "/commit": "write a commit message from the staged diff, then commit",
+    "/review": "ask the model to review the working-tree changes",
     "/diff": "show uncommitted changes (or /diff staged)",
     "/test": "run the project's detected test command",
     "/clear": "start a fresh conversation",
@@ -208,13 +211,29 @@ COMMANDS = {
     "/sessions": "list recent sessions",
     "/init": "write a WYNXO.md describing this project",
     "/map": "the project layout the model is given, or rebuild it",
-    "/layout": "where the vertical space is going (layout diagnostics)",
+    "/pull": "download a model from Ollama, then switch to it",
     "/quit": "exit",
 }
 
 
+_SUBCOMMAND_VALUES: dict[str, tuple[str, ...]] = {
+    "/effort": ("low", "medium", "high", "xhigh", "max", "ultra"),
+    "/mode": ("plan", "manual", "auto", "yolo"),
+    "/scope": ("folder", "repo", "machine"),
+    "/theme": ("purple", "sakura", "kawaii", "midnight", "ember",
+                "catboy", "plain", "minimal"),
+    "/log": ("tail", "list", "off"),
+    "/pet": ("on", "off", "still", "name", "voice"),
+    "/copy": ("last",),
+    "/gh": ("status", "login", "open", "ls", "cat", "edit",
+             "branch", "pr", "close"),
+}
+"""Values offered after a slash command's space, e.g. ``/effort h``."""
+
+
 class CommandCompleter(Completer):
-    """Suggests slash commands, and files after an "@".
+    """Suggests slash commands, their subcommand values, and files after
+    an "@".
 
     Nothing else is completed. A menu opening over ordinary prose -- which
     is what you are typing almost all of the time -- would be in the way
@@ -252,6 +271,14 @@ class CommandCompleter(Completer):
                     yield Completion(model, start_position=-len(prefix), display=model,
                                      display_meta="installed model")
             return
+        command, _, arg = text.partition(" ")
+        if command in _SUBCOMMAND_VALUES and arg:
+            prefix = arg
+            for value in _SUBCOMMAND_VALUES[command]:
+                if value.startswith(prefix):
+                    yield Completion(value, start_position=-len(prefix),
+                                     display=value)
+            return
         if " " in text:
             return
 
@@ -277,17 +304,11 @@ class CommandCompleter(Completer):
 class TerminalCallbacks(Callbacks):
     """Wires the agent's events to the terminal."""
 
-    chat = None
-    """Set when the session is using the chat layout, so questions are asked
-    through the composer already on screen rather than by starting a second
-    application inside the running one."""
-
     def __init__(self, ui: UI, prompt_session: PromptSession | None = None):
         self.ui = ui
         # None in non-interactive mode, where nothing can be asked anyway.
         self.prompt_session = prompt_session
         self._streaming = False
-        self._thinking_chars = 0
         self._thinker: ThoughtStreamer | None = None
         self.bar: ActivityBar | None = None
         self.journal: Journal | None = None
@@ -302,17 +323,24 @@ class TerminalCallbacks(Callbacks):
         self._coder: CodeStreamer | None = None
         """The file currently being written, while a tool call streams."""
         self._thinking_buffer: list[str] = []
+        """Every thought of the current turn, shown or not. Opening the panel
+        mid-turn shows the whole scratchpad from the start of the turn, so the
+        full record is kept even while collapsed."""
+        self._thinking_unsent: list[str] = []
+        """Chunks that arrived while the panel was collapsed and have not
+        been fed to a thinker yet. This is the un-shown suffix: opening the
+        panel drains it, so a reopen never replays what already printed, and
+        no full-buffer re-join is needed to find the boundary -- collapsed
+        thinking stays O(1) per chunk instead of O(n) per chunk."""
+        self._thinking_total = 0
+        """len of the concatenated buffer, kept incrementally so a live panel
+        never re-joins the whole scratchpad per token."""
+        self._thinking_words = 0
+        """Running space count for the collapse note, so the note is O(1)
+        per chunk rather than a recount of the whole buffer."""
         self._status_message = ""
         self._status_lock = asyncio.Lock()
         self._turn_lock = asyncio.Lock()
-        """Every thought of the current turn, shown or not."""
-        self._thinking_shown = 0
-        """Characters already rendered in a closed thinking panel.
-
-        A terminal cannot erase a completed panel from scrollback. Remembering
-        this boundary lets Ctrl-O resume with only text that arrived while the
-        panel was collapsed instead of printing the whole scratchpad again.
-        """
 
     # -- live toggles, called from the key watcher thread -------------------
 
@@ -322,14 +350,11 @@ class TerminalCallbacks(Callbacks):
         # its own, and printing it once the backlog is streaming drops it
         # into the middle of a sentence.
         # The status bar already reflects this state; do not print a second
-        # transition line into the transcript. The legacy non-chat stream
-        # keeps one marker for compatibility; chat mode remains silent.
+        # transition line into the transcript.
         self._status_message = "Thinking..." if self.ui.show_thinking else ""
-        if self.chat is not None:
-            self.chat.set_activity(self._status_message)
         if self.bar is not None:
             self.bar.update(detail=self._status_message)
-        elif self.chat is None:
+        else:
             self.ui.info("thinking shown" if self.ui.show_thinking else "thinking hidden")
         if self.ui.show_thinking:
             self._open_thinking()
@@ -345,11 +370,15 @@ class TerminalCallbacks(Callbacks):
         of it. What has already arrived is printed in one go and the live
         stream picks up from there, so the panel reads the same whether it
         was opened at the start of the turn or in the middle of it.
+
+        Only the chunks that arrived while collapsed are replayed -- the ones
+        already fed to a thinker were printed live and are not in
+        ``_thinking_unsent`` -- so a reopen costs just the collapsed backlog
+        rather than a re-join of the whole scratchpad.
         """
         # Only the leading space is trimmed. Stripping the tail would glue
         # the backlog to whichever word streams in next.
-        whole = "".join(self._thinking_buffer)
-        backlog = whole[self._thinking_shown:].lstrip()
+        backlog = "".join(self._thinking_unsent).lstrip()
         if not backlog:
             return
         if self._streaming:
@@ -359,7 +388,7 @@ class TerminalCallbacks(Callbacks):
         if self._thinker is None:
             self._thinker = ThoughtStreamer(self.ui)
         self._thinker.feed(backlog)
-        self._thinking_shown = len(whole)
+        self._thinking_unsent.clear()
 
     def _thinking_note(self) -> str:
         """The collapsed form: how much thinking there is, and how to read it.
@@ -368,7 +397,7 @@ class TerminalCallbacks(Callbacks):
         reasoning and that there is something to open, or the panel is a
         feature nobody discovers.
         """
-        words = sum(chunk.count(" ") for chunk in self._thinking_buffer)
+        words = self._thinking_words
         if words < 3:
             return ""
         if self.ui.show_thinking:
@@ -384,8 +413,6 @@ class TerminalCallbacks(Callbacks):
     def _note(self, message: str) -> None:
         """Update the transient status without adding transcript noise."""
         self._status_message = message
-        if self.chat is not None:
-            self.chat.set_activity(message)
         if self.bar is not None:
             self.bar.update(detail=message)
 
@@ -402,7 +429,6 @@ class TerminalCallbacks(Callbacks):
         if not text:
             return
         async with self._status_lock:
-            self._thinking_chars += len(text)
             self.tokens += 1
             # Kept whether or not it is being shown. Collapsed is a display
             # state, not a decision to throw the reasoning away -- without this
@@ -410,11 +436,17 @@ class TerminalCallbacks(Callbacks):
             # what came after the keypress, and the thought you wanted to read
             # was the one that had already gone by.
             self._thinking_buffer.append(text)
+            self._thinking_total += len(text)
+            self._thinking_words += text.count(" ")
             if self.bar is not None:
                 self.bar.update(activity="thinking", tokens=self.tokens,
                                 detail=self._thinking_note())
 
             if not self.ui.show_thinking:
+                # Held for when the panel opens. Nothing is fed to a thinker
+                # while collapsed, so the reopen can show exactly what was
+                # missed without re-printing what already went out.
+                self._thinking_unsent.append(text)
                 return
             if self._streaming:
                 self._end_stream()
@@ -423,13 +455,11 @@ class TerminalCallbacks(Callbacks):
                 self.ui.console.print(Text("  thinking", style=f"bold {MUTED}"))
                 self._thinker = ThoughtStreamer(self.ui)
             self._thinker.feed(text)
-            self._thinking_shown = len("".join(self._thinking_buffer))
 
     def _end_thinking(self) -> None:
         if self._thinker is not None:
             self._thinker.finish()
             self._thinker = None
-            self._thinking_chars = 0
 
     async def on_content(self, text: str) -> None:
         if not text:
@@ -452,9 +482,6 @@ class TerminalCallbacks(Callbacks):
             await self._on_stage_locked(name, detail)
 
     async def _on_stage_locked(self, name: str, detail: str = "") -> None:
-        if self.chat is not None:
-            self.chat.set_activity(f"{self.ui.g.arrow} {name}"
-                                   + (f" · {detail}" if detail else ""))
         if self.journal is not None:
             self.journal.stage(name, detail)
         self._end_stream()
@@ -465,10 +492,6 @@ class TerminalCallbacks(Callbacks):
             pet.set_activity(name)
         if self.bar is not None:
             self.bar.update(activity=name, detail=detail)
-        # Stage changes are transient in chat mode; the pinned activity bar
-        # is the single source of truth and must not pollute transcript history.
-        if self.chat is not None and self.bar is not None:
-            return
         suffix = f" [{MUTED}]{detail}[/]" if detail else ""
         self.ui.console.print(f"  [{ACCENT}]{self.ui.g.arrow}[/] [{MUTED}]{name}[/]{suffix}")
 
@@ -484,24 +507,12 @@ class TerminalCallbacks(Callbacks):
         pet = getattr(self, "pet", None)
         if pet is not None:
             pet.set_activity(_ACTIVITY.get(name, name))
-        if self.chat is not None:
-            self.chat.set_activity(f"{self.ui.g.arrow} {name} · {summary}")
         if self.bar is not None:
             self.bar.update(activity=_ACTIVITY.get(name, name), detail=summary)
             if event is not None:
                 self.bar.record_tool_event(event)
             if name == "todo_write":
                 return       # the pinned plan is the announcement
-        if self.chat is not None and name != "todo_write":
-            # Tools live in the conversation, compactly: one line when it
-            # starts, one when it lands. This is the coding-agent shape --
-            # what is running stays visible without a second screen.
-            line = Text(f"  {self.ui.g.arrow} ", style=ACCENT)
-            line.append(name, style="bold")
-            if summary:
-                line.append(f"  {summary}", style=MUTED)
-            self.ui.console.print(line)
-            return
         self.ui.tool_start(name, summary)
 
     async def on_tool_result(self, name: str, ok: bool, display: str, output: str, event: ToolEvent | None = None) -> None:
@@ -524,30 +535,6 @@ class TerminalCallbacks(Callbacks):
         # line per todo_write is the same information a second time -- and it
         # scrolls, which is exactly what pinning the panel was meant to stop.
         if name == "todo_write" and ok and self.bar is not None:
-            return
-        if self.chat is not None and self.bar is not None:
-            # The tool's own display summary is the best card: "312 lines",
-            # "1 failed", "launched notepad". The event compact adds the
-            # duration when present; never downgrade to a bare "done".
-            detail = (display or (event.compact() if event is not None else "")
-                      or ("done" if ok else "failed"))
-            if event is not None:
-                self.bar.record_tool_event(event)
-            self.bar.update(activity=_ACTIVITY.get(name, name), detail=detail)
-            self.chat.set_activity((self.ui.g.tick if ok else self.ui.g.cross)
-                                   + f" {name} · {detail}", ok=ok)
-            self.chat.notify((self.ui.g.tick if ok else self.ui.g.cross)
-                             + f" {name} {'completed' if ok else 'failed'}",
-                             ok=ok)
-            # The start line already named the tool; the result line is the
-            # outcome alone -- ``✓ 743 lines``, ``✕ 1 failed`` -- the shape
-            # a coding-agent transcript keeps. Repeating the name would just
-            # echo the line above it.
-            mark = self.ui.g.tick if ok else self.ui.g.cross
-            line = Text(f"  {mark} ", style="green" if ok else "red")
-            if detail:
-                line.append(detail, style=MUTED)
-            self.ui.console.print(line)
             return
         if self.verbose_tools and output.strip():
             self.ui.tool_result(name, ok, "", "")
@@ -615,15 +602,10 @@ class TerminalCallbacks(Callbacks):
         it ticks itself off and leaves when the work is done.
         """
         if self.bar is None:
-            if self.chat is not None:
-                self.chat.set_todos(rendered, title=self.agent.task_state.objective)
-            else:
-                self.ui.todos(rendered)
+            self.ui.todos(rendered)
             return
 
         self.bar.set_plan(rendered)
-        if self.chat is not None:
-            self.chat.set_todos(rendered, title=self.agent.task_state.objective)
         if self.bar.plan_is_complete():
             await self.bar.finish_plan()
 
@@ -633,16 +615,13 @@ class TerminalCallbacks(Callbacks):
 
     async def ask_permission(self, name: str, summary: str, preview: str) -> Decision:
         self._end_stream()
-        if self.prompt_session is None and self.chat is None:
+        if self.prompt_session is None:
             return Decision.ALLOW
         try:
             return await self._ask(name, summary, preview)
         finally:
-            # The classic prompt temporarily releases its reader. The chat
-            # layout never did, so restarting a watcher there would create a
-            # second stdin reader and steal composer keystrokes.
-            if self.chat is None:
-                self._resume_live()
+            # The classic prompt temporarily releases its reader.
+            self._resume_live()
 
     def _suspend_live(self) -> None:
         """Release the terminal before prompt_toolkit reads a line."""
@@ -658,8 +637,7 @@ class TerminalCallbacks(Callbacks):
             self.watcher.start()
 
     async def _ask(self, name: str, summary: str, preview: str) -> Decision:
-        if self.chat is None:
-            self._suspend_live()
+        self._suspend_live()
         self.ui.console.print()
         verb = {
             "write_file": "write to",
@@ -670,22 +648,11 @@ class TerminalCallbacks(Callbacks):
         if preview:
             self.ui.diff(preview) if preview.lstrip().startswith(("---", "+", "-")) else self.ui.code(preview)
 
-        if self.chat is not None:
-            # The chat application already owns stdin. Do not stop/restart a
-            # second reader around this question: doing so briefly releases
-            # the pinned composer and loses type-ahead. The question is shown
-            # in that same composer and the layout remains live.
-            self.chat.flush()
-            answer = await self.chat.ask(
-                "[y] yes  [a] always  [n] no  [q] stop:",
-                {"y": "yes", "a": "always", "n": "no", "q": "stop"})
-            return {"y": Decision.ALLOW, "a": Decision.ALLOW_ALWAYS,
-                    "n": Decision.DENY}.get(answer, Decision.ABORT)
-
         while True:
             try:
                 answer = (await self.prompt_session.prompt_async(
-                    HTML('<ansicyan>  [y] yes  [a] always  [n] no  [q] stop: </ansicyan>')
+                    HTML(f'<style fg="{ACCENT}">  [y] yes  [a] always '
+                         f'[n] no  [q] stop: </style>')
                 )).strip().lower()
             except (EOFError, KeyboardInterrupt):
                 return Decision.ABORT
@@ -740,17 +707,12 @@ class _LazyPromptSession:
 
 
 class Repl:
-    chat: "tui.ChatUI | None" = None
-    """The pinned-composer layout, when this session uses it. A class-level
-    default so a Repl built without __init__ -- which tests do -- still
-    answers the question rather than raising."""
-
     def __init__(self, config: Config, workspace: Path, ui: UI,
                  scope: Scope = Scope.FOLDER, mode: Mode = Mode.MANUAL):
         self.config = config
         self.workspace = workspace
         self.ui = ui
-        self.client = OllamaClient(config)
+        self.client = make_client(config)
         self.policy = resolve(config.effort)
         self.boundary = resolve_scope(workspace, scope)
         self.mode = mode
@@ -770,13 +732,6 @@ class Repl:
                                 else "default")
         self.pet.set_pace(self.policy.name)
         self._last_elapsed = 0.0
-        from .motion import MotionScheduler
-        self.motion = MotionScheduler(reduced=not config.animations)
-        """One timing loop for the timed animations (waveforms, effects).
-        The pet face itself is render-driven; this scheduler exists for the
-        things that need explicit timing independent of repaints."""
-        self._speech_wave = ""
-        """The waveform frame currently in the footer's speech line."""
 
         # The talker speaks; the coder works. Constructed here so /talker can
         # turn it on and off mid-session without rebuilding the agent.
@@ -826,6 +781,12 @@ class Repl:
             self._shift_effort(-1)
             event.app.invalidate()
 
+        @bindings.add("c-r")
+        def _(event):
+            """Ctrl-R records one spoken message for the prompt."""
+            self.start_dictation()
+            event.app.invalidate()
+
         self._prompt_bindings = bindings
         # The classic prompt is built lazily, on its first real use. Its
         # constructor builds a whole prompt_toolkit application, and on
@@ -850,10 +811,13 @@ class Repl:
         self.agent.permissions.mode = mode
         self.agent.refresh_system_prompt()
         self._task: asyncio.Task | None = None
-        self.chat = None
-        self._dictation_state = ""
-        """The footer's speech line while a dictation runs."""
         self._dictation_task: asyncio.Task | None = None
+        self._dictation_draft = ""
+        """A transcription waiting on the next prompt line, for review."""
+        self.gh = None
+        """The lazy GitHubClient; created on the first /gh use."""
+        self.gh_ws = None
+        """The open cloud workspace: owner, repo, branch, default, tree."""
 
     def _make_prompt_session(self) -> PromptSession:
         """Build the classic prompt on demand.
@@ -866,7 +830,9 @@ class Repl:
         history_file = data_dir() / "history"
         session = PromptSession(
             history=FileHistory(str(history_file)),
-            completer=CommandCompleter(lambda: self.workspace),
+            completer=CommandCompleter(
+                lambda: self.workspace,
+                model_names_getter=lambda: self._model_names),
             complete_while_typing=True,
             key_bindings=self._prompt_bindings,
             multiline=False,
@@ -888,120 +854,6 @@ class Repl:
         """The pet's current mood, for the top-right scene."""
         return self.pet.mood.value if self.pet.enabled else ""
 
-    def _pet_on(self) -> bool:
-        return self.pet.enabled
-
-    def _pet_moving(self) -> bool:
-        return self.pet.animate and not self.motion.reduced
-
-    def _chrome(self) -> dict[str, str]:
-        """The prompt_toolkit style classes for the live chrome, from the
-        current palette -- kept in one place so /theme can repaint the
-        borders, toasts, plan panel and activity markers live."""
-        p = self.ui.palette
-        return {
-            "edge": p.faint,
-            "prompt": f"bold {p.accent}",
-            "toast-ok": p.good,
-            "toast-fail": p.bad,
-            "pet": "",
-            "todo": "",
-            "todo-title": f"bold {p.accent}",
-            "ok": p.good,
-            "fail": p.bad,
-            "active": p.accent,
-        }
-
-    def use_chat_layout(self) -> "tui.ChatUI":
-        """Switch rendering into the chat layout.
-
-        Everything wynxo draws keeps drawing exactly as it did; rich is
-        pointed at the transcript buffer instead of at the terminal, so the
-        two layouts cannot drift apart the way a second renderer would.
-        """
-        chat = tui.ChatUI(
-            header=self._chat_header,
-            status=self._chat_status,
-            completer=CommandCompleter(lambda: self.workspace),
-            on_interrupt=self.interrupt,
-            on_thinking=self.callbacks.toggle_thinking,
-            on_tools=self.callbacks.toggle_verbose,
-            on_dictate=self.start_dictation,
-            unicode=self.ui.g.unicode,
-            pet_state=self._pet_mood,
-            pet_enabled=self._pet_on,
-            pet_animate=self._pet_moving,
-            chrome=self._chrome(),
-        )
-        self.chat = chat
-        self._dictation_state = ""
-        """What the footer says while speech is being captured or read."""
-        self._dictation_task: asyncio.Task | None = None
-        self.ui.console = chat.transcript.console
-        # rich wraps to ui.width, and the pane truncates rather than wraps,
-        # so the two have to agree -- including after the window is resized.
-        chat.on_resize = self._resized
-        self.ui.width = chat.size()[0]
-        self.ui.live_ok = False        # the bar goes in the pinned row
-        self.ui.on_refresh = chat.invalidate
-        self.callbacks.chat = chat
-        return chat
-
-    def _resized(self, width: int) -> None:
-        """The window changed size; tell what wraps to it.
-
-        One place, because everything else reads ui.width when it draws --
-        the activity bar included. Only the console needs telling as well,
-        and that is the transcript's own, which the pane resizes itself.
-        """
-        self.ui.width = width
-
-    def _chat_header(self) -> str:
-        """The pinned identity line: who you are talking to, and about what."""
-        width, _ = self.chat.size() if self.chat else (self.ui.width, 0)
-        dot = self.ui.g.dot
-        endpoint = self.config.endpoint().url.replace("http://", "")
-        parts = [f"[bold {ACCENT}]wynxo[/]", self.config.model,
-                 self.policy.name, self.ui.shorten_path(str(self.workspace)),
-                 endpoint]
-        # The voice is part of who you are talking to: mommy, kawaii, ...
-        # Show it next to the name so switching is visible in the pinned
-        # line, not just in the model's delivery.
-        if self.config.voice != "plain":
-            parts.insert(1, f"[{MUTED}]{self.config.voice}[/]")
-        line = f"  {f'  {dot}  '.join(parts)}"
-        text = Text.from_markup(line)
-        # The header is one row, always. Left alone, a line that reaches the
-        # terminal width wraps, and render_to_ansi keeps only the wrapped
-        # tail -- so on a narrow window the line said "127.0.0.1:11434" and
-        # nothing else, "wynxo" itself pushed off. Truncate from the tail
-        # instead: the identity (name, voice, model, effort, workspace)
-        # stays, and the least-important part -- the endpoint -- is what
-        # gives way.
-        text.truncate(max_width=max(tui.MIN_WIDTH, width - 2),
-                      overflow="ellipsis")
-        return tui.render_to_ansi(text, width)
-
-    def _chat_status(self) -> str:
-        """The one footer row: activity while a turn runs, else status.
-
-        Exactly one line, always. Everything the bar knows how to draw --
-        the plan, the tool history -- has a bounded home elsewhere (the plan
-        in the top-right float, history in the transcript and /log); letting
-        it into this row would change its height and resize the
-        conversation on every event, which is the reflow this layout exists
-        to prevent.
-        """
-        width, _ = self.chat.size() if self.chat else (self.ui.width, 0)
-        if self._dictation_state:
-            wave = f"  {self._speech_wave}" if self._speech_wave else ""
-            return f"  {self._dictation_state}{wave}"
-        bar = self.ui.bar
-        if bar is not None:
-            if rendered := tui.render_to_ansi(bar, width, max_rows=1):
-                return rendered
-        return "  " + self._status_line()
-
     def agent_session_id(self) -> str:
         import uuid
 
@@ -1009,15 +861,10 @@ class Repl:
 
     async def _connect(self) -> bool:
         """Reach the server, report what is loaded, adapt to the model."""
+        self._arm_resize()
         if self.config.clear_on_start:
             self.ui.clear()
-        # Into the transcript under the chat layout. Status writes straight
-        # to stdout, and the application takes the alternate screen the
-        # moment it starts -- so the warnings this collects (no native tool
-        # calling, a scope with nothing in it) were printed to the screen
-        # being left behind, and gone before anyone could read them.
-        status = Status(stream=self.chat.transcript.console.file
-                        if self.chat is not None else None)
+        status = Status()
         problems: list[tuple[str, str, str]] = []
 
         def note(state: str, message: str, detail: str = "") -> None:
@@ -1074,16 +921,12 @@ class Repl:
             await logo.play(self.ui, self.config.logo, self.config.animations)
         else:
             self.ui.wake(self.pet, self.pet.name)
-        if self.chat is None:
-            # In the chat layout the same line is pinned at the top, where it
-            # stays; printing it into the conversation as well would say it
-            # twice and then let one copy scroll away.
-            self.ui.banner(
-                self.config.model,
-                f"{self.client.base_url} (ollama {version})",
-                self.policy.name,
-                str(self.workspace),
-            )
+        self.ui.banner(
+            self.config.model,
+            f"{self.client.base_url} (ollama {version})",
+            self.policy.name,
+            str(self.workspace),
+        )
         if self.pet.enabled:
             self.ui.console.print(
                 Text("  ") + Text(self.pet.face(advance=False),
@@ -1096,82 +939,17 @@ class Repl:
     async def start(self) -> int:
         if not await self._connect():
             return 1
-        if self.chat is not None:
-            return await self._chat_loop()
         return await self._loop()
-
-    async def _chat_loop(self) -> int:
-        """The chat layout: composer pinned, conversation above it.
-
-        The application runs for the whole session rather than once per
-        prompt, which is the difference that keeps the composer on screen
-        while an answer is being written. Turns are handled by a worker
-        reading submissions off a queue, so typing the next thing while the
-        current one is still running does the obvious thing.
-        """
-        chat = self.chat
-        stop = asyncio.Event()
-
-        async def worker() -> None:
-            try:
-                while not stop.is_set():
-                    text = (await chat.next_message()).strip()
-                    if not text:
-                        continue
-                    # The same caret the composer uses, so what you said
-                    # echoes in the same voice as what you are typing.
-                    chat.transcript.console.print(
-                        f"  [{ACCENT}]{self.ui.g.caret}[/] {escape(text)}")
-                    chat.flush()
-                    if text.startswith("/"):
-                        # A command can hold a status spinner (model list,
-                        # map rebuild); mark it active so the repaint pump
-                        # keeps its messages appearing.
-                        chat.begin_turn()
-                        try:
-                            if await self._guarded(self.command(text)) is False:
-                                break
-                        finally:
-                            chat.end_turn()
-                        chat.flush()
-                        continue
-                    chat.begin_turn()
-                    try:
-                        await self._guarded(self.turn(text))
-                    finally:
-                        chat.end_turn()
-                    chat.flush()
-                    if await self._guarded(self._drain_queue()) is False:
-                        break
-                    chat.flush()
-            except (asyncio.CancelledError, Interrupted):
-                pass
-            finally:
-                stop.set()
-                chat.exit()
-
-        task = asyncio.create_task(worker())
-        painter = asyncio.create_task(chat.repaint_loop())
-        try:
-            await chat.app.run_async()
-        finally:
-            stop.set()
-            task.cancel()
-            painter.cancel()
-            for pending in (task, painter):
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await pending
-            await self.motion.aclose()
-            self.speaker.stop()
-            await self.client.aclose()
-        return 0
 
     async def _loop(self) -> int:
         while True:
             try:
                 self._open_box()
+                draft = self._dictation_draft or None
+                self._dictation_draft = ""
                 text = await self.prompt_session.prompt_async(
-                    self._prompt_message, bottom_toolbar=self._bottom_toolbar)
+                    self._prompt_message, bottom_toolbar=self._bottom_toolbar,
+                    default=draft)
             except KeyboardInterrupt:
                 continue
             except EOFError:
@@ -1193,26 +971,21 @@ class Repl:
         # She stops when wynxo does. A speech process is a child that
         # outlives its parent, so quitting mid-sentence used to leave the
         # voice talking to an empty terminal.
-        await self.motion.aclose()
         self.speaker.stop()
         await self.client.aclose()
-        self.ui.console.print(f"  [{MUTED}]bye[/]")
+        # The pet signs off -- a warm end, but never louder than a plain
+        # "bye" when it is disabled.
+        farewell = self.pet.remark("bye")
+        if farewell:
+            self.ui.console.print(f"  {self.pet.name} — {farewell}")
+        else:
+            self.ui.console.print(f"  [{MUTED}]bye[/]")
         return 0
 
     async def start_with(self, prompt: str) -> int:
         """Run one prompt, then drop into the REPL. `wynxo "fix the tests"`."""
         if not await self._connect():
             return 1
-        if self.chat is not None:
-            # Queued rather than run here. use_chat_layout() has already
-            # pointed the console at the transcript, so a turn taken before
-            # the application starts writes its whole answer into a buffer
-            # nobody is showing -- `wynxo "add retries"` edited the file and
-            # showed nothing at all, then left a half-drawn prompt behind.
-            # On the queue it is answered inside the layout, and echoed the
-            # way anything else you type is.
-            self.chat.submissions.put_nowait(prompt)
-            return await self._chat_loop()
         await self.turn(prompt)
         return await self._loop()
 
@@ -1252,24 +1025,17 @@ class Repl:
 
     async def turn(self, text: str) -> None:
         """Run one request, with a live status bar and mid-flight keybinds."""
-        # The classic watcher is started in the locked implementation after
-        # its bindings are created; chat mode intentionally uses prompt-toolkit.
-        if self.chat is None:
-            watcher = None
-            if watcher is not None:
-                watcher.start()
         async with self.callbacks._turn_lock:
             self.callbacks._thinking_buffer.clear()
-            self.callbacks._thinking_shown = 0
-            # The classic path starts its terminal watcher inside the locked
-            # turn; chat mode uses prompt-toolkit bindings instead.
+            self.callbacks._thinking_unsent.clear()
+            self.callbacks._thinking_total = 0
+            self.callbacks._thinking_words = 0
             await self._turn_locked(text)
 
     async def _turn_locked(self, text: str) -> None:
         self.journal.user(text)
         text = self._expand_mentions(text)
         self.callbacks.tokens = 0
-        self.callbacks._thinking_chars = 0
         # Cleared per turn: opening the panel should show this answer's
         # reasoning, not everything the model has thought this session.
 
@@ -1314,21 +1080,11 @@ class Repl:
             await self._talk(await self.talker.opening(text))
         self._task = asyncio.ensure_future(self.agent.run(text))
         bar.start()
-        if self.chat is None:
-            # Only where nothing else is reading the terminal. Under the chat
-            # layout prompt_toolkit owns stdin, and a watcher thread reading
-            # it too means every byte goes to whichever gets there first --
-            # so characters typed during a turn simply vanished from the
-            # composer, and Ctrl-O worked or did not depending on the race.
-            # The layout binds those keys itself, and its composer is the
-            # type-ahead queue.
-            watcher.start()
+        watcher.start()
         try:
             result = await self._task
         except (asyncio.CancelledError, Interrupted):
             self.pet.react(Mood.IDLE)
-            if self.chat is not None:
-                self.chat.set_activity("")
             self.callbacks._status_message = ""
             if self.callbacks.bar is not None:
                 self.callbacks.bar.update(activity="idle", detail="")
@@ -1348,12 +1104,6 @@ class Repl:
             self.ui.bar = None
             self.callbacks.watcher = None
             self._task = None
-            # Whatever happened -- answer, tool, error, cancellation -- the
-            # composer gets the caret back. Typing must work immediately.
-            if self.chat is not None:
-                self.chat.set_activity("")
-                self.chat.refocus()
-                self.chat.invalidate()
             # Stages are transient. Never leave a terminal-level status or
             # pet activity behind after the live bar is disposed.
             self.callbacks._status_message = ""
@@ -1541,12 +1291,15 @@ class Repl:
         """The left edge of the input box.
 
         Re-evaluated on every redraw, so a mid-prompt Ctrl-E shows up at once.
+        Coloured with the palette accent, matching the frame around it: the
+        box is one object, not a cyan caret sitting inside a violet border.
         """
         if is_dumb_terminal():
             return HTML('<b>&gt;</b> ')
         edge = self.ui.g.vbar
         return HTML(
-            '<ansicyan>%s</ansicyan> <b><ansicyan>&gt;</ansicyan></b> ' % edge)
+            '<style fg="%s">%s</style> <b><style fg="%s">&gt;</style></b> '
+            % (ACCENT, edge, ACCENT))
 
     def _open_box(self) -> None:
         """Top edge of the input box, printed just before the prompt.
@@ -1568,29 +1321,44 @@ class Repl:
         One line rather than two: a multi-line toolbar does not render on
         terminals that cannot answer a cursor-position request, and the border
         is the natural place for the status anyway.
+
+        Frame, status and hint are all palette colours, so the whole box
+        changes with /theme -- the top edge was already accent; making the
+        bottom and the caret the same hue turned a two-tone frame (violet
+        top, cyan bottom) into one object.
         """
         from rich.cells import cell_len
 
         g = self.ui.g
         width = max(30, self.ui.width)
         left = self._status_line()
-        hint = "^O thinking   ^C stop"
 
         # "<bl><hbar> " + status + " " + fill + " " + hint + " <hbar><br>"
         def total(status: str, tail: str, fill: int) -> int:
             head = 3 + cell_len(status) + 1 + fill
             return head + (1 + cell_len(tail) + 3 if tail else 1)
 
-        if total(left, hint, 1) > width:
-            hint = ""
+        # The hints that fit, most useful first. ^C stop must survive the
+        # longest, so it is trimmed last rather than with the rest.
+        base = ["^O think", "^T detail", "^E effort", "^R talk"]
+        hint = ""
+        for keep in range(len(base), -1, -1):
+            candidate = "  ".join(base[:keep] + ["^C stop"])
+            if total(left, candidate, 1) <= width:
+                hint = candidate
+                break
         if total(left, hint, 1) > width:
             left = left[: max(0, width - 10)]
         fill = max(1, width - total(left, hint, 0))
 
-        cyan, dim, reset = "\x1b[36m", "\x1b[38;5;247m", "\x1b[0m"
-        line = f"{cyan}{g.bl}{g.hbar}{reset} {dim}{left}{reset} {cyan}" + g.hbar * fill
+        frame = _ansi_of(ACCENT)
+        status_style = _ansi_of(MUTED)
+        hint_style = _ansi_of(FAINT)
+        reset = "\x1b[0m"
+        line = f"{frame}{g.bl}{g.hbar}{reset} {status_style}{left}{reset} " \
+            f"{frame}" + g.hbar * fill
         if hint:
-            line += f"{reset} {dim}{hint}{reset} {cyan}{g.hbar}"
+            line += f"{reset} {hint_style}{hint}{reset} {frame}{g.hbar}"
         line += f"{g.br}{reset}"
         return ANSI(line)
 
@@ -1656,6 +1424,23 @@ class Repl:
         self.pet.set_pace(self.policy.name)
         self.ui.info(f"effort: {self.policy.name} -- {self.policy.headline}")
 
+    def _arm_resize(self) -> None:
+        """Keep ui.width honest when the terminal changes size.
+
+        prompt_toolkit re-renders the prompt on its own after a resize;
+        what it does not know about is wynxo's ui.width, which the
+        transcript wrapping and the activity bar read. A handler that only
+        refreshes that is enough -- the next draw from either picks up the
+        new width. Windows has no SIGWINCH; prompt_toolkit's own resize
+        handling covers the console there, and ui.width only drifts until
+        the next prompt redraw.
+        """
+        if sys.platform == "win32":
+            return
+        with contextlib.suppress(NotImplementedError, RuntimeError):
+            asyncio.get_running_loop().add_signal_handler(
+                signal.SIGWINCH, self.ui.refresh_size)
+
     def _arm_interrupt(self) -> None:
         """Re-install the SIGINT handler. Must run before every turn.
 
@@ -1683,24 +1468,19 @@ class Repl:
         # Silence her first: a voice still talking about the thing you just
         # cancelled is the most annoying possible response to Ctrl-C.
         self.speaker.stop()
-        if self.chat is not None:
-            self.chat.notify("✕ stopped")
         if self._task and not self._task.done():
             self._task.cancel()
 
     # -- speech to text ------------------------------------------------------
 
     def start_dictation(self) -> None:
-        """Ctrl-R: one microphone -> transcription -> composer round.
+        """Ctrl-R or /dictate: microphone -> transcription -> next prompt.
 
-        The transcript is put in the composer for review, never submitted --
-        what the microphone heard is a draft, and sending it is the user's
-        decision. Safe to press while a dictation is already running: the
-        second press cancels the first.
+        The transcript is put on the next prompt line for review, never
+        submitted -- what the microphone heard is a draft, and sending it is
+        the user's decision. Safe to press while a dictation is already
+        running: the second press cancels the first.
         """
-        if self.chat is None:
-            self.ui.error("speech input needs the chat layout")
-            return
         if self._dictation_task is not None and not self._dictation_task.done():
             self._dictation_task.cancel()
             return
@@ -1728,64 +1508,32 @@ class Repl:
         try:
             text = await session.start()
         except asyncio.CancelledError:
-            # The cancellation already ran through the session's own task
-            # (start() cancels with it), so the state is CANCELLED; only the
-            # footer needs putting back. Re-raise to end this task cleanly.
-            self.motion.unregister("speech")
-            self._speech_wave = ""
-            self._dictation_state = ""
-            self.chat.invalidate()
             raise
         except Exception as exc:
             self.ui.error(f"speech input failed: {exc}")
             return
-        finally:
-            self.motion.unregister("speech")
-            self._speech_wave = ""
-            self._dictation_state = ""
         if session.state is stt_devices.SpeechState.CANCELLED:
-            self.chat.invalidate()
             return
         if text:
-            # Into the composer, for review. Cursor to the end of what was
-            # heard, ready for edits or a plain enter.
-            self.chat.buffer.insert_text(text)
+            # A draft on the next prompt line, for review. It is never sent
+            # on its own: the prompt shows it and Enter submits, edits first
+            # if the microphone got something wrong.
+            self._dictation_draft = text.strip()
+            self.ui.info(f"heard: {self._dictation_draft}")
+            self.ui.info("review it at the prompt, then Enter to send")
         elif session.state is stt_devices.SpeechState.ERROR:
             self.ui.error("speech input failed; nothing was heard")
-        self.chat.refocus()
-        self.chat.invalidate()
 
     def _on_speech_state(self, snapshot) -> None:
-        """The footer mirrors the speech state machine, one row, no reflow.
-
-        The waveform is a timed animation driven by the one scheduler; the
-        row it renders into already exists, so the animation can never move
-        the composer or change the footer's height."""
+        """Mirror the speech state machine into the transcript."""
         mic = "🎙" if self.ui.g.unicode else "o"
         state = snapshot.state.value
         labels = {
-            "listening": f"{mic} Listening...",
+            "listening": f"{mic} Listening... (Ctrl-R again to stop)",
             "transcribing": f"{self.ui.g.gear} Transcribing...",
         }
-        self.motion.unregister("speech")
-        self._speech_wave = ""
-        if state in ("listening", "transcribing"):
-            from .motion import scene_for
-            self.motion.register(
-                "speech", scene_for(state),
-                self._wave_frame,
-                unicode=self.ui.g.unicode,
-                width=self.chat.size()[0] if self.chat else 80,
-            )
-        self._dictation_state = labels.get(state, "")
-        if self.chat is not None:
-            self.chat.invalidate()
-
-    def _wave_frame(self, frame: str) -> None:
-        """One waveform frame landed in the footer's speech line."""
-        self._speech_wave = frame
-        if self.chat is not None:
-            self.chat.invalidate()
+        if message := labels.get(state):
+            self.ui.info(message)
 
     # -- slash commands ----------------------------------------------------
 
@@ -1822,7 +1570,10 @@ class Repl:
                  ("Ctrl-B", "step effort down"),
                  ("Ctrl-C", "interrupt the current turn, keep the conversation"),
                  ("Alt-Enter", "newline instead of submitting"),
-                 ("Up / Down", "history")],
+                 ("Up / Down", "history"),
+                 ("Mouse wheel", "scroll the conversation back"),
+                 ("Shift + drag", "select text to copy (mouse reporting is on)"),
+                 ("Ctrl+Shift+C", "copy the selection, in most terminals")],
                 title="keys",
             )
             return True
@@ -1831,6 +1582,8 @@ class Repl:
             return await self.cmd_effort(args)
         if name == "/model":
             return await self.cmd_model(args)
+        if name == "/pull":
+            return await self.cmd_pull(args)
         if name == "/endpoint":
             return await self.cmd_endpoint(args)
         if name == "/ctx":
@@ -1849,15 +1602,12 @@ class Repl:
         if name == "/apps":
             return self.cmd_apps(args)
 
-        if name == "/layout":
-            if self.chat is None:
-                self.ui.info("the chat layout is not active; nothing to measure")
-                return True
-            self.ui.console.print(Text(self.chat.layout_report(), style=MUTED))
-            return True
-
         if name == "/todo":
             return await self.cmd_todo(args)
+
+        if name == "/dictate":
+            self.start_dictation()
+            return True
 
         if name == "/thinking":
             return await self.cmd_thinking(args)
@@ -1865,11 +1615,7 @@ class Repl:
         if name == "/plan":
             todo = self.agent.tools.get("todo_write")
             rendered = todo.render() if todo and hasattr(todo, "render") else ""
-            if self.chat is not None:
-                self.chat.set_todos(rendered, title=self.agent.task_state.objective)
-                self.chat.invalidate()
-            else:
-                self.ui.todos(rendered) if rendered else self.ui.info("no plan yet")
+            self.ui.todos(rendered) if rendered else self.ui.info("no plan yet")
             return True
 
         if name == "/clear":
@@ -1912,6 +1658,10 @@ class Repl:
             return await self.cmd_repo(args)
         if name == "/undo":
             return self.cmd_undo(args)
+        if name == "/gh":
+            return await self.cmd_gh(args)
+        if name == "/copy":
+            return self.cmd_copy(args)
         if name == "/memory":
             return self.cmd_memory(args)
 
@@ -1952,6 +1702,9 @@ class Repl:
 
         if name == "/commit":
             return await self.cmd_commit(args)
+
+        if name == "/review":
+            return await self.cmd_review(args)
 
         if name == "/diff":
             return self.cmd_diff(args)
@@ -2035,6 +1788,69 @@ class Repl:
         self.ui.diff(diff[:100_000])
         if len(diff) > 100_000:
             self.ui.info("diff truncated visually; use git diff for the complete patch")
+        return True
+
+    async def cmd_review(self, args: list[str]) -> bool:
+        """Ask the model to review the current changes. Read-only.
+
+        Nothing is changed or committed; this is the review pass that happens
+        before a commit decides it is done. Diff only, so a clean tree is an
+        honest "nothing to review".
+        """
+        from .prompts import REVIEW_PROMPT
+        from .repo import run_git
+
+        target = args[0].lower() if args else "all"
+        if target not in ("staged", "unstaged", "all"):
+            self.ui.warn("usage: /review [staged | unstaged]")
+            return True
+        ok, _ = run_git(["rev-parse", "--git-dir"], cwd=self.workspace, timeout=10)
+        if not ok:
+            self.ui.warn("not a git repository")
+            return True
+
+        if target == "staged":
+            git_commands = [["diff", "--staged"]]
+        elif target == "unstaged":
+            git_commands = [["diff"]]
+        else:
+            git_commands = [["diff"], ["diff", "--staged"]]
+        diffs = []
+        for git_command in git_commands:
+            ok, diff = run_git(git_command, cwd=self.workspace, timeout=60)
+            if not ok:
+                self.ui.warn(f"could not read the diff: {_first(diff)}")
+                return True
+            if diff.strip():
+                diffs.append(diff)
+        if not diffs:
+            self.ui.info("no changes to review")
+            return True
+        diff = "\n".join(diffs)
+
+        files = additions = deletions = 0
+        for line in diff.splitlines():
+            if line.startswith("diff --git "):
+                files += 1
+            elif line.startswith("+") and not line.startswith("+++"):
+                additions += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                deletions += 1
+        body = diff if len(diff) <= 24_000 else\
+            diff[:24_000] + "\n\n... [diff truncated]"
+        self.ui.info(f"reviewing {files} file(s), +{additions} -{deletions}...")
+        with self.ui.status("reviewing the changes..."):
+            turn = await self.agent._call_model(
+                messages=[{"role": "user",
+                           "content": f"{REVIEW_PROMPT}\n\n```diff\n{body}\n```"}],
+                use_tools=False, stream_content=False)
+        review = turn.content.strip()
+        if not review:
+            self.ui.warn("the model did not produce a review")
+            return True
+        self.ui.console.print()
+        self.ui.console.print(Text("review", style=f"bold {ACCENT}"))
+        self.ui.console.print(Text(review))
         return True
 
     async def cmd_test(self, args: list[str]) -> bool:
@@ -2142,6 +1958,8 @@ class Repl:
             self.ui.warn(f"commit failed: {_first(output)}")
             return True
         self.ui.success(_first(output) or "committed")
+        if proud := self.pet.remark("proud"):
+            self.ui.console.print(f"  {self.pet.name} — {proud}")
         self.journal.note("committed", subject=message.splitlines()[0])
         return True
 
@@ -2276,6 +2094,8 @@ class Repl:
         # policy back rather than trusting the one just resolved, so the
         # status bar reports what the agent will actually do.
         self.policy = self.agent.policy
+        self.config.effort = self.policy.name
+        self.config.save()
         self.pet.set_pace(self.policy.name)
         await self._effort_surge(previous, self.policy.name)
         self.ui.success(f"effort: {self.policy.name} -- {self.policy.describe()}")
@@ -2302,7 +2122,8 @@ class Repl:
             current, current.upper())
 
         if not self.ui.live_ok:
-            # Chat layout: no repainting widget, so the band is drawn once.
+            # No live bar to animate into (a pipe, non-interactive): the band
+            # is drawn once instead.
             celebrate(self.ui, label, level, step_up)
             return
 
@@ -2312,6 +2133,32 @@ class Repl:
             await surge(self.ui, label, ACCENT if current == "ultra" else BAR_ACCENT)
         else:
             celebrate(self.ui, label, level, step_up)
+
+    async def cmd_pull(self, args: list[str]) -> bool:
+        """Download a model from Ollama, then make it the active one.
+
+        `ollama pull` is a separate step the wizard and /model used to send
+        people off to run by hand; the provider already streams progress, so
+        the command only needs to surface it and hand over to the switcher.
+        """
+        if not args:
+            self.ui.info("usage: /pull <model>, e.g. /pull qwen3-coder:30b")
+            return True
+        target = args[0]
+        if target not in (m.name for m in await self.client.list_models()):
+            self.ui.info(f"pulling {target}...")
+            last = ""
+            try:
+                async for line in self.client.pull(target):
+                    line = line.strip()
+                    if line and line != last and not line.endswith("success"):
+                        last = line
+                        self.ui.info(line)
+            except ProviderError as exc:
+                self.ui.error(str(exc))
+                return True
+        self._model_names = [m.name for m in await self.client.list_models()]
+        return await self._switch_model(target, self._model_names)
 
     async def cmd_model(self, args: list[str]) -> bool:
         """Switch model. With no argument this is the same capability-aware
@@ -2363,17 +2210,15 @@ class Repl:
                 if matches:
                     self.ui.info(f"did you mean: {', '.join(matches)}")
                 else:
-                    self.ui.info(f"pull it first:  ollama pull {target}")
+                    self.ui.info(f"pull it first:  /pull {target}")
                 return True
 
         self.config.model = target
         self.agent.config.model = target
+        self.config.save()
         await self.agent.detect_capabilities()
         self.policy = self.agent.policy
         self.ui.success(f"model: {target}")
-        if self.chat is not None:
-            self.chat.notify(f"✦ model: {target}")
-            self.chat.refocus()
         self.journal.note("model switched", model=target)
         if warning := await check_context(self.client, self.config):
             self.ui.warn(warning)
@@ -2471,7 +2316,7 @@ class Repl:
             self.config.active_endpoint = name
             self.config.save()
             await self.client.aclose()
-            self.client = OllamaClient(self.config)
+            self.client = make_client(self.config)
             self.agent.client = self.client
             try:
                 version = await self.client.ping()
@@ -2511,9 +2356,6 @@ class Repl:
         self.agent.permissions.mode = mode
         self.agent.refresh_system_prompt()
         self.ui.success(f"mode: {mode.value} -- {mode.describe()}")
-        if self.chat is not None:
-            self.chat.notify(f"{self.ui.g.tick} mode: {mode.value}")
-            self.chat.refocus()
         if mode is Mode.YOLO:
             self.ui.warn("Nothing will ask for approval from here on.")
         return True
@@ -2745,6 +2587,258 @@ class Repl:
             current_todo.items = previous_todo.items
         self.agent.refresh_system_prompt()
 
+    def cmd_copy(self, args: list[str]) -> bool:
+        """Copy the conversation, or the last answer, to the system clipboard.
+
+        The chat layout lives on the alternate screen with mouse reporting
+        on, so drag-to-select never reaches the conversation -- this is the
+        reliable way to get text out of it. Built from the session messages,
+        so what you get is plain text, not ANSI escapes.
+        """
+        from .platforms import copy_to_clipboard
+
+        messages = self.agent.session.messages
+        only_last = bool(args) and args[0] == "last"
+        if only_last:
+            blocks = [m.get("content", "") for m in messages
+                      if m.get("role") == "assistant" and m.get("content")]
+            text = blocks[-1] if blocks else ""
+            label = "last answer"
+        else:
+            lines: list[str] = []
+            for message in messages:
+                role = message.get("role")
+                content = str(message.get("content") or "").strip()
+                if role == "user" and content and not content.startswith("/"):
+                    lines.append(f"> {content}")
+                elif role == "assistant" and content:
+                    lines.append(content)
+            text = "\n\n".join(lines)
+            label = "conversation"
+        if not text.strip():
+            self.ui.info("nothing to copy yet")
+            return True
+        if copy_to_clipboard(text):
+            self.ui.success(f"copied the {label} ({len(text)} chars) to the clipboard")
+        else:
+            self.ui.error("could not copy: no clipboard tool on this machine")
+        return True
+
+    async def cmd_gh(self, args: list[str]) -> bool:
+        """Work on a GitHub repository in the cloud, through the gh CLI.
+
+        Nothing is cloned: the tree, files and branches live on GitHub, and
+        every operation goes through the API using the account ``gh auth
+        login`` stored. This is the person-sized twin of the github_read /
+        github_write tools the agent gets. Edits commit to the workspace
+        branch; /gh branch creates one to work on, /gh pr ships it.
+        """
+        from .gh import GitHubClient, GitHubError
+
+        if self.gh is None:
+            self.gh = GitHubClient()
+        action = args[0].lower() if args else "status"
+        known = {"status", "login", "open", "ls", "cat", "edit",
+                 "branch", "pr", "close"}
+        if action not in known:
+            self.ui.warn(f"unknown /gh action {action}. "
+                         "status | login | open | ls | cat | edit | "
+                         "branch | pr | close")
+            return True
+        ws = self.gh_ws
+
+        try:
+            if action == "login":
+                self.ui.info("run `gh auth login` in a terminal to connect "
+                             "your GitHub account, then /gh status here.")
+                return True
+            if action == "status":
+                user = self.gh.auth_user()
+                if ws:
+                    files = sum(1 for e in ws["tree"]
+                                if e.get("type") == "blob")
+                    self.ui.info(f"GitHub: {user} · {ws['owner']}/{ws['repo']} "
+                                 f"@{ws['branch']} · {files} files")
+                else:
+                    self.ui.info(f"GitHub: logged in as {user}. No repository "
+                                 "open — /gh open owner/repo.")
+                return True
+            if action == "open":
+                if len(args) < 2 or "/" not in args[1]:
+                    self.ui.error("usage: /gh open owner/repo [branch]")
+                    return True
+                owner, repo = args[1].strip().split("/", 1)
+                default = self.gh.repo_default_branch(owner, repo)
+                branch = args[2] if len(args) > 2 else default
+                tree = self.gh.tree(owner, repo, branch)
+                self.gh_ws = {"owner": owner, "repo": repo,
+                              "branch": branch, "default": default,
+                              "tree": tree}
+                files = sum(1 for e in tree if e.get("type") == "blob")
+                self.ui.success(
+                    f"opened {owner}/{repo} @ {branch} in the cloud "
+                    f"({files} files). /gh ls to browse, /gh cat <path> to "
+                    f"read, /gh edit <path> to change.")
+                return True
+            if ws is None:
+                self.ui.error("no repository open — /gh open owner/repo first")
+                return True
+            owner, repo, branch = ws["owner"], ws["repo"], ws["branch"]
+            if action == "ls":
+                prefix = args[1] if len(args) > 1 else ""
+                lines = self._gh_ls(ws, prefix)
+                self.ui.console.print("\n".join(lines) if lines else "nothing here.")
+                return True
+            if action == "cat":
+                if len(args) < 2:
+                    self.ui.error("usage: /gh cat <path>")
+                    return True
+                content, _sha = self.gh.read(owner, repo, args[1], branch)
+                lines = content.splitlines()
+                self.ui.console.print("\n".join(lines[:500]))
+                if len(lines) > 500:
+                    self.ui.info(f"... ({len(lines) - 500} more lines)")
+                return True
+            if action == "edit":
+                if len(args) < 2:
+                    self.ui.error("usage: /gh edit <path> [commit message]")
+                    return True
+                return await self._gh_edit(ws, args[1], " ".join(args[2:]) or None)
+            if action == "branch":
+                if len(args) < 2:
+                    self.ui.error("usage: /gh branch <name>")
+                    return True
+                head = self.gh.ref_sha(owner, repo, branch)
+                self.gh.create_branch(owner, repo, args[1], head)
+                self.gh_ws["branch"] = args[1]
+                self.ui.success(f"now working on {args[1]} in {owner}/{repo}.")
+                return True
+            if action == "pr":
+                if branch == ws["default"]:
+                    self.ui.warn("on the default branch — /gh branch <name> "
+                                 "first, then /gh pr.")
+                    return True
+                title = " ".join(args[1:]) or None
+                body = self._gh_pr_body(ws)
+                url = self.gh.open_pr(
+                    owner, repo, ws["default"], branch,
+                    title or f"wynxo: changes on {branch}", body)
+                self.ui.success(url)
+                return True
+            if action == "close":
+                self.gh_ws = None
+                self.ui.info("closed the cloud workspace.")
+                return True
+        except GitHubError as exc:
+            self.ui.error(str(exc))
+            return True
+        return True
+
+    def _gh_ls(self, ws: dict, prefix: str) -> list[str]:
+        """The tree entries directly under a prefix, directories first."""
+        prefix = prefix.strip("/")
+        entries = ws["tree"]
+        if prefix:
+            entries = [e for e in entries
+                       if e["path"] == prefix
+                       or e["path"].startswith(prefix + "/")]
+        lines: list[str] = []
+        for entry in sorted(entries,
+                            key=lambda e: (e.get("type") != "tree", e["path"])):
+            path = entry["path"]
+            if path == prefix:
+                continue
+            rest = path[len(prefix) + 1:] if prefix else path
+            if "/" in rest:
+                continue
+            if entry.get("type") == "tree":
+                lines.append(f"{path}/")
+            else:
+                size = entry.get("size")
+                lines.append(f"{path}  ({size} B)" if size else path)
+        return lines
+
+    async def _gh_edit(self, ws: dict, path: str, message: str | None) -> bool:
+        """Fetch a cloud file into a temp file, open the editor, review the
+        diff, and commit back -- nothing goes up blind."""
+        import os
+        import shlex
+        import subprocess
+        import tempfile
+
+        from .gh import GitHubError
+
+        owner, repo, branch = ws["owner"], ws["repo"], ws["branch"]
+        try:
+            content, sha = self.gh.read(owner, repo, path, branch)
+        except GitHubError as exc:
+            self.ui.error(str(exc))
+            return True
+        suffix = ".md" if path.endswith((".md", ".markdown")) else ".txt"
+        fd, tmp = tempfile.mkstemp(prefix="wynxo-gh-", suffix=suffix)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+            editor = (os.environ.get("VISUAL") or os.environ.get("EDITOR"))
+            if editor:
+                subprocess.run([*shlex.split(editor), tmp])
+            elif sys.platform == "win32":
+                # notepad returns immediately; Start-Process -Wait blocks
+                # until the window is closed.
+                subprocess.run(["powershell", "-NoProfile", "-Command",
+                                "Start-Process -Wait notepad "
+                                "-ArgumentList $args[0]", tmp])
+            else:
+                subprocess.run(["nano", tmp])
+            with open(tmp, encoding="utf-8") as handle:
+                updated = handle.read()
+            if updated == content:
+                self.ui.info("no changes saved.")
+                return True
+            diff = self._gh_diff(content, updated, path)
+            self.ui.console.print()
+            self.ui.diff(diff)
+            answer = await self._question(
+                f"commit {path} to {owner}/{repo} @ {branch}? [y/n]",
+                {"y": "yes", "n": "no"}, default="y")
+            if answer != "y":
+                self.ui.info("nothing committed.")
+                return True
+            commit = self.gh.write(owner, repo, path, updated,
+                                   message or f"wynxo: edit {path}",
+                                   branch, sha=sha)
+            self.ui.success(f"committed {path} on {branch} ({commit[:10]}).")
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        return True
+
+    @staticmethod
+    def _gh_diff(before: str, after: str, path: str) -> str:
+        """A unified diff of what the editor changed, for the review prompt."""
+        import difflib
+
+        before_lines = before.splitlines(keepends=True)
+        after_lines = after.splitlines(keepends=True)
+        lines = list(difflib.unified_diff(
+            before_lines, after_lines, fromfile=f"a/{path}",
+            tofile=f"b/{path}", n=2))
+        return "".join(lines) if lines else "(no text changes)"
+
+    def _gh_pr_body(self, ws: dict) -> str:
+        """A PR body listing the commits made on the workspace branch."""
+        from .gh import GitHubError
+
+        try:
+            messages = self.gh.commits(ws["owner"], ws["repo"], ws["branch"])
+        except GitHubError:
+            messages = []
+        lines = [f"Changes on `{ws['branch']}` → `{ws['default']}`:"]
+        lines += [f"- {m.splitlines()[0]}" for m in messages if m.splitlines()]
+        return "\n".join(lines) or f"Changes on `{ws['branch']}`."
+
     def cmd_undo(self, args: list[str]) -> bool:
         if args and args[0] in ("list", "history"):
             history = self.agent.checkpoints.history()
@@ -2771,7 +2865,8 @@ class Repl:
 
     async def cmd_speak(self, args: list[str]) -> bool:
         """Turn the voice on and off, and say which synthesiser is doing it."""
-        from .speech import (Speaker, available, install_hint,
+        from .speech import (MOMMY_VOICES, Speaker, available, install_edge_tts,
+                             install_hint, list_edge_voices,
                              pick as pick_engine)
 
         action = args[0].lower() if args else ""
@@ -2786,14 +2881,19 @@ class Repl:
                 for line in install_hint().splitlines():
                     self.ui.info(line)
                 return True
+            edge_tts_missing = not any(
+                e.name == "edge-tts" for e in engines)
+            menu = [("on", "read answers out loud"),
+                    ("off", "stay quiet"),
+                    ("test", "say a sentence now, to check it works"),
+                    ("engine", f"which synthesiser speaks "
+                               f"({len(engines)} available here)"),
+                    ("voice", "pick a voice / heard it speak first")]
+            if edge_tts_missing:
+                menu.append(("install",
+                             "get Microsoft's natural voices -- no more robot"))
             chosen = await self._pick(
-                "speech",
-                [("on", "read answers out loud"),
-                 ("off", "stay quiet"),
-                 ("test", "say a sentence now, to check it works"),
-                 ("engine", f"which synthesiser speaks "
-                            f"({len(engines)} available here)"),
-                 ("voice", "the named voice the synthesiser should use")],
+                "speech", menu,
                 "on" if self.config.speak else "off",
             )
             if chosen is None:
@@ -2831,6 +2931,7 @@ class Repl:
             if not want:
                 self.speaker.stop()
             self.config.speak = want
+            self.config.save()
             self.ui.success(f"speech: {self.speaker.describe()}")
             return True
 
@@ -2859,11 +2960,54 @@ class Repl:
             args = [action, picked]
 
         if action == "voice" and len(args) == 1:
-            typed = await self._type_in("voice name (blank to cancel):",
-                                        self.config.speech_voice or "")
-            if not typed:
+            # With edge-tts around, a voice is a person-shaped choice: offer
+            # the warm picks, then every female neural voice Microsoft has.
+            # Without it, it is just an engine-specific name to type.
+            if any(e.name == "edge-tts" for e in available()):
+                with self.ui.status("fetching Microsoft's voices..."):
+                    all_voices = await list_edge_voices()
+                curated = dict(MOMMY_VOICES)
+                options = list(MOMMY_VOICES)
+                options += [(n, h) for n, h in all_voices if n not in curated]
+                current = self.config.speech_voice or "en-US-JennyNeural"
+                picked = await self._pick("voice", options, current)
+                if picked is None:
+                    return True
+                if picked is NO_PICKER:
+                    typed = await self._type_in(
+                        "voice name (blank to cancel):", current)
+                    if not typed:
+                        return True
+                    args = [action, typed]
+                else:
+                    args = [action, picked]
+            else:
+                typed = await self._type_in("voice name (blank to cancel):",
+                                            self.config.speech_voice or "")
+                if not typed:
+                    return True
+                args = [action, typed]
+
+        if action == "install":
+            if any(e.name == "edge-tts" for e in available()):
+                self.ui.info("edge-tts is already here.")
+                return await self.cmd_speak(["engine", "edge-tts"])
+            self.ui.info("installing Microsoft's neural voices...")
+            ok, detail = install_edge_tts()
+            if not ok:
+                self.ui.warn(f"could not install edge-tts: {detail}")
                 return True
-            args = [action, typed]
+            self.ui.success("installed -- the natural voices are ready.")
+            self.config.speak = True
+            self.config.speech_engine = "edge-tts"
+            self.speaker = Speaker(
+                pick_engine("edge-tts"), voice=self.config.speech_voice,
+                rate=self.config.speech_rate, model=self.config.speech_model)
+            self.speaker.enabled = True
+            self.config.save()
+            self.ui.info(f"speech: {self.speaker.describe()}  "
+                         f"(/speak voice to pick which)")
+            return True
 
         if action in ("engine", "voice") and len(args) > 1:
             if action == "engine":
@@ -2878,6 +3022,7 @@ class Repl:
             else:
                 self.config.speech_voice = args[1]
                 self.speaker.voice = args[1]
+            self.config.save()
             self.speaker.enabled = self.config.speak
             self.ui.success(f"speech: {self.speaker.describe()}")
             return True
@@ -2976,12 +3121,9 @@ class Repl:
                 self.config.animations = False
                 self.config.save()
             self.pet.animate = False
-            self.motion.stop_all()
-            self.motion.reduced = True
         else:
             # Leaving minimal restores whatever motion was configured.
             self.pet.animate = self.config.animations
-            self.motion.reduced = not self.config.animations
         # Rebind now so the rest of this session picks it up, and say plainly
         # that anything already drawn keeps the old colours.
         from .ui import apply_palette
@@ -2989,15 +3131,7 @@ class Repl:
         self.ui.palette = theme_module.resolve(choice)
         apply_palette(self.ui.palette)
         self.ui.code_theme = self.ui.palette.code_theme
-        self.pet.style_name = self.pet.style_name   # keep the face set
-        if self.chat is not None:
-            # Live chrome first, so the borders/toasts/plan repaint with the
-            # new palette rather than only the transcript text that follows.
-            self.chat.apply_theme(self._chrome())
         self.ui.success(f"theme: {choice}")
-        if self.chat is not None:
-            self.chat.notify(f"✦ theme: {choice}")
-            self.chat.refocus()
         self._preview_theme()
         return True
 
@@ -3006,8 +3140,6 @@ class Repl:
 
         Deterministic by design: previews are frame strips printed once, not
         live loops, so the command never owns the screen or needs a timer.
-        The live timed animations (speech waveforms) run off the one
-        scheduler and are switched off together by /animate off.
         """
         from .motion import SCENES, preview
 
@@ -3016,9 +3148,6 @@ class Repl:
             self.config.animations = on
             self.config.save()
             self.pet.animate = on
-            if not on:
-                self.motion.stop_all()
-            self.motion.reduced = not on
             self.ui.success(f"animations {'on' if on else 'off'}"
                             + ("  (reduced motion)" if not on else ""))
             return True
@@ -3045,24 +3174,15 @@ class Repl:
         )
         self.ui.info(
             f"preview one: /animate <scene>   motion: "
-            f"{'on' if not self.motion.reduced else 'off'}"
-            + ("  (/animate off for reduced motion)" if not self.motion.reduced else ""))
+            f"{'on' if self.config.animations else 'off'}"
+            + ("  (/animate off for reduced motion)" if self.config.animations else ""))
         return True
 
     async def cmd_todo(self, args: list[str]) -> bool:
-        """Collapse the plan panel: expanded | compact | hidden."""
-        if self.chat is None:
-            self.ui.info("the chat layout is not active; the plan panel is there")
-            return True
-        mode = args[0].lower() if args else "toggle"
-        if mode == "toggle":
-            mode = {"expanded": "compact", "compact": "hidden",
-                    "hidden": "expanded"}.get(self.chat.todo_mode, "expanded")
-        if mode in ("expanded", "compact", "hidden"):
-            self.chat.set_todo_mode(mode)
-            self.ui.info(f"plan panel: {mode}")
-        else:
-            self.ui.warn("usage: /todo [expanded|compact|hidden]")
+        """Show the current plan."""
+        todo = self.agent.tools.get("todo_write")
+        rendered = todo.render() if todo and hasattr(todo, "render") else ""
+        self.ui.todos(rendered) if rendered else self.ui.info("no plan yet")
         return True
 
     async def _question(self, question: str, answers: dict[str, str],
@@ -3077,12 +3197,9 @@ class Repl:
 
         Returns the key that was answered, or "" for cancelled.
         """
-        if self.chat is not None:
-            self.chat.flush()
-            return await self.chat.ask(question, answers, default)
         try:
             typed = (await self.prompt_session.prompt_async(
-                HTML(f'<ansicyan>  {_escape(question)} </ansicyan>')
+                HTML(f'<style fg="{ACCENT}">  {_escape(question)} </style>')
             )).strip().lower()
         except (EOFError, KeyboardInterrupt):
             return ""
@@ -3094,13 +3211,10 @@ class Repl:
         return ""
 
     async def _type_in(self, question: str, default: str = "") -> str:
-        """Read a line of free text, wherever this session is being drawn."""
-        if self.chat is not None:
-            self.chat.flush()
-            return await self.chat.prompt(question, default)
+        """Read a line of free text."""
         try:
             return (await self.prompt_session.prompt_async(
-                HTML(f'<ansicyan>  {_escape(question)} </ansicyan>'),
+                HTML(f'<style fg="{ACCENT}">  {_escape(question)} </style>'),
                 default=default)).strip()
         except (EOFError, KeyboardInterrupt):
             return ""
@@ -3123,24 +3237,6 @@ class Repl:
                    hint=option[1])
             for option in options
         ]
-        if self.chat is not None:
-            # Drawn inside the running application. The standalone picker is
-            # its own prompt_toolkit app, and one cannot run inside another
-            # -- without this every settings command would fall back to
-            # printing a table, which is the thing this was built to replace,
-            # and /model did worse than that: it drew its rows over the
-            # composer and left the header shredded behind it.
-            return await self.chat.choose(
-                title,
-                # (what is shown, the detail beside it, what comes back).
-                # They differ for /resume, where the row reads "2h ago" and
-                # the answer is a session id.
-                [(c.label or str(c.value),
-                  "  ".join(f for f in (c.badge, c.hint) if f),
-                  c.value)
-                 for c in choices],
-                next((c.label for c in choices if c.value == current), ""),
-            )
         if not arrows_supported():
             return NO_PICKER
         return await choose(
@@ -3378,7 +3474,6 @@ class Repl:
         if action in ("still", "animate"):
             self.pet.animate = action == "animate"
             self.config.animations = self.pet.animate
-            self.motion.reduced = not self.pet.animate
             self.config.save()
             self.ui.success(f"animation {'on' if self.pet.animate else 'off'}")
             return True
@@ -3444,9 +3539,6 @@ class Repl:
                                    else "default")
             self.agent.refresh_system_prompt()
             self.ui.success(f"voice: {choice} -- {_voice_summary(choice)}")
-            if self.chat is not None:
-                self.chat.notify(f"✦ voice: {choice} -- {_voice_summary(choice)}")
-                self.chat.refocus()
             return True
 
         self.ui.warn("usage: /pet [on|off|still|animate|show <mood>|name <x>|voice <x>]")
@@ -3692,13 +3784,31 @@ def _windows_pipe_text(grace: float) -> str:
 
 
 async def run_once(config: Config, workspace: Path, ui: UI, prompt: str,
-                   scope: Scope = Scope.FOLDER, mode: Mode = Mode.YOLO) -> int:
-    """Non-interactive mode: answer one prompt and exit."""
-    client = OllamaClient(config)
+                   scope: Scope = Scope.FOLDER, mode: Mode = Mode.YOLO,
+                   json_output: bool = False) -> int:
+    """Non-interactive mode: answer one prompt and exit.
+
+    With ``json_output`` the whole run is silent and a single JSON object
+    -- answer, errors, usage -- is printed on stdout, for scripts.
+    """
+    import io
+    import json as _json
+
+    from rich.console import Console
+
+    if json_output:
+        # Tool progress and stage lines are chat, not data. Swap the
+        # console for a sink so stdout carries nothing but the JSON.
+        ui.console = Console(file=io.StringIO())
+
+    client = make_client(config)
     try:
         await client.ping()
     except ProviderError as exc:
-        ui.error(str(exc))
+        if json_output:
+            print(_json.dumps({"ok": False, "content": "", "errors": [str(exc)]}))
+        else:
+            ui.error(str(exc))
         await client.aclose()
         return 1
 
@@ -3715,11 +3825,30 @@ async def run_once(config: Config, workspace: Path, ui: UI, prompt: str,
     try:
         result = await agent.run(prompt)
     except ProviderError as exc:
-        ui.error(str(exc))
+        if json_output:
+            print(_json.dumps({"ok": False, "content": "", "errors": [str(exc)]}))
+        else:
+            ui.error(str(exc))
         await client.aclose()
         return 1
     callbacks._end_stream()
+    usage = agent.session.usage
     await client.aclose()
+
+    if json_output:
+        print(_json.dumps({
+            "ok": not result.errors,
+            "content": result.content,
+            "errors": result.errors,
+            "model": config.model,
+            "usage": {
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "requests": usage.requests,
+                "tool_calls": usage.tool_calls,
+            },
+        }))
+        return 0 if not result.errors else 1
 
     if result.errors:
         ui.error("\n".join(result.errors))
@@ -3737,6 +3866,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("prompt", nargs="*", help="run one prompt and exit")
     parser.add_argument("-p", "--print", action="store_true",
                         help="non-interactive: answer the prompt and exit")
+    parser.add_argument("--json", action="store_true",
+                        help="with -p: print the answer as one JSON object "
+                             "on stdout, nothing else")
     parser.add_argument("-e", "--effort", choices=list(ORDER), help="effort level for this run")
     parser.add_argument("-m", "--model", help="model to use")
     parser.add_argument("--endpoint", help="Ollama URL, e.g. http://homelab:11434")
@@ -3746,8 +3878,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help="clone a GitHub repository and work in it")
     parser.add_argument("--talker", metavar="MODEL",
                         help="small model that talks while the coder works")
-    parser.add_argument("--coder", metavar="MODEL",
-                        help="model that does the work when --talker is set")
     parser.add_argument("--speak", action="store_true",
                         help="read answers out loud")
     parser.add_argument("--no-speak", action="store_true",
@@ -3765,11 +3895,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ascii-invert", action="store_true",
                         help="for a light terminal, where the ramp reads "
                              "the other way round")
-    parser.add_argument("--classic", action="store_true",
-                        help="the scrolling prompt instead of the chat layout")
-    parser.add_argument("--chat", action="store_true",
-                        help="pin the composer to the bottom of the screen "
-                             "(the default where the terminal allows it)")
     parser.add_argument("--no-stream", action="store_true", help="wait for the full response")
     parser.add_argument("--no-thinking", action="store_true", help="hide model reasoning")
     parser.add_argument("--yolo", action="store_true",
@@ -3797,16 +3922,10 @@ def apply_flags(config, args) -> None:
         config.num_ctx = args.ctx
     if args.no_stream:
         config.stream = False
-    if args.classic:
-        config.chat_layout = False
-    if args.chat:
-        config.chat_layout = True
     if args.no_thinking:
         config.show_thinking = False
     if args.talker:
         config.talker = args.talker
-    if args.coder:
-        config.coder = args.coder
     if args.speak:
         config.speak = True
     if args.no_speak:
@@ -3899,7 +4018,8 @@ async def amain(argv: list[str] | None = None) -> int:
     if prompt and args.print:
         once_mode = Mode.parse(args.mode) if args.mode else Mode.YOLO
         once_scope = Scope.parse(args.scope) if args.scope else Scope.FOLDER
-        return await run_once(config, workspace, ui, prompt, once_scope, once_mode)
+        return await run_once(config, workspace, ui, prompt, once_scope,
+                              once_mode, json_output=args.json)
 
     mode = Mode.parse(args.mode) if args.mode else Mode.MANUAL
     if args.yolo:
@@ -3934,17 +4054,10 @@ async def amain(argv: list[str] | None = None) -> int:
     # and from the status lines into literal "?[1;32m" garbage on screen.
     # write_raw passes them through, which is what a terminal UI needs.
     #
-    # The chat layout owns the whole screen and manages its own alternate
-    # screen (prompt_toolkit's Application is built full_screen), so it must
-    # not be wrapped in patch_stdout -- that exists to keep printed output
-    # from colliding with a scrolling prompt, and there is no scrolling
-    # prompt here.
-    if config.chat_layout and tui.usable():
-        repl.use_chat_layout()
-        if prompt:
-            return await repl.start_with(prompt)
-        return await repl.start()
-
+    # Output goes to the terminal's own scrollback and the mouse is never
+    # captured, so scrolling, selecting and copying are the terminal's own
+    # -- no alternate screen, no mouse reporting, nothing for the user to
+    # fight. (The full-screen chat layout used to exist; it is gone.)
     with patch_stdout(raw=True):
         if prompt:
             return await repl.start_with(prompt)
@@ -4014,7 +4127,7 @@ def main() -> None:
         # reading it cannot act on. Say what happened in one line, keep the
         # traceback on disk for when it is actually wanted.
         report = _write_crash_report(exc)
-        print(f"\nwynxo hit an unexpected error and had to stop.",
+        print("\nwynxo hit an unexpected error and had to stop.",
               file=sys.stderr)
         print(f"  {type(exc).__name__}: {exc}", file=sys.stderr)
         if report is not None:

@@ -8,11 +8,29 @@ whether anything is running.
 
 from __future__ import annotations
 
+import io
 import re
 
-import pytest
+from rich.console import Console
 
 from wynxo.parsing import LiveContentFilter, partial_string_value
+
+
+class _Page:
+    """A rich console writing to a buffer, so streamed output stays in memory.
+
+    What the deleted chat" Transcript used to provide -- a real console that
+    wraps to a width and can be read back -- without the fullscreen layout.
+    """
+
+    def __init__(self, width: int = 80):
+        self.buffer = io.StringIO()
+        self.console = Console(file=self.buffer, width=width,
+                               force_terminal=True, highlight=False,
+                               soft_wrap=False, legacy_windows=False)
+
+    def text(self) -> str:
+        return re.sub(r"\x1b\[[0-9;]*m", "", self.buffer.getvalue())
 
 
 class TestReadingHalfWrittenJson:
@@ -99,14 +117,41 @@ class TestTheCodeArrivesWhileItIsWritten:
         live.feed('here is some {"content":"not a tool call"} prose')
         assert live.code_delta() == ""
 
+    def test_escaped_newlines_are_not_duplicated(self):
+        """The tail is sliced by source position, not decoded length:
+        each ``\\n`` escape shrinks two source characters into one decoded
+        one, so a decoded-length slice re-decodes what was already consumed
+        and duplicates it."""
+        call = ('<tool_call>{"content":"a\\nb\\nc"}</tool_call>')
+        live = LiveContentFilter()
+        out = []
+        for ch in call:
+            live.feed(ch)
+            if delta := live.code_delta():
+                out.append(delta)
+        assert "".join(out) == "a\nb\nc"
+
+    def test_key_located_before_its_value_opens(self):
+        """The winning key can be picked while its value is still empty
+        (``"content":`` with nothing after the colon). The commit must
+        wait for the opening quote rather than giving up forever."""
+        live = LiveContentFilter()
+        parts = ['<tool_call>{"name":"write_file","path":"p.py",',
+                 '"content":', '"h', 'i",', '"extra"]</tool_call>']
+        code = []
+        for part in parts:
+            live.feed(part)
+            if delta := live.code_delta():
+                code.append(delta)
+        assert "".join(code) == "hi"
+
 
 class TestTextArrivesCharacterByCharacter:
     def _render(self, text, width=46, bar=False):
         from wynxo.pet import Pet
-        from wynxo.tui import Transcript
         from wynxo.ui import ActivityBar, CodeStreamer, UI
 
-        page = Transcript(width=width)
+        page = _Page(width=width)
         ui = UI()
         ui.console = page.console
         ui.width = width
@@ -117,24 +162,22 @@ class TestTextArrivesCharacterByCharacter:
         for char in text:
             streamer.feed(char)
         streamer.finish()
-        page.drain()
-        return re.sub(r"\x1b\[[0-9;]*m", "", "\n".join(page.lines))
+        return page.text()
 
     def test_a_single_character_shows_immediately(self):
         """Holding the partial word is what made the answer arrive in
         jumps, and a model pausing mid-word look like it had stopped."""
-        from wynxo.tui import Transcript
         from wynxo.ui import CodeStreamer, UI
 
-        page = Transcript(width=40)
+        page = _Page(width=40)
         ui = UI()
         ui.console = page.console
         ui.width = 40
         streamer = CodeStreamer(ui, indent="  ")
         for char in "hel":
             streamer.feed(char)
-        page.drain()
-        assert "hel" in "".join(page.lines)
+        streamer.finish()
+        assert "hel" in page.text()
 
     def test_every_word_survives_the_wrap(self):
         text = ("The retry helper in upload.py is linear and should back "
@@ -149,10 +192,9 @@ class TestTextArrivesCharacterByCharacter:
 
 class TestCodeKeepsItsIndentation:
     def _render(self, text, width=60):
-        from wynxo.tui import Transcript
         from wynxo.ui import CodeStreamer, UI
 
-        page = Transcript(width=width)
+        page = _Page(width=width)
         ui = UI()
         ui.console = page.console
         ui.width = width
@@ -160,8 +202,7 @@ class TestCodeKeepsItsIndentation:
         for char in text:
             streamer.feed(char)
         streamer.finish()
-        page.drain()
-        return re.sub(r"\x1b\[[0-9;]*m", "", "\n".join(page.lines))
+        return page.text()
 
     def test_leading_whitespace_is_kept(self):
         """Prose drops whitespace at the start of a line, which is right for

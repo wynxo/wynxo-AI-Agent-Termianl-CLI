@@ -366,7 +366,6 @@ class EditFile(Tool):
             lines = before.splitlines(keepends=True)
             if args.start_line > len(lines) or args.end_line > len(lines):
                 return ToolResult.failure(f"Line range {args.start_line}-{args.end_line} is outside {rel} ({len(lines)} lines).")
-            old_text = "".join(lines[args.start_line - 1:args.end_line])
             after = "".join(lines[:args.start_line - 1]) + args.new_text + "".join(lines[args.end_line:])
             note = _write_back(path, after, source)
             diff = make_diff(before, after, rel)

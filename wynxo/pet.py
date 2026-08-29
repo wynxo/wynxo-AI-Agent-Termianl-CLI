@@ -123,6 +123,8 @@ REMARKS: dict[str, list[str]] = {
     "error": ["that didn't work", "hit a wall"],
     "long": ["still going", "this one's slow", "hang on"],
     "interrupted": ["stopped", "ok, dropping it"],
+    "proud": ["nice one", "well done", "good work"],
+    "bye": ["see you", "later", "until next time"],
 }
 
 REMARKS_KAWAII: dict[str, list[str]] = {
@@ -132,6 +134,8 @@ REMARKS_KAWAII: dict[str, list[str]] = {
     "error": ["ah, that didn't work", "hit a wall, sorry", "uh oh~ 😭", "let's try again~"],
     "long": ["still going~", "this one's slow", "almost...", "hanging in there~", "patience~ ✨"],
     "interrupted": ["stopped~", "okay, dropping it", "understood~ ♡"],
+    "proud": ["yay! ♡", "so proud of us~", "amazing~ ✨", "we did it! ♡"],
+    "bye": ["bye bye~ ♡", "come back soon~", "see you~ ✨", "take care of yourself, okay?~"],
 }
 
 REMARKS_MOMMY: dict[str, list[str]] = {
@@ -141,6 +145,8 @@ REMARKS_MOMMY: dict[str, list[str]] = {
     "error": ["that didn't work, goodboy", "hit a wall -- let's look together", "no worries, goodboy, we'll fix it", "hmm, that one slipped -- try again~"],
     "long": ["still going, goodboy", "this one's slow, hang on", "almost there, goodboy", "patience, goodboy~ ✨"],
     "interrupted": ["stopped, goodboy", "okay, dropping it then", "as you say~ ♡"],
+    "proud": ["goodboy, well done~ ♡", "mommy's proud of you, goodboy", "there's my goodboy ✨", "you did so well, goodboy~"],
+    "bye": ["goodbye, goodboy~ mommy's here when you need her", "see you soon, goodboy ♡", "off you go, goodboy~ take care", "until next time, goodboy~"],
 }
 
 

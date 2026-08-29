@@ -659,16 +659,24 @@ Ctrl-O mid-reply and the thinking appears or disappears immediately.
 | `Ctrl-C` | interrupt this turn, keep the conversation |
 | `Alt-Enter` | newline instead of submitting |
 | `↑` `↓` | history |
+| `Tab` | complete the slash command you are typing (`/mo` → `/model`, `/mode`) |
+
+Because wynxo runs the ordinary scrolling prompt, the terminal's own
+scrolling, selection and copy work exactly as they do in any other CLI — no
+mouse capture, no special keys. `/copy` puts the conversation (or `/copy
+last` for just the last answer) on your clipboard when you want it as text.
 
 While a turn runs there is a live status line showing what is happening right
 now:
 
 ```
-  ⠹ editing  src/transfer.py   14s · 812 tok · 58 tok/s · high   ^O thinking  ^T detail
+  ⠹ editing  src/transfer.py   14s · 812 tok · 58 tok/s · high   ^O thinking  ^T detail  ^C stop
 ```
 
-Code streams as it is written, and each fenced block is re-rendered with
-syntax highlighting the moment it closes.
+The bar shows the model at work, and the hints shrink to fit the window —
+`^C stop` is the last one to go on a narrow screen. At the prompt, the input
+box's frame, caret and toolbar are all one theme: `/theme` recolours the
+whole thing, top border and bottom border together.
 
 ---
 
@@ -731,28 +739,38 @@ any of it permanent.
 
 ## Speaking out loud
 
-She reads the answer to you. **You type; she talks** — there is no microphone
-anywhere in wynxo.
+She reads the answer to you. **You type; she talks** — the voice out is one
+direction. If you want to talk *in*, use `/dictate` (or Ctrl-R at the prompt)
+to record one spoken message through your microphone and drop the
+transcription onto the prompt.
 
 ```
 /speak on          # or start with: wynxo --speak
 /speak test        # say a line now, to check you can hear it
 /speak             # what is available on this machine
+/speak voice       # pick a voice
+/speak install     # fetch Microsoft's neural voices, right here
 ```
 
-No new Python dependency. It uses a synthesiser that is already on your
-machine, or one you install deliberately:
+The one worth having is `edge-tts`: Microsoft's neural voices, which sound
+like a person rather than a phone lady. `/speak install` fetches it into the
+interpreter wynxo runs with, and `/speak voice` then offers the warm female
+voices (Jenny, Aria, Sonia, ...) to choose from — no separate setup, no PATH
+fiddling. It streams over the network, so it needs internet.
+
+Otherwise it uses whatever synthesiser is already on the machine:
 
 | platform | engine | notes |
 |---|---|---|
 | macOS | `say` | built in, good quality |
-| Windows | PowerShell | built in |
+| Windows | PowerShell | built in — robotic unless a natural voice is installed |
 | Termux | `termux-tts-speak` | `pkg install termux-api` + the Termux:API app |
 | Linux | `espeak-ng` | `sudo apt install espeak-ng` — robotic but always works |
-| any | `piper` | neural, by far the most natural — needs a voice model |
+| any | `piper` | neural, natural — needs a voice model |
+| any | `edge-tts` | Microsoft neural voices, most human — `/speak install` |
 
-Where the engine has a female voice it is chosen by default. Override with
-`/speak voice <name>`, and pick the engine with `/speak engine <name>`.
+Where the engine has a female voice it is chosen by default; `/speak voice`
+picks which one, and `/speak engine <name>` picks the synthesiser.
 
 If nothing is installed, wynxo stays silent and still works — speech never
 stops it starting.
@@ -836,6 +854,40 @@ Already have it cloned? Just point at the folder:
 /cd ~/code/my-project
 /scope ~/code/my-project
 ```
+
+### Working in the cloud: GitHub
+
+Sometimes the repo should stay on GitHub and never touch your disk. wynxo
+can work there directly through the GitHub API, using the account you
+already have with the GitHub CLI:
+
+```bash
+git install github-cli    # or your package manager / https://cli.github.com
+gh auth login             # once; wynxo reuses this account
+```
+
+No API key is stored anywhere in wynxo — `gh` holds the credentials, and
+`/gh status` tells you whose. Inside a session:
+
+```
+/gh status                 who you are, and what is open
+/gh open wynxo/my-project  open a cloud workspace (default branch)
+/gh ls                     browse the file tree
+/gh cat src/app.py         read a file
+/gh branch add-retry       create a feature branch and switch to it
+/gh edit src/app.py        edit in your $EDITOR, then commit to the branch
+/gh pr                     open a pull request to the default branch
+/gh close                  drop the workspace
+```
+
+Every `/gh edit` is its own commit on the workspace branch; open a branch
+first when you want a PR at the end. The agent gets the same capability as
+tools — `github_read` (tree and read) and `github_write` (write, branch,
+pr) — so you can say *"in my repo wynxo/my-project, add a retry to the
+upload path and open a PR"* and it reads the cloud files, edits them via
+the API, and ships a pull request, all without a local checkout. Writes ask
+for approval like any local edit. Private repositories work: the API is the
+same, and `gh` decides what your account may see.
 
 ---
 
@@ -1028,6 +1080,7 @@ effort-level setting.
 
 ```
 /help                    everything below
+/copy [last]             conversation to the clipboard; last = last answer
 /effort [level]          low | medium | high | xhigh | max | ultra
 /model [name]            switch model, or list what the server has
 /endpoint ...            list | test | add <url> [name] | use <name>
@@ -1037,6 +1090,7 @@ effort-level setting.
 /scope [folder|repo|machine]    what it may touch
 /scope <path>  ·  /cd <path>    work in another directory
 /repo owner/name                clone a GitHub repo and work in it
+/gh ...                  work on a GitHub repo in the cloud (status | open | ls | cat | edit | branch | pr | close)
 /undo [n|list]           revert the last file change
 /memory ...              show | add <note> | forget <text> | edit | reload
 /pet ...                 on | off | still | name <x> | voice <x>
@@ -1207,6 +1261,15 @@ Generation genuinely can take minutes. Raise `request_timeout` in the config.
 ### Colours or boxes look wrong on Windows
 
 Use Windows Terminal rather than the legacy console host.
+
+### I can't scroll, or select and copy with the mouse
+
+This used to be a real limitation of the old full-screen chat layout, which
+captured the mouse for the wheel. It is gone: wynxo now always runs the
+scrolling prompt, so scrolling, selecting and copying are your terminal's
+own — the wheel and drag-select behave exactly as they do in any other
+command-line program. `/copy` still exists if you want the conversation (or
+`/copy last` for the last answer) on the clipboard.
 
 ### `wynxo: command not found`
 

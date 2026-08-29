@@ -233,7 +233,7 @@ def _by_directory(entries: list[Entry]) -> str:
 
 def _render(entries: list[Entry], per_file: int) -> str:
     width = min(38, max((len(e.path) for e in entries), default=10) + 2)
-    header = [f"# Project map", "",
+    header = ["# Project map", "",
               f"{len(entries)} source files."]
     if per_file:
         header.append("Each line is a file and the names it defines, so you "

@@ -18,7 +18,6 @@ none.
 from __future__ import annotations
 
 import asyncio
-import time
 from pathlib import Path
 
 from rich.text import Text

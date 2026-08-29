@@ -235,7 +235,6 @@ def _filtered(alias_dir: Path) -> tuple[Path, ...]:
     """Reproduce _windows_path_dirs' rule for a test-built PATH."""
     from wynxo.tools.appcatalog import _windows_path_dirs
     import os
-    monkey = {"PATH": str(alias_dir)}
     real_env = os.environ.get("PATH", "")
     os.environ["PATH"] = str(alias_dir)
     try:

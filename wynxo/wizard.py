@@ -23,7 +23,6 @@ from .config import (
 )
 from .effort import ORDER, resolve
 from .discovery import Found, private_subnets, scan_loopback, scan_subnets, verify
-from .platforms import ollama_server_help as server_help  # re-exported
 from .provider import OllamaClient, ProviderError, inspect_all
 from .select import (
     HINT, HINT_ASCII, Choice, choose, silence_cpr_warning,
@@ -471,4 +470,4 @@ async def run_wizard(ui: UI) -> Config:
     ui.console.print()
     return config
 
-__all__ = ["run_wizard", "probe", "server_help", "RECOMMENDED"]
+__all__ = ["run_wizard", "probe", "RECOMMENDED"]

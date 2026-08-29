@@ -291,7 +291,6 @@ class TestSomebodyElsesTextCannotDriveTheTerminal:
 
     @pytest.mark.parametrize("call", [
         lambda ui, text: ui.assistant_markdown(text),
-        lambda ui, text: ui.thinking(text),
         lambda ui, text: ui.tool_result("shell", True, "", text),
         lambda ui, text: ui.tool_output(text),
         lambda ui, text: ui.code(text),
@@ -444,6 +443,18 @@ class TestHeader:
         UI().banner("m", "http://127.0.0.1:11434", "low", "/tmp/p")
         assert "?[" not in capsys.readouterr().out
 
+    def test_header_shows_the_effort_meter(self, capsys):
+        """The banner names the effort level and shows the same gauge the
+        status bar does, so the two halves of the chrome agree."""
+        from wynxo.ui import Glyphs
+
+        ui = UI()
+        ui.g = Glyphs(True)
+        ui.banner("m", "http://127.0.0.1:11434", "ultra", "/tmp/p")
+        out = capsys.readouterr().out
+        assert "███ ultra" in out
+        assert "ultra" in out
+
 
 class TestAMessageStaysInItsOwnColumn:
     """rich wraps a Text at the console edge and starts the next line at
@@ -503,6 +514,25 @@ class TestAMessageStaysInItsOwnColumn:
 
     def test_a_short_message_is_left_alone(self):
         assert self._lines("warn", "not a git checkout") == ["  ! not a git checkout"]
+
+    def test_the_marker_gets_the_bold(self):
+        """The marker carries the emphasis; the words keep the status
+        colour. A bold ! reads as a marker, plain text as the message."""
+        import io
+
+        from rich.console import Console
+
+        ui = UI()
+        ui.width = 70
+        ui.console = Console(file=io.StringIO(), force_terminal=True, width=70)
+        ui.warn("not a git checkout")
+        out = ui.console.file.getvalue()
+        marker = out.index("!")
+        assert "\x1b[1" in out[:marker], "the bold escape must precede the marker"
+        import re
+
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+        assert "! not a git checkout" in plain, "the marker keeps its column"
 
     def test_a_message_keeps_its_own_line_breaks(self):
         lines = self._lines("info", "first line\nsecond line")

@@ -4,8 +4,10 @@ The part worth testing hardest is what *never* happens: the talker must not
 be handed tools, and a machine with no synthesiser must not fail to start.
 """
 
+import asyncio
 import json
 import os
+import sys
 import tempfile
 
 import httpx
@@ -139,16 +141,41 @@ class TestEngineCommands:
     def test_piper_without_a_model_refuses_rather_than_guesses(self):
         assert speech.command(self._engine("piper"), "hi") is None
 
-    def test_edge_tts_builds_the_synthesis_command(self):
+    def test_edge_tts_builds_the_synthesis_command(self, monkeypatch):
         """edge-tts is the one voice worth installing: Microsoft's neural
         voices, which sound like a person. Its command is the synthesis
         half; the Speaker appends the output file and plays it."""
         engine = next(e for e in speech.ENGINES if e.name == "edge-tts")
+        # Force the in-interpreter launcher so the test is not at the mercy
+        # of whether edge_tts happens to be installed in this environment.
+        monkeypatch.setattr(speech, "_edge_tts_here",
+                            lambda: [sys.executable, "-m", "edge_tts"])
         argv = speech.command(engine, "hello", voice="en-US-AriaNeural")
-        assert argv[:4] == ["edge-tts", "--voice", "en-US-AriaNeural",
-                            "--text"]
-        assert argv[4] == "hello"
+        # Runs through the interpreter itself (no PATH dependence), not a
+        # bare ``edge-tts`` binary.
+        assert argv[:4] == [sys.executable, "-m", "edge_tts", "--voice"]
+        assert argv[4] == "en-US-AriaNeural"
+        assert argv[5:7] == ["--text", "hello"]
         assert argv[-1] == "--write-media"   # path appended by the Speaker
+
+    def test_edge_tts_falls_back_to_a_pathed_binary(self, monkeypatch):
+        """When edge_tts is importable nowhere in this interpreter, a bare
+        ``edge-tts`` on PATH is still honoured."""
+        engine = next(e for e in speech.ENGINES if e.name == "edge-tts")
+        monkeypatch.setattr(speech, "_edge_tts_here", lambda: None)
+        argv = speech.command(engine, "hi")
+        assert argv[0] == "edge-tts"
+        assert "--voice" in argv
+
+    def test_edge_tts_launcher_tracks_importability(self, monkeypatch):
+        """_edge_tts_here reports the interpreter when the package is
+        importable, and nothing otherwise."""
+        monkeypatch.setattr(
+            speech.importlib.util, "find_spec", lambda n: object())
+        assert speech._edge_tts_here() == [sys.executable, "-m", "edge_tts"]
+        monkeypatch.setattr(
+            speech.importlib.util, "find_spec", lambda n: None)
+        assert speech._edge_tts_here() is None
 
     def test_a_player_is_found_for_edge_tts(self, monkeypatch):
         """Synthesised audio must be played back; without any player the
@@ -184,7 +211,6 @@ class TestSpeakerDegrades:
         """The edge-tts path is two steps: synth to a temp file, then play
         it with the quietest available player. The file must be removed
         when she is stopped, or temp files pile up."""
-        import os
 
         engine = next(e for e in speech.ENGINES if e.name == "edge-tts")
         speaker = speech.Speaker(engine, voice="en-US-AriaNeural")
@@ -233,6 +259,78 @@ class TestSpeakerDegrades:
         monkeypatch.setattr(speech, "_player", lambda: None)
         assert speaker.say("hello") is False
         assert speaker.enabled is False
+
+
+class TestVoiceInstallAndList:
+    def test_mommy_voices_are_valid_edge_tts_names(self):
+        import re
+        assert speech.MOMMY_VOICES
+        for name, hint in speech.MOMMY_VOICES:
+            assert re.match(r"^[a-z]{2}-[A-Z]{2}-[A-Za-z]+Neural$", name), name
+            assert hint
+
+    def test_install_edge_tts_runs_pip_into_this_interpreter(self, monkeypatch):
+        state = {"here": None}
+        calls = []
+
+        def fake_here():
+            return None if state["here"] is None \
+                else [sys.executable, "-m", "edge_tts"]
+
+        def fake_pip(argv):
+            calls.append(argv)
+            state["here"] = True
+            return (True, "stub")
+
+        monkeypatch.setattr(speech, "_edge_tts_here", fake_here)
+        monkeypatch.setattr(speech, "_pip", fake_pip)
+        ok, msg = speech.install_edge_tts()
+        assert ok and msg == "installed"
+        assert calls == [["install", "-q", "edge-tts"]]
+
+    def test_install_edge_tts_skips_pip_when_already_present(self, monkeypatch):
+        monkeypatch.setattr(speech, "_edge_tts_here",
+                            lambda: [sys.executable, "-m", "edge_tts"])
+
+        def fail(*a, **k):
+            raise AssertionError("pip must not run when it is already here")
+
+        monkeypatch.setattr(speech, "_pip", fail)
+        ok, msg = speech.install_edge_tts()
+        assert ok and "already" in msg
+
+    def test_install_edge_tts_reports_failure(self, monkeypatch):
+        monkeypatch.setattr(speech, "_edge_tts_here", lambda: None)
+        monkeypatch.setattr(speech, "_pip", lambda argv: (False, "boom"))
+        ok, msg = speech.install_edge_tts()
+        assert not ok and "boom" in msg
+
+    def test_list_edge_voices_filters_to_female(self, monkeypatch):
+        import types
+
+        async def fake_list():
+            return [
+                {"ShortName": "en-US-JennyNeural", "Gender": "Female",
+                 "Locale": "en-US", "FriendlyName": "Jenny"},
+                {"ShortName": "en-US-GuyNeural", "Gender": "Male",
+                 "Locale": "en-US", "FriendlyName": "Guy"},
+            ]
+        edge = types.ModuleType("edge_tts")
+        edge.list_voices = fake_list
+        monkeypatch.setitem(sys.modules, "edge_tts", edge)
+        out = asyncio.run(speech.list_edge_voices())
+        assert out == [("en-US-JennyNeural", "en-US  Jenny")]
+
+    def test_list_edge_voices_is_silent_when_offline(self, monkeypatch):
+        import types
+
+        def boom():
+            raise RuntimeError("no network")
+
+        edge = types.ModuleType("edge_tts")
+        edge.list_voices = boom
+        monkeypatch.setitem(sys.modules, "edge_tts", edge)
+        assert asyncio.run(speech.list_edge_voices()) == []
 
 
 class FakeDuoServer:
@@ -442,14 +540,13 @@ class TestSheStopsWhenWynxoDoes:
     """A speech process is a child that outlives its parent. Quitting
     mid-sentence left the voice talking to an empty terminal."""
 
-    def test_both_exits_silence_her(self):
+    def test_the_exit_silences_her(self):
         import inspect
 
         from wynxo.cli import Repl
 
-        for loop in (Repl._chat_loop, Repl._loop):
-            source = inspect.getsource(loop)
-            assert "self.speaker.stop()" in source, loop.__name__
+        source = inspect.getsource(Repl._loop)
+        assert "self.speaker.stop()" in source
 
     def test_stop_terminates_a_running_process(self):
         import subprocess
@@ -508,76 +605,6 @@ class TestSpeakableStaysFastOnLongAnswers:
 
         start = time.perf_counter()
         speech.speakable("\x1b[31ma" * 27_000, limit=10 ** 9)
-        assert time.perf_counter() - start < self.BUDGET
-
-    def test_links_still_read_as_their_text(self):
-        assert speech.speakable("see [the readme](http://x/y) now") == (
-            "see the readme now")
-
-    def test_a_long_answer_full_of_unclosed_brackets(self):
-        # What the link rule chokes on: an opening bracket everywhere and a
-        # closing one nowhere. A log dump or raw escape sequences look like
-        # this. CPython 3.11 hides most of the cost; 3.10 does not.
-        import time
-
-        start = time.perf_counter()
-        speech.speakable("\x1b[31ma" * 7_000, limit=10 ** 9)
-        assert time.perf_counter() - start < self.BUDGET
-
-    def test_links_still_read_as_their_text(self):
-        assert speech.speakable("see [the readme](http://x/y) now") == (
-            "see the readme now")
-
-    def test_a_long_answer_full_of_unclosed_brackets(self):
-        # What the link rule chokes on: an opening bracket everywhere and a
-        # closing one nowhere. A log dump or raw escape sequences look like
-        # this. CPython 3.11 hides most of the cost; 3.10 does not.
-        import time
-
-        start = time.perf_counter()
-        speech.speakable("\x1b[31ma" * 7_000, limit=10 ** 9)
-        assert time.perf_counter() - start < self.BUDGET
-
-    def test_links_still_read_as_their_text(self):
-        assert speech.speakable("see [the readme](http://x/y) now") == (
-            "see the readme now")
-
-    def test_a_long_answer_full_of_unclosed_brackets(self):
-        # What the link rule chokes on: an opening bracket everywhere and a
-        # closing one nowhere. A log dump or raw escape sequences look like
-        # this. CPython 3.11 hides most of the cost; 3.10 does not.
-        import time
-
-        start = time.perf_counter()
-        speech.speakable("\x1b[31ma" * 7_000, limit=10 ** 9)
-        assert time.perf_counter() - start < self.BUDGET
-
-    def test_links_still_read_as_their_text(self):
-        assert speech.speakable("see [the readme](http://x/y) now") == (
-            "see the readme now")
-
-    def test_a_long_answer_full_of_unclosed_brackets(self):
-        # What the link rule chokes on: an opening bracket everywhere and a
-        # closing one nowhere. A log dump or raw escape sequences look like
-        # this. CPython 3.11 hides most of the cost; 3.10 does not.
-        import time
-
-        start = time.perf_counter()
-        speech.speakable("\x1b[31ma" * 7_000, limit=10 ** 9)
-        assert time.perf_counter() - start < self.BUDGET
-
-    def test_links_still_read_as_their_text(self):
-        assert speech.speakable("see [the readme](http://x/y) now") == (
-            "see the readme now")
-
-    def test_a_long_answer_full_of_unclosed_brackets(self):
-        # What the link rule chokes on: an opening bracket everywhere and a
-        # closing one nowhere. A log dump or raw escape sequences look like
-        # this. CPython 3.11 hides most of the cost; 3.10 does not.
-        import time
-
-        start = time.perf_counter()
-        speech.speakable("\x1b[31ma" * 7_000, limit=10 ** 9)
         assert time.perf_counter() - start < self.BUDGET
 
     def test_links_still_read_as_their_text(self):

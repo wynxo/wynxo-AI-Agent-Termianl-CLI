@@ -9,23 +9,37 @@ you wanted to read was the one that had already gone by.
 from __future__ import annotations
 
 import asyncio
+import io
 import re
 
 import pytest
+from rich.console import Console
 
 from wynxo.cli import TerminalCallbacks
-from wynxo.tui import Transcript
 from wynxo.ui import UI
 
 
-def plain(page: Transcript) -> str:
-    page.drain()
-    return re.sub(r"\x1b\[[0-9;]*m", "", "\n".join(page.lines))
+class _Page:
+    """A rich console writing to a buffer -- what the deleted Transcript
+    provided for these rendering tests, without the fullscreen layout."""
+
+    def __init__(self, width: int = 80):
+        self.buffer = io.StringIO()
+        self.console = Console(file=self.buffer, width=width,
+                               force_terminal=True, highlight=False,
+                               soft_wrap=False, legacy_windows=False)
+
+    def text(self) -> str:
+        return re.sub(r"\x1b\[[0-9;]*m", "", self.buffer.getvalue())
+
+
+def plain(page: _Page) -> str:
+    return page.text()
 
 
 @pytest.fixture
 def session():
-    page = Transcript(width=90)
+    page = _Page(width=90)
     ui = UI(show_thinking=False)          # collapsed, which is the default
     ui.console = page.console
     ui.live_ok = False
@@ -151,4 +165,26 @@ class TestEachTurnStartsFresh:
 
         source = inspect.getsource(Repl.turn)
         assert "_thinking_buffer.clear()" in source
-        assert "_thinking_shown = 0" in source
+        assert "_thinking_unsent.clear()" in source
+
+    def test_incremental_counts_stay_in_step_with_the_buffer(self, session):
+        """The O(1) counters must never drift from the concatenated buffer:
+        they are what make the live panel O(1) per token instead of a full
+        re-join of the scratchpad on every chunk."""
+        _page, _ui, callbacks = session
+        think(callbacks, "one two three ", "four five six ", "seven eight ")
+        assert callbacks._thinking_total == len("".join(callbacks._thinking_buffer))
+        assert callbacks._thinking_words == sum(
+            chunk.count(" ") for chunk in callbacks._thinking_buffer)
+
+    def test_collapsed_chunks_are_held_for_the_open(self, session):
+        """Only the collapsed chunks wait in the unsent queue: once fed to a
+        thinker they are shown and must never replay."""
+        _page, _ui, callbacks = session
+        think(callbacks, "hidden part. ")
+        assert "hidden part. " in "".join(callbacks._thinking_unsent)
+        callbacks.toggle_thinking()          # open: drains the queue
+        assert callbacks._thinking_unsent == []
+        think(callbacks, "live part. ")
+        assert callbacks._thinking_unsent == []
+        assert "live part." not in "".join(callbacks._thinking_unsent)

@@ -134,6 +134,64 @@ def _decode_partial(text: str) -> str:
     return "".join(out)
 
 
+def _first_unescaped_quote(text: str) -> int:
+    """The index of the first unescaped ``\"`` in ``text``, or -1.
+
+    Walks escapes exactly the way _decode_partial does, so the two agree
+    about where a JSON string value ends even when it contains ``\\\"``.
+    """
+    escaped = False
+    for i, ch in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            return i
+    return -1
+
+
+def _decode_partial_adv(text: str) -> tuple[str, int]:
+    """Like _decode_partial, but also reports how many source characters were
+    consumed, so an incremental caller can slice the next tail at the exact
+    source position.
+
+    The consumed count matters because escapes shrink the source: ``\\n``
+    is two source characters but one decoded one, so ``len(decoded)`` can
+    never stand in for the source position. Stops without consuming at an
+    unescaped quote or an escape that has not finished arriving.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == '"':
+            break
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        # An escape that has not finished arriving yet: stop, and pick it up
+        # on the next chunk rather than printing a stray backslash.
+        if i + 1 >= len(text):
+            break
+        nxt = text[i + 1]
+        if nxt == "u":
+            if i + 6 > len(text):
+                break
+            try:
+                out.append(chr(int(text[i + 2:i + 6], 16)))
+            except ValueError:
+                out.append(text[i:i + 6])
+            i += 6
+            continue
+        out.append(_ESCAPES.get(nxt, nxt))
+        i += 2
+    return "".join(out), i
+
+
 class LiveContentFilter:
     """Strips <think>/<thinking>/<reasoning>/<tool_call> blocks out of a
     live token stream, without ever showing a partial tag.
@@ -158,6 +216,20 @@ class LiveContentFilter:
         and the answer must still be shown."""
         self._shown = ""
         """How much of the streaming tool call's code has been reported."""
+        self._code_key: str | None = None
+        self._code_tried: set[str] = set()
+        self._code_value_start: int | None = None
+        """Index in ``buffer`` just past the opening quote of the code value."""
+        self._code_value_end: int | None = None
+        """Index in ``buffer`` just past the last source character consumed.
+
+        Tracked separately from the decoded value because escapes shrink the
+        source (``\\n`` decodes to one character from two), so the next tail
+        must be sliced by source position, never by ``len(decoded)``."""
+        self._code_value = ""
+        """The code value decoded so far, built incrementally."""
+        self._code_done = False
+        """The value's closing quote has been seen; there is no more code."""
         self.saw_dangling_close = False
         """Set when a closing tag arrives with nothing having opened it.
 
@@ -173,10 +245,35 @@ class LiveContentFilter:
         contents. Everything else in the call -- the name, the path, the
         closing braces -- is protocol, and watching it arrive tells you
         nothing you want to know.
+
+        Incremental: the value is decoded a tail at a time, so the cost is
+        O(chunk) per chunk. Decoding the whole accumulated value on every
+        chunk was O(n) per chunk -- a 400KB file being written burned ~28s
+        of the event loop's time on top of the generation, which is exactly
+        the moment a stalled screen makes the user think the model died.
         """
         if self.open_tag != "tool_call":
+            # A finished call (or no call at all): the next call starts clean.
+            self._code_key = None
+            self._code_tried = set()
+            self._code_value_start = None
+            self._code_value_end = None
+            self._code_value = ""
+            self._code_done = False
             return ""
-        whole = partial_string_value(self.buffer)
+        if not self._code_done:
+            self._locate_code_value()
+            if self._code_value_start is not None:
+                tail = self.buffer[self._code_value_end:]
+                end = _first_unescaped_quote(tail)
+                if end == -1:
+                    decoded, consumed = _decode_partial_adv(tail)
+                else:
+                    decoded, consumed = _decode_partial_adv(tail[:end])
+                    self._code_done = True
+                self._code_value += decoded
+                self._code_value_end += consumed
+        whole = self._code_value
         if not whole.startswith(self._shown):
             # The model restarted the value, or a different argument came
             # first. Start again rather than showing a spliced mixture.
@@ -184,6 +281,69 @@ class LiveContentFilter:
         delta = whole[len(self._shown):]
         self._shown = whole
         return delta
+
+    def _locate_code_value(self) -> None:
+        """Commit to the CODE_KEY whose value is (or will be) the file's
+        contents, once and for all.
+
+        Mirrors partial_string_value's key-order scan, but runs only until a
+        decision is made: keys whose first occurrence already has a non-string
+        value are dead ends forever (partial_string_value skips them for
+        good), and the first key that either shows a quote or is still
+        waiting for its value is the winner -- later chunks only ever grow
+        its value, they never reorder the object.
+        """
+        if self._code_value_start is not None:
+            return
+        if self._code_key is None:
+            # First scan: pick the winning key using partial_string_value's
+            # rules -- later chunks only ever grow the value, they never
+            # reorder the object.
+            for key in CODE_KEYS:
+                if key in self._code_tried:
+                    continue
+                marker = f'"{key}"'
+                at = self.buffer.find(marker)
+                if at == -1:
+                    continue        # not present yet; re-check on the next call
+                rest = self.buffer[at + len(marker):]
+                colon = rest.find(":")
+                if colon == -1:
+                    continue        # the value has not started; re-check later
+                before = rest[colon + 1:]
+                tail = before.lstrip()
+                if tail.startswith('"'):
+                    self._code_key = key
+                    break
+                if tail:
+                    # A present, non-string value ("content": 42): this key
+                    # can never be the code, as in partial_string_value.
+                    self._code_tried.add(key)
+                    continue
+                # The value has not started: this key is the winner once it
+                # does; the second phase below waits for its opening quote.
+                self._code_key = key
+                break
+            if self._code_key is None:
+                return
+        # Second phase: the winner is picked but its value may not have
+        # opened yet. Re-find its marker (the buffer only grows while the
+        # call streams) and commit to the position just past the quote.
+        marker = f'"{self._code_key}"'
+        at = self.buffer.find(marker)
+        if at == -1:
+            return
+        rest = self.buffer[at + len(marker):]
+        colon = rest.find(":")
+        if colon == -1:
+            return
+        before = rest[colon + 1:]
+        tail = before.lstrip()
+        if not tail.startswith('"'):
+            return
+        self._code_value_start = (at + len(marker) + colon + 1
+                                  + len(before) - len(tail) + 1)
+        self._code_value_end = self._code_value_start
 
     def feed(self, text: str) -> str:
         """Consume one chunk of raw content; return what is safe to show."""

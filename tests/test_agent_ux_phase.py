@@ -57,7 +57,7 @@ def make_agent(tmp_path, replies, recorder=None, **kwargs):
 def test_agent_recovers_from_failed_edit_then_tests_then_finishes(tmp_path: Path):
     (tmp_path / "bug.py").write_text("def answer():\n    return 1\n")
     replies = [
-        {"tool_calls": call("search_text", pattern="return", path=".")},
+        {"tool_calls": call("grep", pattern="return", path=".")},
         {"tool_calls": call("edit_file", path="bug.py", old_text="return 99", new_text="return 2")},
         {"tool_calls": call("read_file", path="bug.py")},
         {"tool_calls": call("edit_file", path="bug.py", old_text="return 1", new_text="return 2")},
@@ -70,7 +70,7 @@ def test_agent_recovers_from_failed_edit_then_tests_then_finishes(tmp_path: Path
     assert "Fixed the bug" in result.content
     assert backend.calls == 5
     assert [event[1] for event in recorder.events if event[0] == "start"] == [
-        "search_text", "edit_file", "read_file", "edit_file"
+        "grep", "edit_file", "read_file", "edit_file"
     ]
 
 

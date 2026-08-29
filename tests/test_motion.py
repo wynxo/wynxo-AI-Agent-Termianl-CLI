@@ -1,16 +1,11 @@
-"""The ASCII animation engine: scene selection, frame progression, the one
-scheduler, fallbacks, and reduced-motion mode.
+"""The ASCII animation engine: scene selection and preview.
 
-Everything here is deterministic -- no timers, no event loop -- because
-``MotionScheduler.step()`` advances frames synchronously, which is how the
-engine is exercised in tests and how its correctness is pinned down.
+Everything here is deterministic -- no timers, no event loop -- because the
+scenes are pure frame data selected by width, unicode support and
+reduced-motion mode, which is what /animate and /pet exercise.
 """
 
 from __future__ import annotations
-
-import asyncio
-
-import pytest
 
 from wynxo import motion
 
@@ -63,17 +58,12 @@ class TestSceneSelection:
                 continue
             row_counts = {len(frame.split("\n")) for frame in scene.frames}
             assert len(row_counts) == 1, f"{scene.name} frames differ in height"
-            # Row 0 may legitimately differ (a pet perched on top of the
-            # box versus inside it); the rows below it are the geometry that
-            # must not drift. The first frame's rows anchor the width and
-            # later frames must never exceed them -- a box that shifts one
-            # column over between frames is a rendering bug.
             first = [wcswidth(line) for line in scene.frames[0].split("\n")]
             for frame in scene.frames[1:]:
                 widths = [wcswidth(line) for line in frame.split("\n")]
                 for want, got in zip(first[1:], widths[1:]):
-                    assert got <= want, \
-                        f"{scene.name} frame row wider than the first: {got} > {want}"
+                    assert got <= want, (
+                        f"{scene.name} frame row wider than the first: {got} > {want}")
 
 
 class TestPreview:
@@ -81,7 +71,6 @@ class TestPreview:
         assert motion.preview("thinking") == motion.preview("thinking")
 
     def test_preview_of_a_looping_scene_cycles(self):
-        scene = motion.scene_for("thinking")
         strip = motion.preview("thinking", n=5)
         # Five frames of a three-frame loop: the cycle wraps.
         assert strip.count("≽") >= 5
@@ -92,98 +81,4 @@ class TestPreview:
 
     def test_preview_respects_reduced_motion(self):
         scene = motion.scene_for("thinking")
-        assert motion.select(scene, reduced=True) == (scene.frames[0],)
-
-
-class TestSchedulerStepping:
-    def test_frames_advance_and_loop(self):
-        scheduler = motion.MotionScheduler(reduced=False)
-        seen = []
-        scheduler.register("wave", motion.scene_for("listening"),
-                           lambda frame: seen.append(frame))
-        for _ in range(len(motion.SCENES["listening"].frames) + 2):
-            scheduler.step("wave")
-        frames = motion.SCENES["listening"].frames
-        # Stepped once past the end: the cycle wrapped back to frame 0.
-        assert seen[0] == frames[0]
-        assert seen[len(frames)] == frames[0]
-        scheduler.close()
-
-    def test_unregister_stops_callbacks(self):
-        scheduler = motion.MotionScheduler(reduced=False)
-        seen = []
-        scheduler.register("wave", motion.scene_for("listening"),
-                           lambda frame: seen.append(frame))
-        scheduler.unregister("wave")
-        scheduler.step()
-        assert seen == []
-        scheduler.close()
-
-    def test_one_shot_unregisters_after_its_last_frame(self):
-        scheduler = motion.MotionScheduler(reduced=False)
-        frames = []
-        scheduler.register("sparkle", motion.scene_for("sparkle"),
-                           lambda frame: frames.append(frame))
-        while scheduler.active:
-            scheduler.step()
-        assert len(frames) == len(motion.SCENES["sparkle"].frames)
-        assert scheduler.active == []
-        scheduler.close()
-
-    def test_stop_all_clears_everything(self):
-        scheduler = motion.MotionScheduler(reduced=False)
-        scheduler.register("a", motion.scene_for("idle"), lambda f: None)
-        scheduler.register("b", motion.scene_for("thinking"), lambda f: None)
-        scheduler.stop_all()
-        assert scheduler.active == []
-        scheduler.close()
-
-    def test_reduced_mode_delivers_one_static_frame_and_never_loops(self):
-        scheduler = motion.MotionScheduler(reduced=True)
-        seen = []
-        scheduler.register("wave", motion.scene_for("listening"),
-                           lambda frame: seen.append(frame))
-        scheduler.step()
-        scheduler.step()
-        assert seen == [motion.SCENES["listening"].frames[0]]
-        assert scheduler.active == []
-        scheduler.close()
-
-    def test_close_is_idempotent(self):
-        scheduler = motion.MotionScheduler(reduced=False)
-        scheduler.register("a", motion.scene_for("idle"), lambda f: None)
-        scheduler.close()
-        scheduler.close()      # must not raise
-        assert scheduler.active == []
-
-    def test_a_bad_callback_does_not_kill_the_scheduler(self):
-        scheduler = motion.MotionScheduler(reduced=False)
-
-        def boom(_frame):
-            raise RuntimeError("boom")
-
-        scheduler.register("bad", motion.scene_for("thinking"), boom)
-        scheduler.step()       # must not raise
-        assert "bad" in scheduler.active
-        scheduler.close()
-
-
-class TestSchedulerAsyncLifecycle:
-    async def test_the_loop_fires_callbacks_over_time(self):
-        scheduler = motion.MotionScheduler(reduced=False)
-        seen = []
-        scheduler.register("wave", motion.scene_for("listening"),
-                           lambda frame: seen.append(frame), fps=50.0)
-        await asyncio.sleep(0.08)
-        assert len(seen) >= 2
-        await scheduler.aclose()
-        assert scheduler.active == []
-
-    async def test_aclose_cancels_the_task_cleanly(self):
-        scheduler = motion.MotionScheduler(reduced=False)
-        scheduler.register("a", motion.scene_for("idle"), lambda f: None)
-        task = scheduler._task
-        assert task is not None
-        await scheduler.aclose()
-        assert task.done()
-        assert scheduler.active == []
+        assert motion.select(scene, reduced=True) == (scene.frames[0],)

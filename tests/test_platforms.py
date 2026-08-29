@@ -213,3 +213,59 @@ class TestWorkspaceSanity:
             directory.mkdir()
             (directory / marker).write_text("")
             assert platforms.looks_like_a_project(directory), marker
+
+
+class TestClipboard:
+    def test_empty_text_is_refused_without_running_anything(self, monkeypatch):
+        ran = []
+        monkeypatch.setattr("subprocess.run", lambda *a, **k: ran.append(a))
+        assert platforms.copy_to_clipboard("") is False
+        assert ran == []
+
+    def test_nonempty_text_pipes_utf8_bytes_to_the_tool(self, monkeypatch):
+        """Windows: PowerShell first (unicode-safe), `clip` as the fallback."""
+        calls = []
+
+        class Proc:
+            def __init__(self, code):
+                self.returncode = code
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            return Proc(0 if len(calls) > 1 else 1)
+
+        monkeypatch.setattr(platforms, "is_windows", lambda: True)
+        monkeypatch.setattr("subprocess.run", fake_run)
+        assert platforms.copy_to_clipboard("hello") is True
+        # First attempt (powershell) failed, second (`clip`) succeeded.
+        assert len(calls) == 2
+        assert calls[0][0][0] == "powershell"
+        assert calls[0][1]["env"]["WYNXO_COPY"] == "hello"
+        assert calls[1][0] == ["clip"]
+        assert calls[1][1]["input"] == b"hello"
+
+    def test_linux_chooses_a_tool_that_exists(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(platforms, "is_windows", lambda: False)
+        monkeypatch.setattr(platforms, "is_termux", lambda: False)
+        monkeypatch.setattr(platforms, "is_macos", lambda: False)
+        monkeypatch.setattr(platforms.shutil, "which",
+                            lambda tool: tool if tool == "xclip" else None)
+
+        class Proc:
+            returncode = 0
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            return Proc()
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+        assert platforms.copy_to_clipboard("hi") is True
+        assert calls == [["xclip", "-selection", "clipboard"]]
+
+    def test_no_tool_anywhere_reports_failure(self, monkeypatch):
+        monkeypatch.setattr(platforms, "is_windows", lambda: False)
+        monkeypatch.setattr(platforms, "is_termux", lambda: False)
+        monkeypatch.setattr(platforms, "is_macos", lambda: False)
+        monkeypatch.setattr(platforms.shutil, "which", lambda tool: None)
+        assert platforms.copy_to_clipboard("hi") is False

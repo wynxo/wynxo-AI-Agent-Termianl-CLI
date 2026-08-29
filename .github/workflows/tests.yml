@@ -80,6 +80,53 @@ jobs:
         # which is where a platform difference tends to surface first.
         run: wynxo --version
 
+  lint:
+    # Zero static checking meant the dead imports and undefined names were
+    # only ever found by reading -- and the `__all__` entry that referenced
+    # a deleted import shipped because nothing looked. This runs the F set
+    # (pyflakes) on every push, which is exactly that class of bug.
+    name: lint (ruff F)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: python -m pip install ruff
+      - name: Lint
+        run: ruff check wynxo tests
+
+  coverage:
+    # The test suite is green but the modules with no tests at all -- the
+    # first-run wizard, the dictation backend, the edit-analysis helpers --
+    # stay invisible unless someone looks. This job keeps the gap printed
+    # on every run; it does not gate, because mid-refactor a green-but-
+    # lower number is still an honest answer.
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Measure coverage
+        run: >
+          python -m pytest -q --cov=wynxo
+          --cov-report=term-missing:skip-covered
+          --cov-report=xml:coverage.xml
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+
   no-compiled-dependencies:
     # wynxo has to install on Termux, where anything needing a Rust or C
     # toolchain has no wheel and will not build. This is the check that

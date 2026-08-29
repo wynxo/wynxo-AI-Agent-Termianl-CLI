@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import pytest
 
 from wynxo.tools.appcatalog import ApplicationCatalog, Sources
 from wynxo.tools import apps as apps_module
