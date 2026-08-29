@@ -1,6 +1,6 @@
 # Project map
 
-152 source files.
+154 source files.
 
 .github/check_pure_python.py
 desktop/text.py
@@ -48,6 +48,7 @@ tests/test_motion.py
 tests/test_openai_client.py
 tests/test_parallel_tools.py
 tests/test_parsing.py
+tests/test_personality.py
 tests/test_pet.py
 tests/test_platforms.py
 tests/test_polished_workflow.py
@@ -84,6 +85,7 @@ tests/test_terminal_handoff.py
 tests/test_testing.py
 tests/test_theme_log_select.py
 tests/test_thinking_panel.py
+tests/test_thinking_privacy.py
 tests/test_tools.py
 tests/test_uninstall.py
 tests/test_user_workflow_completion.py
