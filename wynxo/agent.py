@@ -25,7 +25,8 @@ from ._agent_hardening import _stream_test_output
 from .config import Config
 from .effort import EffortPolicy, override
 from .memory import Memory
-from .parsing import LiveContentFilter, ParsedTurn, parse_turn
+from .parsing import (LiveContentFilter, ParsedTurn, parse_turn,
+                      partial_string_value)
 from .permissions import Decision, PermissionStore, summarise_call
 from .prompts import (
     TESTS_FAILED_PROMPT,
@@ -488,6 +489,13 @@ class Agent:
         # chunks still go to content_parts below, for parse_turn() to act on.
         live_filter = LiveContentFilter(
             start_in_thinking=self._template_prefills_think)
+        # A native tool call's arguments arrive as JSON fragments on
+        # providers that stream them. Accumulated here so the file's contents
+        # can be read out of the half-written object and shown as they are
+        # generated -- the same trick LiveContentFilter uses for the
+        # text-mode form of a tool call, applied to the native one.
+        argument_buffer = ""
+        argument_shown = 0
         stream = self.backend.chat(
             messages if messages is not None else self.session.wire(),
             model=self.config.model,
@@ -514,6 +522,12 @@ class Agent:
                     # model is long enough to wonder whether it is working.
                     if code := live_filter.code_delta():
                         await self.cb.on_code(code)
+            if chunk.arguments_delta and stream_content:
+                argument_buffer += chunk.arguments_delta
+                whole = partial_string_value(argument_buffer)
+                if len(whole) > argument_shown:
+                    await self.cb.on_code(whole[argument_shown:])
+                    argument_shown = len(whole)
             if chunk.tool_calls:
                 native_calls.extend(chunk.tool_calls)
             if chunk.done:

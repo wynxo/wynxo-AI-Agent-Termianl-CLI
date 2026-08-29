@@ -239,3 +239,60 @@ def preview(name: str, n: int = 3, *, unicode: bool = True,
         out.append("   ".join((r[row] if row < len(r) else "").rstrip()
                               for r in rows).rstrip())
     return "\n".join(out).rstrip()
+
+
+# -- what the companion is doing, decided by what the agent is doing --------
+#
+# One mapping, from the task state machine that already exists to the scenes
+# that already exist. Deliberately not a second state machine: an animation
+# that keeps its own idea of what is happening is an animation that will
+# eventually be wrong, and a cat typing while the agent is idle is worse
+# than no cat at all.
+#
+# EDITING has no state of its own in TaskStateMachine -- the agent is in
+# EXECUTING while a tool runs -- so the caller passes the running tool's name
+# and an edit is told apart from a search by the tool actually in flight.
+
+STATE_SCENES: dict[str, str] = {
+    "idle": "idle",
+    "thinking": "thinking",
+    "planning": "thinking",
+    "executing": "working",
+    "testing": "testing",
+    "recovering": "error",
+    "completed": "happy",
+    "failed": "error",
+    "cancelled": "idle",
+}
+
+TOOL_SCENES: dict[str, str] = {
+    "write_file": "coding",
+    "edit_file": "coding",
+    "multi_edit": "coding",
+    "read_file": "reading",
+    "list_dir": "reading",
+    "grep": "searching",
+    "glob": "searching",
+    "navigate_symbols": "searching",
+    "web_search": "searching",
+    "run_tests": "testing",
+    "shell": "running",
+    "git": "running",
+}
+
+
+def scene_for_state(state: str, tool: str = "") -> Scene:
+    """The scene for what the agent is really doing.
+
+    The running tool wins over the task state, because "executing" is true
+    of reading a file and of writing one, and those should not look the
+    same. Anything unrecognised falls back to the state, and an unrecognised
+    state falls back to idle -- a companion that does something plausible on
+    an unknown event is better than one that raises inside a repaint.
+    """
+    if tool:
+        name = TOOL_SCENES.get(tool.strip().lower())
+        if name:
+            return SCENES[name]
+    return SCENES.get(STATE_SCENES.get(str(state).strip().lower(), "idle"),
+                      SCENES["idle"])

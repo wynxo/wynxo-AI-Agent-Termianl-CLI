@@ -65,6 +65,21 @@ class Chunk:
     content: str = ""
     thinking: str = ""
     tool_calls: list[dict] = field(default_factory=list)
+    arguments_delta: str = ""
+    """A fragment of a tool call's arguments, as it is generated.
+
+    This is what makes an edit visible while it is being written rather than
+    when it is finished. Providers that stream tool calls delta-by-delta
+    (the OpenAI-compatible wire format) send the arguments JSON in pieces,
+    and those pieces were being accumulated into a list and yielded only
+    once the stream ended -- so the real incremental data existed and was
+    thrown away, and a 200-line edit appeared all at once after the wait.
+
+    Ollama's native tool_calls arrive with their arguments complete in one
+    message, so nothing is emitted here for them. There is no partial data
+    to show, and inventing some by revealing a finished string slowly would
+    be an animation pretending to be a stream.
+    """
     done: bool = False
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -607,6 +622,9 @@ class OpenAIClient:
                             acc["name"] = fn["name"]
                         if fn.get("arguments"):
                             acc["arguments"].append(fn["arguments"])
+                            # Emitted as it arrives, as well as accumulated
+                            # for the finished call below.
+                            yield Chunk(arguments_delta=fn["arguments"])
                 # Flush whatever accumulated before [DONE] / stream end.
                 # A plain turn never touches ``calls``, so emitting it
             # unfiltered is safe either way -- only genuine delta tool_calls

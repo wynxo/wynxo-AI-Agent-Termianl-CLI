@@ -32,6 +32,7 @@ from .events import ToolEvent
 from .task_state import TaskState
 from .discovery import Discovery
 from .config import Config, Endpoint, data_dir, is_configured, load, normalise_url
+from . import motion
 from .corner import CornerPlan
 from .layout import ChatLayout
 from .doctor import run_doctor
@@ -325,6 +326,10 @@ class TerminalCallbacks(Callbacks):
         """The full-screen layout, when one is running. Set by Repl."""
         self.plan_lines: list[str] = []
         """The plan, rendered, for the layout's overlay Float."""
+        self.active_tool = ""
+        """The tool running right now, or "". The companion's scene is chosen
+        from this and the task state together: "executing" is equally true of
+        reading a file and of writing one, and those must not look alike."""
         self.streamer: CodeStreamer | None = None
         self.verbose_tools = False
         """Ctrl-T: show full tool output instead of a one-line summary."""
@@ -544,6 +549,7 @@ class TerminalCallbacks(Callbacks):
             await self._on_tool_start_locked(name, summary, event)
 
     async def _on_tool_start_locked(self, name: str, summary: str, event: ToolEvent | None = None) -> None:
+        self.active_tool = name
         self._end_code()
         if self.journal is not None:
             self.journal.tool(name, {"summary": summary})
@@ -564,6 +570,7 @@ class TerminalCallbacks(Callbacks):
             await self._on_tool_result_locked(name, ok, display, output, event)
 
     async def _on_tool_result_locked(self, name: str, ok: bool, display: str, output: str, event: ToolEvent | None = None) -> None:
+        self.active_tool = ""
         # Normally on_tool_start has already closed whatever was streaming.
         # Not always: an unknown tool, one blocked by the mode, or one the
         # user declined never starts, and the result went out while the
@@ -869,6 +876,8 @@ class Repl:
         # even start. Only the classic path ever reaches for it.
         self.prompt_session: PromptSession | None = _LazyPromptSession(
             self._make_prompt_session)
+        self._pet_frame = 0
+        """Repaint counter for the companion's frame. Not a timer."""
         self.chat: ChatLayout | None = None
         """The full-screen layout, when this terminal can run one. It owns
         the composer's geometry; the classic prompt above is the fallback
@@ -1168,9 +1177,32 @@ class Repl:
         return " " + self._status_line()
 
     def _chat_overlay(self) -> list[str]:
-        """The plan panel, as an overlay. It is a Float, so however tall it
-        gets it cannot move the composer or the footer."""
-        return self.callbacks.plan_lines
+        """The plan panel and the companion, as one overlay.
+
+        A Float, so however tall it gets it cannot move the composer or the
+        footer. The companion's frame comes from the agent's real state and
+        the tool actually in flight -- it is not on a timer, and it cannot
+        show typing while nothing is being written.
+        """
+        lines = list(self.callbacks.plan_lines)
+        if not self.pet.enabled:
+            return lines
+        scene = motion.scene_for_state(
+            self.agent.task_state.state.value, self.callbacks.active_tool)
+        frames = motion.select(scene, unicode=self.ui.g.unicode,
+                               width=self.ui.width,
+                               reduced=not self.config.animations)
+        # The frame advances per repaint, not on a clock of its own. A
+        # scheduler here would keep animating through a stall; riding the
+        # repaint means the companion moves exactly while the agent does.
+        self._pet_frame += 1
+        frame = frames[(self._pet_frame // 3) % len(frames)]
+        if lines:
+            lines.append("")
+        lines.extend(f"  {row}" for row in frame.splitlines())
+        if scene.label:
+            lines.append(f"  {scene.label}")
+        return lines
 
     async def _loop(self) -> int:
         try:
