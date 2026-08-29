@@ -18,6 +18,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.formatted_text import ANSI, HTML
+from prompt_toolkit.formatted_text.html import html_escape as escape
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -31,6 +32,7 @@ from .events import ToolEvent
 from .task_state import TaskState
 from .discovery import Discovery
 from .config import Config, Endpoint, data_dir, is_configured, load, normalise_url
+from .corner import CornerPlan
 from .doctor import run_doctor
 from .effort import ORDER, resolve
 from .permissions import Decision
@@ -325,15 +327,21 @@ class TerminalCallbacks(Callbacks):
         self._coder: CodeStreamer | None = None
         """The file currently being written, while a tool call streams."""
         self._thinking_buffer: list[str] = []
-        """Every thought of the current turn, shown or not. Opening the panel
-        mid-turn shows the whole scratchpad from the start of the turn, so the
-        full record is kept even while collapsed."""
+        """Every thought of the whole session, shown or not.
+
+        Capturing never stops. Hiding is a display state, not a decision to
+        throw the reasoning away, so the record survives both the toggle and
+        the turn boundary -- ``/thinking all`` and a mid-session Ctrl-O can
+        both go back over everything the model has thought."""
         self._thinking_unsent: list[str] = []
         """Chunks that arrived while the panel was collapsed and have not
         been fed to a thinker yet. This is the un-shown suffix: opening the
         panel drains it, so a reopen never replays what already printed, and
         no full-buffer re-join is needed to find the boundary -- collapsed
         thinking stays O(1) per chunk instead of O(n) per chunk."""
+        self._thinking_turns: list[str] = []
+        """Completed turns' thinking, oldest first, so a replay can show them
+        with a divider rather than as one undifferentiated wall."""
         self._thinking_total = 0
         """len of the concatenated buffer, kept incrementally so a live panel
         never re-joins the whole scratchpad per token."""
@@ -365,26 +373,54 @@ class TerminalCallbacks(Callbacks):
             # takes effect now rather than after the current block finishes.
             self._end_thinking()
 
-    def _open_thinking(self) -> None:
-        """Show the reasoning so far, then let the rest stream in.
+    THINKING_TURNS_KEPT = 12
+    """How many finished turns of reasoning stay replayable. Enough to look
+    back over a session; bounded so a long one cannot grow without limit."""
 
-        Opening part-way through has to show the whole thought, not the tail
-        of it. What has already arrived is printed in one go and the live
-        stream picks up from there, so the panel reads the same whether it
-        was opened at the start of the turn or in the middle of it.
+    def _open_thinking(self, whole_session: bool = False) -> None:
+        """Show the reasoning, then let the rest stream in.
 
-        Only the chunks that arrived while collapsed are replayed -- the ones
-        already fed to a thinker were printed live and are not in
-        ``_thinking_unsent`` -- so a reopen costs just the collapsed backlog
-        rather than a re-join of the whole scratchpad.
+        Showing means showing all of it. Opening part-way through prints
+        everything that has arrived and the live stream picks up from there,
+        so the panel reads the same whether it was opened at the start of the
+        turn or in the middle of it.
+
+        ``whole_session`` also replays the turns already finished, under a
+        divider each. That is the answer to "show me everything it has
+        thought": hiding never discarded any of it, so there is always a full
+        record to go back to.
+
+        The common case -- a mid-turn Ctrl-O -- still costs only the
+        collapsed backlog, because the chunks already fed to a thinker were
+        printed live and are not in ``_thinking_unsent``.
         """
+        if self._streaming:
+            self._end_stream()
+        history = self._thinking_turns if whole_session else []
         # Only the leading space is trimmed. Stripping the tail would glue
         # the backlog to whichever word streams in next.
         backlog = "".join(self._thinking_unsent).lstrip()
+        if not backlog and not history:
+            return
+
+        if history:
+            self.ui.console.print()
+            self.ui.console.print(
+                Text(f"  everything thought this session "
+                     f"({len(history)} earlier turn"
+                     f"{'s' if len(history) != 1 else ''})",
+                     style=f"bold {MUTED}"))
+            for index, thought in enumerate(history, start=1):
+                if not thought.strip():
+                    continue
+                self.ui.console.print(
+                    Text(f"  turn {index}", style=FAINT))
+                past = ThoughtStreamer(self.ui)
+                past.feed(thought.lstrip())
+                past.finish()
+
         if not backlog:
             return
-        if self._streaming:
-            self._end_stream()
         self.ui.console.print()
         self.ui.console.print(Text("  thinking", style=f"bold {MUTED}"))
         if self._thinker is None:
@@ -395,9 +431,10 @@ class TerminalCallbacks(Callbacks):
     def _thinking_note(self) -> str:
         """The collapsed form: how much thinking there is, and how to read it.
 
-        Collapsed does not mean invisible. Something has to say the model is
-        reasoning and that there is something to open, or the panel is a
-        feature nobody discovers.
+        Collapsed does not mean invisible, and it does not mean lost. The
+        count keeps rising while hidden because the reasoning is still being
+        captured -- hiding only stops it being drawn -- so the note doubles
+        as the promise that Ctrl-O will still have something to show.
         """
         words = self._thinking_words
         if words < 3:
@@ -609,6 +646,13 @@ class TerminalCallbacks(Callbacks):
 
         self.bar.set_plan(rendered)
         if self.bar.plan_is_complete():
+            # Every step ticked is the one moment in a turn worth a face of
+            # its own: HAPPY is the reaction to a single good step, this is
+            # the end of the work. The pet hangs off the bar rather than off
+            # the callbacks, which never owned one.
+            pet = self.bar.pet
+            if pet is not None and pet.enabled:
+                pet.react(Mood.CELEBRATING)
             await self.bar.finish_plan()
 
     async def on_warning(self, message: str) -> None:
@@ -845,16 +889,24 @@ class Repl:
             complete_while_typing=True,
             key_bindings=self._prompt_bindings,
             multiline=False,
-            # The default reserves eight rows for a completion dropdown,
-            # which shows up as a slab of empty screen under every prompt.
-            # Readline-style completion prints inline and needs none.
-            # Enough rows for the menu to open downward without the prompt
-            # jumping, but not so many that an empty slab sits under the
-            # input the rest of the time -- and never more than the window
-            # has, or prompt_toolkit replaces the whole screen with "Window
-            # too small...", which is what a four-row pane got.
-            reserve_space_for_menu=_menu_rows(),
-            complete_style=CompleteStyle.COLUMN,
+            # Nothing is reserved for a completion dropdown, because a
+            # dropdown needs rows *below* the input and the composer is
+            # seated on the bottom rows of the screen. Reserving them put an
+            # empty slab between the caret and the closing border -- the box
+            # was three rows of frame around six rows of nothing, and it was
+            # there on every prompt whether or not a completion was open.
+            #
+            # Readline-style completion needs none of it: the candidates are
+            # printed above the composer like any other output, and scroll
+            # away with the transcript.
+            reserve_space_for_menu=0,
+            complete_style=CompleteStyle.READLINE_LIKE,
+            # The composer takes its rows back when it closes. Without this
+            # every accepted turn left its whole frame behind, so the
+            # scrollback filled with stranded top borders and half-boxes --
+            # the transcript wants one line saying what was asked, which
+            # _echo_prompt prints instead.
+            erase_when_done=True,
         )
         silence_cpr_warning(session.app)
         return session
@@ -1010,8 +1062,6 @@ class Repl:
     async def _loop(self) -> int:
         while True:
             try:
-                self._pad_to_bottom()
-                self._open_box()
                 # The draft is dictation text waiting to be submitted. An
                 # empty draft must stay an empty string -- `or None` would
                 # pass None as prompt_toolkit's default, and Document(None)
@@ -1026,12 +1076,14 @@ class Repl:
             except EOFError:
                 break
 
-            # The next box pins itself using how much this turn printed;
-            # start that count fresh here, after the prompt closed.
             self.ui.reset_prompt_lines()
             text = text.strip()
             if not text:
                 continue
+            # The composer erases itself on accept (erase_when_done), so the
+            # transcript gets one compact line saying what was asked instead
+            # of a stranded box. See _echo_prompt.
+            self._echo_prompt(text)
 
             if text.startswith("/"):
                 if await self._guarded(self.command(text)) is False:
@@ -1100,10 +1152,18 @@ class Repl:
     async def turn(self, text: str) -> None:
         """Run one request, with a live status bar and mid-flight keybinds."""
         async with self.callbacks._turn_lock:
-            self.callbacks._thinking_buffer.clear()
-            self.callbacks._thinking_unsent.clear()
-            self.callbacks._thinking_total = 0
-            self.callbacks._thinking_words = 0
+            cb = self.callbacks
+            # The previous turn's reasoning is retired into the history
+            # rather than dropped: showing thinking is meant to show all of
+            # it, and a turn boundary is a divider in that record, not the
+            # end of it. Only the live buffers reset.
+            if cb._thinking_buffer:
+                cb._thinking_turns.append("".join(cb._thinking_buffer))
+                del cb._thinking_turns[:-cb.THINKING_TURNS_KEPT]
+            cb._thinking_buffer.clear()
+            cb._thinking_unsent.clear()
+            cb._thinking_total = 0
+            cb._thinking_words = 0
             await self._turn_locked(text)
 
     async def _turn_locked(self, text: str) -> None:
@@ -1115,6 +1175,11 @@ class Repl:
 
         bar = ActivityBar(self.ui, self.policy.name, describe_bindings(LIVE_KEYS),
                           model=self.config.model, pet=self.pet)
+        # The plan gets the top-right corner when the terminal can hold rows
+        # out of the scroll; otherwise it falls back to riding in the bottom
+        # strip, which is where it used to live all the time.
+        corner = CornerPlan(self.ui)
+        bar.corner = corner if corner.usable() else None
         review_mark = self.agent.checkpoints.mark()
         bar.animate = self.config.animations
         bar.queued = self.pending.preview(ellipsis=self.ui.g.ellipsis)
@@ -1362,63 +1427,48 @@ class Repl:
         await self.speaker.say_async(line)
 
     def _prompt_message(self) -> HTML:
-        """The left edge of the input box.
+        """The composer's top edge and its caret, as one prompt_toolkit
+        message.
+
+        The top border used to be printed separately with console.print while
+        prompt_toolkit drew the closing toolbar, and the two could not stay
+        together. prompt_toolkit seats its toolbar on the last row by
+        *emitting newlines* until it gets there -- so whatever gap the manual
+        cursor arithmetic left behind became a void of blank rows between the
+        top border and the rest of the box, with the border stranded halfway
+        up the screen. Making the border part of the message puts the whole
+        box inside prompt_toolkit's own render, so it is seated as one piece
+        and there is no gap to leave.
 
         Re-evaluated on every redraw, so a mid-prompt Ctrl-E shows up at once.
-        Coloured with the palette accent, matching the frame around it: the
-        box is one object, not a cyan caret sitting inside a violet border.
         """
         if is_dumb_terminal():
             return HTML('<b>&gt;</b> ')
-        edge = self.ui.g.vbar
-        return HTML(
-            '<style fg="%s">%s</style> <b><style fg="%s">&gt;</style></b> '
-            % (ACCENT, edge, ACCENT))
-
-    def _pad_to_bottom(self) -> None:
-        """Seat the input box at the bottom of the terminal.
-
-        After a short turn the cursor sits wherever the output ended, which
-        would open the box mid-screen -- and prompt_toolkit pins its closing
-        toolbar to the *absolute* bottom row, so a floating box leaves a void
-        of empty rows above that toolbar. Two ways to reach the bottom both
-        fail: printing newlines pushes the whole transcript up and leaves a
-        wall of blank scrollback rows; doing nothing strands the box.
-
-        So the cursor is *moved* down to two rows above the bottom without
-        emitting any newline -- an ANSI cursor jump, not printed lines. The
-        box then renders beside its own toolbar at the terminal bottom, nothing
-        is added to the scrollback, and older content stays exactly where it
-        scrolled to.
-        """
-        if is_dumb_terminal():
-            return
-        height = terminal_height()
-        # Cursor row after this turn's output, clamped to the last row once
-        # the output scrolled the screen.
-        cursor = min(self.ui.prompt_lines(), height - 1)
-        down = height - 3 - cursor
-        if down > 0:
-            # Raw write, not Console.print: rich treats a control byte in
-            # its input as something to escape or strip, and the point here
-            # is to hand a real cursor-move to the terminal. The byte is
-            # ASCII, so the stream takes it directly.
-            self.ui.console.file.write(f"\x1b[{down}B")
-            self.ui.console.file.flush()
-
-    def _open_box(self) -> None:
-        """Top edge of the input box, printed just before the prompt.
-
-        Skipped on a dumb terminal: prompt_toolkit falls back to a plain
-        readline there and draws neither the prompt nor the toolbar inside
-        the frame, so an opening edge with no closing one is worse than none.
-        """
-        if is_dumb_terminal():
-            return
         g = self.ui.g
         width = max(24, self.ui.width)
-        self.ui.console.print(
-            Text(g.tl + g.hbar * (width - 2) + g.tr, style=ACCENT))
+        top = escape(g.tl + g.hbar * (width - 2) + g.tr)
+        return HTML(
+            '<style fg="%s">%s</style>\n'
+            '<style fg="%s">%s</style> <b><style fg="%s">&gt;</style></b> '
+            % (ACCENT, top, ACCENT, escape(g.vbar), ACCENT))
+
+    def _echo_prompt(self, text: str) -> None:
+        """Put what was asked into the transcript, compactly.
+
+        The composer erases itself when it closes, which is what keeps a
+        stranded frame from piling up in the scrollback on every turn. The
+        cost is that the question would vanish with it, so it is reprinted
+        here as a single line -- the shape a transcript wants anyway.
+        """
+        if is_dumb_terminal():
+            return
+        body = Text()
+        body.append("  > ", style=f"bold {ACCENT}")
+        first, *rest = text.splitlines() or [""]
+        body.append(first, style="bold")
+        for line in rest:
+            body.append("\n    " + line, style="bold")
+        self.ui.console.print(body)
 
     def _bottom_toolbar(self):
         """The closing edge of the input box, with the status set into it.
@@ -3432,12 +3482,20 @@ class Repl:
             want = "on"
         elif want in ("hide", "no"):
             want = "off"
+        elif want in ("all", "history", "replay"):
+            # Nothing was thrown away while it was hidden, so there is always
+            # a full record to go back over.
+            self.callbacks._open_thinking(whole_session=True)
+            if not self.callbacks._thinking_turns and not self.callbacks._thinking_buffer:
+                self.ui.info("nothing thought yet this session")
+            return True
         if want not in ("on", "off"):
             chosen = await self._pick(
                 "thinking",
                 [("on", "show the model's reasoning as it works"),
                  ("off", "keep only the answer; ^O reveals the reasoning "
-                         "for one turn")],
+                         "for one turn"),
+                 ("all", "replay everything thought this session")],
                 "on" if self.ui.show_thinking else "off",
             )
             if chosen is NO_PICKER:
@@ -3446,6 +3504,9 @@ class Repl:
                              "/thinking on | off")
                 return True
             if chosen is None:
+                return True
+            if chosen == "all":
+                self.callbacks._open_thinking(whole_session=True)
                 return True
             want = chosen
 

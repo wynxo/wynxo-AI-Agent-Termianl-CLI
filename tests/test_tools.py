@@ -404,6 +404,13 @@ class TestWhatIsRefusedOutright:
         "find . -name '*.pyc' -delete",
         "time npm test",
         "env FOO=1 pytest",
+        # A shell running an inline script is ordinary work far more often
+        # than not; unwrapping -c must not make every one of these a refusal.
+        "bash -c 'pytest -q'",
+        "sh -c 'echo hi; ls'",
+        "bash -lc 'make -j8'",
+        "bash script.sh",
+        "echo 'rm -rf /' > notes.txt",
     ])
     async def test_ordinary_work_is_not_refused(self, tmp_path, command):
         from wynxo.tools.shell import hard_refusal
@@ -432,6 +439,20 @@ class TestWhatIsRefusedOutright:
         "ls\nrm -rf /",
         "format c:",
         "rd /s /q c:\\",
+        # A shell does not launder it either. `sh -c "rm -rf /"` is one
+        # token away from `sudo rm -rf /`, and used to sail straight past.
+        "bash -c 'rm -rf /'",
+        'sh -c "rm -rf /"',
+        "/bin/sh -c 'rm -rf ~'",
+        # Short options cluster, so -c is a letter in the middle of the flag.
+        "bash -lc 'rm -rf /'",
+        "bash -i -c 'rm -rf /'",
+        # The separator lives inside the quotes, so splitting on it first
+        # tore the dangerous half into an unparseable fragment.
+        "sh -c 'echo building; rm -rf /'",
+        # And a nested shell is still a shell.
+        'sh -c \'sh -c "rm -rf /"\'',
+        "zsh -c 'shutdown now'",
     ])
     async def test_these_never_run(self, command):
         from wynxo.tools.shell import hard_refusal

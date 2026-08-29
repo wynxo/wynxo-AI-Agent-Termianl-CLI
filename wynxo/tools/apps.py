@@ -151,7 +151,13 @@ async def _launch_entry(entry: AppEntry, open_path: str = "") -> None:
     """
     arg = [open_path] if open_path else []
     path = entry.path
-    if sys.platform == "win32" and path.suffix.lower() == ".lnk":
+    if path.suffix.lower() == ".lnk":
+        # A .lnk is a Windows shortcut: a binary description of a target,
+        # not something to execute. Handing it to the shell is the only way
+        # to start it, so it routes here on every platform rather than only
+        # on win32 -- off Windows _startfile says so plainly, where the old
+        # fallthrough tried to exec the shortcut's own bytes and reported
+        # the target application as broken with a bare "Permission denied".
         await asyncio.to_thread(_startfile, str(path), arg[0] if arg else "")
         return
     if sys.platform == "darwin" and path.suffix == ".app":
@@ -220,7 +226,11 @@ def _startfile(path: str, arg: str = "") -> None:
             creationflags=creation,
         )
         return
-    os.startfile(path)      # noqa: S606 -- non-Windows, never reached for a .lnk
+    # A .lnk reaches here only when the catalog carries a Windows shortcut on
+    # a machine that cannot start one -- a synced profile, a mounted Windows
+    # drive. OSError rather than AttributeError from a missing os.startfile,
+    # so the caller reports it as a launch failure and not as a crash.
+    raise OSError(f"{path} is a Windows shortcut and this is not Windows")
 
 
 async def _shell_launch(argv: list[str]) -> None:

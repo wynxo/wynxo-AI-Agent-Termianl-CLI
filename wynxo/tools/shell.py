@@ -102,24 +102,72 @@ _WINDOWS_ROOT = re.compile(r"^[a-z]:[\\/]?$", re.IGNORECASE)
 _SEPARATORS = re.compile(r"&&|\|\||[;|&\n\r]")
 
 
-def _commands_in(line: str) -> list[list[str]]:
-    """The separate commands a line would run, each as its tokens."""
-    out = []
-    for segment in _SEPARATORS.split(line):
-        if not segment.strip():
+def _split_segments(line: str) -> list[str]:
+    """The line's separate commands, as text, without splitting inside quotes.
+
+    The separator regex alone cut `sh -c "build; rm -rf /"` at the semicolon
+    *inside* the quotes, leaving two fragments with one dangling quote each
+    -- neither of which parses, so the dangerous half was never examined.
+    A quote-aware scan keeps the script in one piece for _commands_in to
+    recurse into.
+    """
+    segments, current, quote, index = [], [], "", 0
+    while index < len(line):
+        char = line[index]
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = ""
+            elif char == "\\" and index + 1 < len(line) and quote == '"':
+                index += 1
+                current.append(line[index])
+        elif char in "'\"":
+            quote = char
+            current.append(char)
+        elif match := _SEPARATORS.match(line, index):
+            segments.append("".join(current))
+            current = []
+            index = match.end()
             continue
+        else:
+            current.append(char)
+        index += 1
+    segments.append("".join(current))
+    return [s for s in segments if s.strip()]
+
+
+def _commands_in(line: str, depth: int = 0) -> list[list[str]]:
+    """The separate commands a line would run, each as its tokens.
+
+    A shell asked to run an inline script (`sh -c "..."`) contributes the
+    commands *inside* that script as well as itself, so a destructive one
+    cannot hide behind a level of quoting. The depth cap stops a pathological
+    `sh -c "sh -c "..."` nest from recursing without end.
+    """
+    out = []
+    for segment in _split_segments(line):
         try:
             tokens = shlex.split(segment, posix=os.name != "nt")
         except ValueError:
             tokens = segment.split()      # unbalanced quotes; do the crude thing
-        if tokens:
-            out.append(tokens)
+        if not tokens:
+            continue
+        out.append(tokens)
+        script = _script_of(_unwrap(tokens))
+        if script and depth < 4:
+            out.extend(_commands_in(script, depth + 1))
     return out
 
 
 _WRAPPERS = {"sudo", "doas", "env", "nice", "ionice", "nohup", "time",
-             "command", "exec", "stdbuf"}
+             "command", "exec", "stdbuf", "xargs"}
 """Things that run something else. "sudo rm -rf /" is still "rm -rf /"."""
+
+_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "ash", "busybox"}
+"""Shells, which run something else via -c. Without these in the unwrap,
+`sh -c "rm -rf /"` sailed straight past a guard that stops `sudo rm -rf /`
+-- one token's difference, and the destructive half sat inside a quoted
+string the tokenizer had already stripped the quotes from."""
 
 
 def _unwrap(tokens: list[str]) -> list[str]:
@@ -129,6 +177,26 @@ def _unwrap(tokens: list[str]) -> list[str]:
         while tokens and (tokens[0].startswith("-") or "=" in tokens[0]):
             tokens = tokens[1:]
     return tokens
+
+
+def _script_of(tokens: list[str]) -> str | None:
+    """The script a shell was asked to run, for `sh -c "..."` and friends.
+
+    Returns None when these tokens are not a shell invoked with -c.
+    """
+    if not tokens or tokens[0].lower().rsplit("/", 1)[-1] not in _SHELLS:
+        return None
+    rest = tokens[1:]
+    while rest:
+        flag, rest = rest[0], rest[1:]
+        if not flag.startswith("-"):
+            return None                  # a script *file*, not an inline one
+        # Short options cluster, so the -c of `bash -lc '...'` is a letter in
+        # the middle of the flag rather than the whole of it.
+        letters = flag[1:]
+        if (not flag.startswith("--") and "c" in letters) or flag == "--command":
+            return rest[0] if rest else None
+    return None
 
 
 def hard_refusal(line: str) -> str:

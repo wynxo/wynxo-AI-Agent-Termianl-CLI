@@ -62,3 +62,69 @@ def test_the_config_and_ui_default_to_hidden():
     assert Config(verify_with_tests=False).show_thinking is False
     ui = UI()
     assert ui.show_thinking is False
+
+class TestHidingNeverDiscards:
+    """Hiding is a display state, not a decision to throw the thought away.
+
+    The rule the UI promises: capture never stops, so showing can always go
+    back over everything -- including the turns that have already finished.
+    """
+
+    def test_capture_continues_while_hidden(self):
+        ui, stream = _capturing_ui(show_thinking=False)
+        cb = _cb(ui)
+        for chunk in ("weighing the ", "options here ", "carefully "):
+            asyncio.run(cb.on_thinking(chunk))
+        # Nothing drawn ...
+        assert "weighing" not in stream.getvalue()
+        # ... but all of it kept.
+        assert "".join(cb._thinking_buffer) == (
+            "weighing the options here carefully ")
+
+    def test_showing_replays_what_was_hidden(self):
+        ui, stream = _capturing_ui(show_thinking=False)
+        cb = _cb(ui)
+        asyncio.run(cb.on_thinking("the hidden part "))
+        ui.show_thinking = True
+        cb._open_thinking()
+        assert "hidden part" in stream.getvalue()
+
+    def test_a_finished_turn_is_retired_not_dropped(self):
+        """The turn boundary is a divider in the record, not the end of it."""
+        ui, _ = _capturing_ui(show_thinking=False)
+        cb = _cb(ui)
+        asyncio.run(cb.on_thinking("first turn thought "))
+        # What Repl.turn does at the top of each turn.
+        cb._thinking_turns.append("".join(cb._thinking_buffer))
+        cb._thinking_buffer.clear()
+        cb._thinking_unsent.clear()
+        asyncio.run(cb.on_thinking("second turn thought "))
+        assert cb._thinking_turns == ["first turn thought "]
+
+    def test_replaying_the_session_shows_every_turn(self):
+        ui, stream = _capturing_ui(show_thinking=False)
+        cb = _cb(ui)
+        cb._thinking_turns = ["thought about parsers ", "thought about tests "]
+        asyncio.run(cb.on_thinking("thinking about this one "))
+        cb._open_thinking(whole_session=True)
+        out = stream.getvalue()
+        assert "parsers" in out
+        assert "tests" in out
+        assert "this one" in out
+
+    def test_replaying_with_no_history_shows_only_the_backlog(self):
+        ui, stream = _capturing_ui(show_thinking=False)
+        cb = _cb(ui)
+        asyncio.run(cb.on_thinking("only this "))
+        cb._open_thinking(whole_session=True)
+        out = stream.getvalue()
+        assert "only this" in out
+        assert "earlier turn" not in out
+
+    def test_the_note_keeps_counting_while_hidden(self):
+        """The rising count is the promise that ^O still has something."""
+        ui, _ = _capturing_ui(show_thinking=False)
+        cb = _cb(ui)
+        asyncio.run(cb.on_thinking("one two three four five "))
+        note = cb._thinking_note()
+        assert "words thought" in note and "^O" in note

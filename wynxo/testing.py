@@ -156,11 +156,16 @@ def python_command(root: Path) -> str:
     # real interpreter; an alias is not.
     current = Path(sys.executable)
     if _real_interpreter(current) and _belongs_to_project_environment(current, root) \
-            and not (os.name == "nt" and current.parent.name.lower() == "global"):
+            and current.parent.name.lower() != "global":
         # Prefer Wynxo's interpreter when it is the active/project environment,
         # but keep the historical PATH fallback for an unrelated system
         # interpreter. This avoids running a test suite with Wynxo's packages
         # merely because the CLI itself was launched globally.
+        #
+        # The "global" exclusion is not Windows-only: a global install lands
+        # in a directory of that name on every platform, and gating it on the
+        # OS meant a globally installed wynxo hijacked the interpreter for
+        # every project on Linux and Termux.
         return _runnable(current)
 
     # Prefer PATH when it provides a candidate; the active interpreter is
@@ -172,6 +177,19 @@ def python_command(root: Path) -> str:
     # No conventional candidate was found. Return the platform spelling;
     # callers should treat it as a command name, not as proof it exists.
     return "python3"
+
+
+def _is_windows() -> bool:
+    """Whether this is Windows.
+
+    A function rather than a bare ``os.name == "nt"`` at each site so tests
+    can exercise the Windows branches by patching this one name. Patching
+    ``os.name`` itself would work, but ``os`` is shared with the whole
+    interpreter: pathlib picks its flavour from it, so a test that set it
+    turned every later ``Path()`` in the process into a ``WindowsPath`` and
+    took the rest of the suite down with it.
+    """
+    return os.name == "nt"
 
 
 def _belongs_to_project_environment(path: Path, root: Path) -> bool:
@@ -204,7 +222,7 @@ def _runnable(path: Path) -> str:
     text = str(path)
     if " " not in text:
         return text
-    if os.name == "nt":
+    if _is_windows():
         # PowerShell treats a quoted string as a string unless the call
         # operator is in front of it.
         return f'& "{text}"'
@@ -599,7 +617,7 @@ def quote_arg(text: str) -> str:
     """Quote one command argument for the shell this machine runs."""
     if " " not in text:
         return text
-    if os.name == "nt":
+    if _is_windows():
         return '"' + text.replace('"', '\\"') + '"'
     return shlex.quote(text)
 

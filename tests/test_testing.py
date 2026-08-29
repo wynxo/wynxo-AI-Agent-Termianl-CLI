@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from wynxo import testing
 from wynxo.testing import detect, summarise
 
 
@@ -296,7 +297,7 @@ class TestWhichInterpreterTheTestsRunUnder:
         real.write_bytes(b"MZ\x90\x00" * 100)   # non-empty, like a real exe
 
         monkeypatch.setattr(sys, "executable", str(real))
-        monkeypatch.setattr("wynxo.testing.os.name", "nt")
+        monkeypatch.setattr(testing, "_is_windows", lambda: True)
         monkeypatch.setattr(shutil, "which", lambda name: "python")
 
         command = python_command(tmp_path)
@@ -317,7 +318,7 @@ class TestWhichInterpreterTheTestsRunUnder:
         stub.write_bytes(b"")   # Store aliases are zero-byte reparse points
 
         monkeypatch.setattr(sys, "executable", str(stub))
-        monkeypatch.setattr("wynxo.testing.os.name", "nt")
+        monkeypatch.setattr(testing, "_is_windows", lambda: True)
         monkeypatch.setattr(shutil, "which",
                             lambda name: "python" if name == "python" else None)
 

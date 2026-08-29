@@ -229,7 +229,7 @@ class TestEnvironmentInfo:
         stub.mkdir()
         (stub / "python.exe").write_bytes(b"MZ\x90\x00")  # non-empty alias
         monkeypatch.setattr(sys, "executable", str(stub / "python.exe"))
-        monkeypatch.setattr("wynxo.testing.os.name", "nt")
+        monkeypatch.setattr(testing, "_is_windows", lambda: True)
         monkeypatch.setattr(testing, "_run_interpreter", lambda interp, code: "")
         monkeypatch.setattr(testing, "_module_importable", lambda root, module: None)
         env = testing.environment_info(tmp_path)

@@ -24,6 +24,14 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["wynxo*"]
 
+[tool.setuptools.package-data]
+# The ASCII art is data, not code, so a wheel built without this ships
+# without it: `logo.read()` swallows the resulting OSError, and the banner
+# and the pet silently disappear for anyone who did not install from a
+# git clone. Editable installs read straight from the tree, which is why
+# nothing noticed.
+wynxo = ["art/*.txt"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

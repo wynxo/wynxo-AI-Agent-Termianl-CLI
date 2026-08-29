@@ -13,6 +13,8 @@ library, so this costs nothing and works the same on both platforms.
 import faulthandler
 import os
 import sys
+
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -66,3 +68,34 @@ def pytest_unconfigure(config):
             HANG_REPORT.unlink()
     except OSError:
         pass
+
+
+# -- global interpreter state -------------------------------------------------
+
+_PRISTINE_OS_NAME = os.name
+
+
+def pytest_runtest_teardown(item, nextitem):
+    """Fail the test that leaked process-wide state, not its innocent
+    successors.
+
+    ``os.name`` is the one that hurt. Tests reached for
+    ``monkeypatch.setattr("wynxo.testing.os.name", "nt")`` to exercise a
+    Windows branch, but ``wynxo.testing.os`` *is* the interpreter's one
+    ``os`` module. pathlib reads ``os.name`` to choose its flavour, so from
+    that moment every ``Path()`` in the process returned a ``WindowsPath``
+    and raised ``NotImplementedError`` on a POSIX box -- including the
+    ``Path()`` pytest itself uses to format a traceback. The result was an
+    INTERNALERROR that killed the session partway through, so a third of
+    the suite silently never ran and CI had been red for weeks without
+    anyone being able to see why.
+
+    Patch ``wynxo.testing._is_windows`` instead; it exists for this.
+    """
+    if os.name != _PRISTINE_OS_NAME:
+        leaked, os.name = os.name, _PRISTINE_OS_NAME   # repair, then report
+        raise pytest.UsageError(
+            f"{item.nodeid} left os.name as {leaked!r} (was "
+            f"{_PRISTINE_OS_NAME!r}). Patching os.name breaks pathlib for "
+            f"the whole process; patch wynxo.testing._is_windows instead."
+        )

@@ -11,3 +11,12 @@ venv/
 .wynxo.json
 .DS_Store
 hang-traceback.txt
+
+# Coverage data is a binary artifact, regenerated on every run.
+.coverage
+coverage.xml
+htmlcov/
+
+# wynxo's own runtime state, written into whatever project it is run in.
+.wynxo/
+.freebuff/
