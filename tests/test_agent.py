@@ -166,6 +166,47 @@ class TestSystemActionEndsTheTurn:
         assert launched
         await agent.client.aclose()
 
+    async def test_the_same_step_cannot_keep_working_after_a_launch(
+            self, tmp_path, monkeypatch):
+        """'open notepad and write hello': the launch succeeds, and the
+        write_file the model dreamed up in the same turn must never run --
+        the launch *is* the answer. This is the exact regression from the
+        live transcript, where a write ran after 'launched notepad'."""
+        from wynxo.scope import Mode
+        from wynxo.tools import apps as apps_module
+        from wynxo.tools.appcatalog import (AppEntry, ApplicationCatalog,
+                                            Sources)
+
+        async def fake_launch(entry, open_path=""):
+            pass
+
+        monkeypatch.setattr(apps_module, "_launch_entry", fake_launch)
+        agent, fake, cb = make_agent(tmp_path, [
+            {"tool_calls": [
+                {"function": {"name": "launch_application",
+                               "arguments": {"query": "Notepad"}}},
+                {"function": {"name": "write_file",
+                               "arguments": {"path": "hello.txt",
+                                              "content": "hello"}}},
+            ]},
+            {"content": "launched"},
+        ])
+        catalog = ApplicationCatalog(sources=Sources(
+            shortcut_dirs=(), use_app_paths=False))
+        catalog._entries = (AppEntry("Notepad", tmp_path / "Notepad.lnk",
+                                     "start_menu"),)
+        agent.tools.get("launch_application").catalog = catalog
+        agent.permissions.mode = Mode.AUTO
+
+        result = await agent.run("open notepad and write hello")
+        assert result.terminal_action is True
+        names = [name for name, _ in cb.tools]
+        assert names == ["launch_application"], \
+            f"the write must not run after a launched app; got {names}"
+        assert len(fake.requests) == 2, \
+            "a successful launch ends the turn; the second request is only the closing line"
+        await agent.client.aclose()
+
     async def test_a_failed_launch_does_not_end_the_turn(self, tmp_path):
         """A miss is not terminal: the model still needs to tell the user and
         decide what to do next, so the loop carries on normally."""

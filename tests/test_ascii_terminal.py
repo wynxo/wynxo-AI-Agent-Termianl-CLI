@@ -88,9 +88,11 @@ class TestInputBox:
         assert stream.getvalue() == ""
         assert repl._prompt_message().value == "<b>&gt;</b> "
 
-    def test_short_output_pads_the_box_to_the_bottom(self, monkeypatch):
-        """A short turn leaves the cursor mid-screen; blank lines push the
-        box down so it opens at the bottom, not under the last line."""
+    def test_short_output_moves_the_cursor_to_the_bottom(
+            self, monkeypatch):
+        """A short turn leaves the cursor mid-screen; the box is seated by
+        moving the cursor down, not by printing blank rows (which would wall
+        up the scrollback)."""
         monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
         monkeypatch.setattr(cli, "terminal_height", lambda: 20)
         ui = ascii_ui()
@@ -100,14 +102,12 @@ class TestInputBox:
         repl = self._repl(ui)
         repl._pad_to_bottom = cli.Repl._pad_to_bottom.__get__(repl, type(repl))
         repl._pad_to_bottom()
-        # 20 rows: 3 belong to the box (edge, input, toolbar), the cursor
-        # sits on row 7, so 10 blank rows would separate them -- but the
-        # padding is capped at 8, so a short turn never opens a wall.
-        assert stream.getvalue() == "\n" * 8
+        # 20 rows, 3 belong to the box; cursor on row 7 -> move down 10.
+        assert stream.getvalue() == "\x1b[10B"
 
-    def test_a_full_screen_of_output_pads_nothing(self, monkeypatch):
+    def test_a_full_screen_of_output_moves_nothing(self, monkeypatch):
         """Once the output scrolled the screen the cursor is already at the
-        bottom; padding would only add scrollback."""
+        bottom; a move would only overshoot."""
         monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
         monkeypatch.setattr(cli, "terminal_height", lambda: 20)
         ui = ascii_ui()
@@ -119,21 +119,30 @@ class TestInputBox:
         repl._pad_to_bottom()
         assert stream.getvalue() == ""
 
-    def test_padding_is_capped_so_short_turns_do_not_open_a_wall(
-            self, monkeypatch):
-        """A fresh session has almost no output; padding it all the way to
-        the bottom would open a wall of blank rows. The cap keeps the box
-        in the lower screen without the void."""
+    def test_the_move_never_lands_above_the_box_rows(self, monkeypatch):
+        """A huge output can only push the cursor to the last row; the box
+        still has room for all three of its rows."""
         monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
-        monkeypatch.setattr(cli, "terminal_height", lambda: 20)
+        monkeypatch.setattr(cli, "terminal_height", lambda: 5)
         ui = ascii_ui()
         ui.width = 40
-        ui._lines_since_prompt = 0
+        ui._lines_since_prompt = 100
         stream = capture(ui)
         repl = self._repl(ui)
         repl._pad_to_bottom = cli.Repl._pad_to_bottom.__get__(repl, type(repl))
         repl._pad_to_bottom()
-        assert stream.getvalue() == "\n" * 8
+        assert stream.getvalue() == ""
+
+    def test_dumb_terminals_never_move(self, monkeypatch):
+        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: True)
+        ui = ascii_ui()
+        ui.width = 40
+        ui._lines_since_prompt = 2
+        stream = capture(ui)
+        repl = self._repl(ui)
+        repl._pad_to_bottom = cli.Repl._pad_to_bottom.__get__(repl, type(repl))
+        repl._pad_to_bottom()
+        assert stream.getvalue() == ""
 
     def test_dumb_terminals_never_pad(self, monkeypatch):
         monkeypatch.setattr(cli, "is_dumb_terminal", lambda: True)

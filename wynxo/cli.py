@@ -1376,27 +1376,35 @@ class Repl:
             % (ACCENT, edge, ACCENT))
 
     def _pad_to_bottom(self) -> None:
-        """Blank lines that pin the input box to the bottom of the screen.
+        """Seat the input box at the bottom of the terminal.
 
-        After a short turn the cursor sits wherever the output ended, so the
-        box would open mid-screen, floating under the last line. The terminal
-        itself pins prompt_toolkit's toolbar to the bottom row; padding the
-        cursor two rows above it makes the whole box -- top edge, input
-        line, toolbar -- one object anchored at the bottom, the way a shell
-        prompt sits on its own line.
+        After a short turn the cursor sits wherever the output ended, which
+        would open the box mid-screen -- and prompt_toolkit pins its closing
+        toolbar to the *absolute* bottom row, so a floating box leaves a void
+        of empty rows above that toolbar. Two ways to reach the bottom both
+        fail: printing newlines pushes the whole transcript up and leaves a
+        wall of blank scrollback rows; doing nothing strands the box.
+
+        So the cursor is *moved* down to two rows above the bottom without
+        emitting any newline -- an ANSI cursor jump, not printed lines. The
+        box then renders beside its own toolbar at the terminal bottom, nothing
+        is added to the scrollback, and older content stays exactly where it
+        scrolled to.
         """
         if is_dumb_terminal():
             return
         height = terminal_height()
         # Cursor row after this turn's output, clamped to the last row once
-        # the output scrolled the screen. Capped so a short turn never leaves
-        # a wall of blank rows between the output and the box -- a handful of
-        # lines pins the box to the lower screen, and only output that ends
-        # near the bottom earns a full pin.
+        # the output scrolled the screen.
         cursor = min(self.ui.prompt_lines(), height - 1)
-        pad = min(height - 3 - cursor, 8)
-        if pad > 0:
-            self.ui.console.print("\n" * pad, end="", no_wrap=True)
+        down = height - 3 - cursor
+        if down > 0:
+            # Raw write, not Console.print: rich treats a control byte in
+            # its input as something to escape or strip, and the point here
+            # is to hand a real cursor-move to the terminal. The byte is
+            # ASCII, so the stream takes it directly.
+            self.ui.console.file.write(f"\x1b[{down}B")
+            self.ui.console.file.flush()
 
     def _open_box(self) -> None:
         """Top edge of the input box, printed just before the prompt.
@@ -2610,19 +2618,62 @@ class Repl:
         self.ui.success(f"scope: {self._boundary_summary(self.agent.boundary)}")
         return True
 
+    # A leading keyword is a subcommand, never a repository. Parsed in one
+    # place so invalid subcommands get structured help instead of the clone
+    # path swallowing them as "that does not look like a repository".
+    _REPO_KEYWORDS = ("help", "status", "list", "ls", "clone", "add")
+
+    def _repo_help(self) -> None:
+        self.ui.table(
+            ["command", "does"],
+            [
+                ("repo", "the current checkout"),
+                ("repo status", "which branch the workspace is on"),
+                ("repo list", "the current checkout (wynxo keeps no registry)"),
+                ("repo owner/name", "clone a GitHub repository"),
+                ("repo <url>", "clone from a full URL"),
+                ("repo clone owner/name", "same, spelled out"),
+            ],
+            title="repo",
+        )
+
+    def _repo_status(self) -> None:
+        from . import repo as repo_module
+
+        current = repo_module.status(self.workspace)
+        if current:
+            self.ui.info(f"{self.ui.shorten_path(str(self.workspace))}  "
+                         f"on {current}")
+        else:
+            self.ui.info("this folder is not a git checkout")
+
     async def cmd_repo(self, args: list[str]) -> bool:
         """Clone a GitHub repository and move the workspace into it."""
         from . import repo as repo_module
 
         if not args:
-            current = repo_module.status(self.workspace)
-            if current:
-                self.ui.info(f"{self.ui.shorten_path(str(self.workspace))}  "
-                             f"on {current}")
-            else:
-                self.ui.info("not a git checkout")
-            self.ui.info(f"/repo owner/name  {self.ui.g.dot}  /repo <url>")
+            self._repo_status()
+            self._repo_help()
             return True
+
+        first = args[0].lower()
+        if first in self._REPO_KEYWORDS:
+            if first in ("list", "ls"):
+                self._repo_status()
+                self.ui.info("wynxo keeps no registry of clones; to work in "
+                             "one, /repo <owner/name> or /cd into it.")
+                return True
+            if first == "status":
+                self._repo_status()
+                return True
+            if first == "help":
+                self._repo_help()
+                return True
+            if first in ("clone", "add"):
+                args = args[1:]          # repo clone owner/name -> owner/name
+                if not args:
+                    self._repo_help()
+                    return True
 
         if not repo_module.git_available():
             self.ui.error("git is not installed, so wynxo cannot clone anything.")
@@ -2630,8 +2681,8 @@ class Repl:
 
         target = repo_module.parse(" ".join(args))
         if target is None:
-            self.ui.warn("that does not look like a repository. Try owner/name "
-                         "or a GitHub URL.")
+            self._repo_help()
+            self.ui.warn("that does not look like a repository name or URL.")
             return True
 
         with self.ui.status(f"fetching {target.slug}..."):

@@ -263,6 +263,10 @@ class Agent:
         self._recovery_inserted = False
         """The no-progress recovery prompt has been shown once this turn;
         the next repeat-cap trip stops the loop instead of nudging again."""
+        self._terminal_action = False
+        """A system action succeeded and must end the turn. Reset per turn
+        in the run loop; initialized here so `_run_tool_calls` is safe on a
+        bare agent (and state never lingers from a previous turn)."""
         self.shield = Shield(workspace, enabled=config.protect_secrets)
         self.tools = registry or build_registry(
             workspace, allow_shell=config.allow_shell,
@@ -516,9 +520,21 @@ class Agent:
         """
         pending = list(turn.tool_calls)
         while pending:
+            if self._terminal_action:
+                # A system action succeeded: the launch (or similar) *is*
+                # the answer, so the remaining calls in this step are
+                # invented work the user did not ask for -- "open vscode"
+                # must never be followed by a write_file the model dreamed
+                # up in the same breath. The already-run results are in the
+                # session record; the rest are simply dropped, and the main
+                # loop finishes the turn instead of letting the model keep
+                # going.
+                return True
             batch = self._parallel_batch(pending)
             if batch:
                 await self._run_together(batch)
+                if self._terminal_action:
+                    return True
                 del pending[:len(batch)]
                 continue
             call = pending.pop(0)

@@ -221,7 +221,7 @@ class _SaidOnce:
 
 
 class UI:
-    def __init__(self, theme: str = "purple", show_thinking: bool = True):
+    def __init__(self, theme: str = "purple", show_thinking: bool = False):
         self.console = Console(
             highlight=False,
             soft_wrap=False,
