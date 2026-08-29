@@ -153,12 +153,12 @@ def _theme_summary(name: str) -> str:
 
 def _voice_summary(voice: str) -> str:
     return {
-        "plain": "direct and professional (default)",
+        "plain": "direct and human, no support-bot filler",
         "warm": "friendly, still honest about failures",
         "mentor": "explains the reasoning behind decisions",
         "blunt": "the fewest words that say what happened",
         "kawaii": "cheerful and affectionate, same engineering underneath",
-        "mommy": "warm and doting -- your goodboy, her mommy -- same engineering underneath",
+        "mommy": "warm, playful, doting -- your goodboy, her mommy (default) -- same engineering underneath",
     }.get(voice, "")
 
 

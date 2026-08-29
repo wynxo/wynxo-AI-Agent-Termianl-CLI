@@ -79,7 +79,12 @@ def test_mommy_without_an_argument_toggles_to_plain(monkeypatch):
     assert saved["voice"] == "plain"
     assert repl.agent.refreshes == 1
     assert repl.pet.style_name == "default"
-    assert repl.talker.voice_block == ""      # plain has no persona block
+    # Plain now carries a human-tone block: present, and free of the
+    # support-bot filler it exists to forbid.
+    assert repl.talker.voice_block != ""
+    flat = " ".join(repl.talker.voice_block.split()).lower()
+    assert "support bot" in flat
+    assert "corporate filler" in flat
     assert repl.ui.messages[-1][0] == "success"
 
 

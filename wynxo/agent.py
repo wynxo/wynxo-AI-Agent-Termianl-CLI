@@ -36,6 +36,7 @@ from .prompts import (
     REPAIR,
     VERIFY_EXTRA_TESTS,
     VERIFY_PROMPT,
+    build_chat_prompt,
     build_system_prompt,
 )
 from .provider import OllamaClient, ProviderError
@@ -86,19 +87,44 @@ _SMALL_TALK = re.compile(
     r"thanks?|thank\s*you|ty|thx|cheers|"
     r"ok(?:ay)?|k|cool|nice|great|awesome|lol|lmao|haha+|hmm+|"
     r"bye|goodbye|gn|cya|see\s*ya|"
-    r"who\s+are\s+you|what\s+are\s+you|what'?s?\s+your\s+name|"
+    r"who\s+are\s+you|what\s+are\s+you(?:\s+(?:doing|up\s+to|working\s+on))?|what'?s?\s+your\s+name|"
     r"how\s+are\s+you(?:\s+(?:doing|today))?|how'?s\s+it\s+going|"
     r"what'?s?\s+up|wyd|how\s+are\s+things|"
     r"are\s+you\s+(?:there|awake|ready|alive)|test(?:ing)?|"
     r"y(?:es|eah|ep)?|n(?:o|ope|ah)?|sure|alright|fine|good|right|wow|aha|"
     r"help|need\s+help|i\s+need\s+help|i'?m?\s+(?:really\s+)?stuck|"
     r"can\s+you\s+help\s+me|could\s+you\s+help\s+me|"
-    r"what'?s?|how'?s?\s+the\s+weather|what\s+is\s+the\s+weather|weather"
+    r"what'?s?|how'?s?\s+the\s+weather|what\s+is\s+the\s+weather|weather|"
+    r"bro|bruh|brb|fr|damn|dang|dammit|oof|rip|yikes|geez|darn|literally|"
+    r"cmon|for\s+real|morning|afternoon|evening|night|my\s+bad"
     # \b matters more than it looks: alternation takes the first branch that
     # matches, so h[ei]y? claimed the "he" of "hello" and left "llo" behind,
     # which is not small talk -- so "hello there" was treated as a task.
     r")\b"
     r"[\s!.?~,:;)（）\-]*$",
+    re.IGNORECASE,
+)
+
+# Feedback aimed at wynxo itself, and past-tense "I fixed it" win reports.
+# Both are conversation, not a request for work. The task-signal check runs
+# first, so a report with a real task attached ("i fixed it, now run the
+# tests") is still routed to work -- these only catch pure conversation.
+_FEEDBACK = re.compile(
+    r"^\s*(?:"
+    r"why\s+(?:are|r|is|am|ur)?\s*(?:you|u|ur)?\s+(?:so|this)\s+"
+    r"(?:dry|cold|robotic|stiff|boring|formal|serious)"
+    r"|you\s+(?:are|r)\s+(?:so|too)\s+(?:dry|cold|robotic|stiff|formal)"
+    r"|that\s+was\s+(?:crazy|wild|insane|nuts|sick|cool|dope|lit|real|funny)"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+_DONE_REPORT = re.compile(
+    r"^\s*(?:(?:bro|yo|hey|bruh|dude|man|fam)\s+)?"
+    r"(?:i|we|it|that|stuff)\s+(?:finally|just|literally|actually)?\s*"
+    r"(?:fixed|found|solved|got|did|made|wrote|landed|finished|completed|"
+    r"added|removed|cracked|beat|works|passed)\b"
+    r"(?:\s+[\w.'/-]+)*\s*$",
     re.IGNORECASE,
 )
 
@@ -150,13 +176,16 @@ def _clauses(text: str) -> list[str]:
 
 def _is_chatter(clause: str) -> bool:
     """One clause, with a leading greeting allowed to run into the rest."""
-    if _SMALL_TALK.match(clause) or _PERSONAL.match(clause):
+    if (_SMALL_TALK.match(clause) or _PERSONAL.match(clause)
+            or _FEEDBACK.match(clause) or _DONE_REPORT.match(clause)
+            or _CHAT_EXTRA.match(clause)):
         return True
     trimmed = _GREETING_LEAD.sub("", clause, count=1)
     if trimmed != clause:
         # "hey" on its own leaves nothing behind, which is still a greeting.
         return not trimmed or bool(
-            _SMALL_TALK.match(trimmed) or _PERSONAL.match(trimmed))
+            _SMALL_TALK.match(trimmed) or _PERSONAL.match(trimmed)
+            or _CHAT_EXTRA.match(trimmed))
     return False
 
 
@@ -175,6 +204,11 @@ def is_small_talk(request: str) -> bool:
     text = request.strip()
     if not text or len(text) > 120:
         return False
+    # A question asking for suggestions about future work is conversation even
+    # though it contains a work verb ("what should we build next"): it is a
+    # question, not a command, and the planner would otherwise invent a task.
+    if _SUGGESTION_QUESTION.match(text):
+        return True
     if _TASK_SIGNAL.search(text):
         return False
     if _PERSONAL.match(text):
@@ -186,6 +220,65 @@ def is_small_talk(request: str) -> bool:
     if not parts:
         return False
     return all(_is_chatter(part) for part in parts)
+
+
+# More conversation that is not work, and that the plan prompt would otherwise
+# invent a task for. General classes, not a phrase database: a feeling, a
+# request for something to talk about, a reaction to something the model said,
+# a question about shared history. The task-signal check runs first, so a
+# real task attached to any of these still routes to work.
+_CHAT_EXTRA = re.compile(
+    r"^\s*(?:"
+    r"i'?m?\s+(?:bored|tired|sleepy|happy|sad|lonely|excited|good|great|ok(?:ay)?|fine|sad)"
+    r"|i\s+feel(?:\s+(?:really|so|very|a\s+bit))?\s+[a-z-]{2,20}"
+    r"|tell\s+me\s+(?:something(?:\s+[a-z-]+)?|a\s+joke|a\s+story|about\s+you(?:rself)?|more|anything)\b"
+    r"|what\s+should\s+we\s+(?:build|make|do|work\s+on|try)\s+next"
+    r"|(?:do\s+you\s+)?remember\s+(?:when|what|that|the\s+time)\b"
+    r"(?:\s+(?!and\s+)(?:[\w'/.-]+\s*))*"
+    r"|that'?s?\s+(?:actually|really|so|pretty|genuinely|freaking|lowkey|hella)?\s*"
+    r"(?:crazy|wild|insane|nuts|sick|cool|dope|lit|awesome|amazing|interesting|funny|cursed|real|weird|unreal|wack)"
+    r"|that\s+makes\s+sense|makes\s+sense|i\s+see|huh|interesting|noted|wow|nice|ohh?|mhm|mm"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+# Questions that ask for suggestions about future work. Checked before the
+# task-signal guard in is_small_talk: they contain a work verb ("build",
+# "make") but are questions, not commands -- "what should we build next?"
+# wants a conversation, while "build me a script" wants work. Anchored and
+# narrow on purpose; everything else still respects the task-signal guard.
+_SUGGESTION_QUESTION = re.compile(
+    r"^\s*what\s+should\s+we\s+(?:build|make|do|work\s+on|try)\s+next\s*[?]?\s*$",
+    re.IGNORECASE,
+)
+
+
+# A runtime safety boundary, not a canned-response router: self-directed
+# distress short-circuits the whole turn -- no plan, no tools, no memory, no
+# repo work -- and routes to the model with a serious, persona-free prompt.
+# Deliberately tight and self-directed: "this code is killing me" and "kill
+# the process" are idioms and must not trip it. False positives land in the
+# caring path, which is the safe direction.
+_DISTRESS = re.compile(
+    r"(?:"
+    r"\bsuicid\w*\b"
+    r"|\bkill(?:ing)?\s+(?:myself|my\s+self)\b"
+    r"|\b(end|ending|take|taking)\s+my\s+(?:own\s+)?life\b"
+    r"|\bhurt(?:ing)?\s+(?:myself|my\s+self)\b"
+    r"|\bwant\w*\s+to\s+(?:kill\s+myself|die|end\s+it)\b"
+    r"(?!\s+(?:laugh\w*|try\w*|hard|anyway|for|inside|in\s+my|again))"
+    r"|\bdon'?t\s+want\s+to\s+(?:live|be\s+here|go\s+on|exist)\b"
+    r"|\bcan'?t\s+(?:take|handle)\s+(?:this|it)?\s*anymore\b"
+    r"|\bno\s+reason\s+to\s+live\b"
+    r"|\bending\s+it\s+all\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_distress(request: str) -> bool:
+    """Whether this turn needs the serious, tool-free path."""
+    return bool(_DISTRESS.search(request.strip()))
 
 
 class Interrupted(Exception):
@@ -1285,41 +1378,70 @@ class Agent:
         # integration") and calls launch_application with the user's own
         # words; the OS catalog decides what actually exists.
         chatting = is_small_talk(request)
+        distress = is_distress(request)
         initial: ParsedTurn | None = None
         """A turn already obtained (conversation that grew tool calls); the
-        tool loop executes it before asking the model again."""
-        if chatting:
+        tool loop executes it before asking the model again. Currently only
+        reachable on the coding path -- conversation never grows tool calls."""
+        if chatting or distress:
             self.session.add_user(request)
+            # Conversation gets its own minimal system prompt, not the coding
+            # mega-prompt: engineering context (tools, effort, scope, project
+            # map) is exactly what turns a conversational model robotic, and
+            # the raw model -- the user's own baseline -- is already natural
+            # once the prompt sandwich is gone. Sampled hot so a canned
+            # "How can I help you today?" is not the auto-picked token.
+            # Tools are never advertised on a conversation turn: the observed
+            # interference is a coding model reaching for tools on chat
+            # ("remember what we were building?" burned six tool calls), and
+            # conversation is the one mode that must be tool-free. A distress
+            # turn is the safety boundary: a serious, persona-free prompt and
+            # tools hard-disabled -- the model cannot plan, edit, launch or
+            # remember anything on this turn, whatever it tries.
+            chat_prompt = build_chat_prompt(
+                voice=self.config.voice,
+                memory=self.memory.prompt_section(),
+                serious=distress,
+            )
+            chat_wire = [{"role": "system", "content": chat_prompt},
+                         *self.session.messages]
             try:
-                turn = await self._call_model()
+                turn = await self._call_model(
+                    messages=chat_wire, temperature=0.95, num_predict=200,
+                    use_tools=False)
             except ProviderError as exc:
                 return TurnResult(content="", elapsed=time.monotonic() - started,
                                   errors=[str(exc)])
             except asyncio.CancelledError:
                 raise Interrupted from None
-            if not turn.content.strip() and not turn.tool_calls:
+            if turn.tool_calls:
+                # Belt and braces: tools were never offered, so a tool call
+                # here is the model hallucinating one. Never run it -- the
+                # turn is conversation, not work.
+                turn = ParsedTurn(content=turn.content or "", tool_calls=[])
+            if not turn.content.strip():
                 # Same one-chance recovery as the tool loop: a greeting that
                 # comes back empty should not die on the spot.
                 self.session.add_user(EMPTY_ANSWER_NUDGE)
                 try:
-                    turn = await self._call_model()
+                    turn = await self._call_model(
+                        messages=[{"role": "system", "content": chat_prompt},
+                                  *self.session.messages],
+                        temperature=0.9, num_predict=200,
+                        use_tools=False)
                 except ProviderError as exc:
                     return TurnResult(content="",
                                       elapsed=time.monotonic() - started,
                                       errors=[str(exc)])
                 except asyncio.CancelledError:
                     raise Interrupted from None
-            if turn.tool_calls:
-                # Routing said conversation, but the model decided it needs
-                # tools. Never drop those calls: hand the turn to the tool
-                # loop and carry on like any other task.
-                initial = turn
-            else:
-                await self._warn_if_nothing_came_back(turn)
-                self.session.add_assistant(turn.content)
-                self.session.save()
-                return TurnResult(content=turn.content, iterations=1,
-                                  elapsed=time.monotonic() - started)
+                if turn.tool_calls:
+                    turn = ParsedTurn(content=turn.content or "", tool_calls=[])
+            await self._warn_if_nothing_came_back(turn)
+            self.session.add_assistant(turn.content)
+            self.session.save()
+            return TurnResult(content=turn.content, iterations=1,
+                              elapsed=time.monotonic() - started)
 
         if self.policy.plan == "inline" and initial is None:
             request = (

@@ -475,7 +475,9 @@ class TestResilience:
 class TestWireFormat:
     async def test_tools_are_sent_when_supported(self, tmp_path):
         agent, fake, _ = make_agent(tmp_path, [{"content": "hi"}])
-        await agent.run("hello")
+        # A coding turn advertises tools; a chat turn does not (see
+        # TestChatNeverRunsTools). "hello" is chat, so use a real task.
+        await agent.run("fix this bug")
         assert "tools" in fake.requests[0]
         assert any(t["function"]["name"] == "read_file" for t in fake.requests[0]["tools"])
         await agent.client.aclose()
@@ -1363,25 +1365,30 @@ class TestCompletionReportFromState:
         asyncio.run(agent.client.aclose())
 
 
-class TestChatRoutingKeepsToolCalls:
-    """Routing is a heuristic, so it must never be able to discard work: if a
-    turn routed as conversation comes back with tool calls, they run."""
+class TestChatNeverRunsTools:
+    """Conversation turns never advertise tools -- the observed interference
+    was a coding model reaching for tools on chat ("remember what we were
+    building?" burned six calls and hit the iteration cap). Tools are only
+    offered on the coding path, and a hallucinated call on a chat turn is
+    dropped, never executed."""
 
-    def test_chat_turn_with_tool_calls_executes_them(self, tmp_path):
+    def test_chat_turn_drops_tool_calls_without_running_them(self, tmp_path):
         (tmp_path / "a.txt").write_text("hello\n")
         agent, fake, cb = make_agent(tmp_path, [
-            # A conversational request, answered with a tool call.
+            # A conversational request the model (incorrectly) answers with a
+            # tool call, then a real answer on the retry.
             {"tool_calls": [{"function": {"name": "read_file",
                                           "arguments": {"path": "a.txt"}}}]},
             {"content": "It says hello."},
         ])
         result = asyncio.run(agent.run("hi"))
         assert result.content == "It says hello."
-        # The read actually ran and its result reached the model.
+        # The tool call never ran: no tool result ever reached the model.
         tool_msgs = [m for m in fake.requests[-1]["messages"]
                      if m.get("role") == "tool"]
-        assert len(tool_msgs) == 1, "the tool call must not be dropped"
-        assert "hello" in tool_msgs[0].get("content", "")
+        assert tool_msgs == [], "a chat turn must never execute a tool call"
+        assert not any(m.get("tool_calls") for m in fake.requests[-1]["messages"])
+        assert fake.requests[0].get("tools") is None
         asyncio.run(agent.client.aclose())
 
 

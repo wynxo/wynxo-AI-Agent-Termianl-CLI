@@ -133,13 +133,19 @@ class TestBarIntegration:
 
 
 class TestVoice:
-    def test_plain_adds_nothing(self):
+    def test_plain_is_a_voice_too(self):
+        """Plain is no longer "no voice": it got a human tone block, but
+        that block must forbid the support-bot filler, not add to it."""
         from pathlib import Path
 
         from wynxo.effort import resolve
 
-        assert "## Voice" not in build_system_prompt(
-            Path("."), resolve("low"), voice="plain")
+        prompt = build_system_prompt(Path("."), resolve("low"), voice="plain")
+        assert "## Voice" in prompt
+        flat = " ".join(prompt.split()).lower()
+        # The block's job: forbid the support-bot default, not become it.
+        assert "support bot" in flat
+        assert "corporate filler" in flat
 
     @pytest.mark.parametrize("voice", ["warm", "mentor", "blunt"])
     def test_a_voice_adds_a_block_and_the_floor(self, voice):
@@ -184,7 +190,7 @@ class TestVoice:
 
     def test_mommy_keeps_flourishes_out_of_machine_readable_text(self):
         flat = " ".join(VOICES["mommy"].split()).lower()
-        for target in ("code", "file paths", "commit messages"):
+        for target in ("code", "paths", "commit messages"):
             assert target in flat
 
     def test_mommy_voice_carries_the_honesty_floor(self):
