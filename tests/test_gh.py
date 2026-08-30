@@ -13,7 +13,7 @@ import json
 
 import pytest
 
-from wynxo.gh import GitHubClient, GitHubError
+from wynxo.gh import Blob, GitHubClient, GitHubError, Tree
 
 
 def _gh(repl, args, reply="y"):
@@ -108,32 +108,39 @@ class TestReading:
 
     def test_tree_parses_recursive_entries(self, client):
         c, gh = client
-        gh.script[("gh", "api", "repos/o/r/git/trees/main?recursive=1",
-                   "--jq", ".tree[]")] = (
-            '{"path":"src","type":"tree","size":0}\n'
-            '{"path":"src/a.py","type":"blob","size":42}\n')
-        entries = c.tree("o", "r", "main")
-        assert [e["path"] for e in entries] == ["src", "src/a.py"]
+        gh.script[("gh", "api", "repos/o/r/git/trees/main?recursive=1")] = \
+            json.dumps({"sha": "t1", "truncated": False, "tree": [
+                {"path": "src", "type": "tree", "size": 0},
+                {"path": "src/a.py", "type": "blob", "size": 42}]})
+        tree = c.tree("o", "r", "main")
+        assert [e["path"] for e in tree.entries] == ["src", "src/a.py"]
+        assert [e["path"] for e in tree.files] == ["src/a.py"]
+        assert [e["path"] for e in tree.dirs] == ["src"]
+        assert tree.truncated is False
 
     def test_read_decodes_base64_and_returns_sha(self, client):
         c, gh = client
         payload = {"content": base64.b64encode(b"hello\n").decode(),
-                   "sha": "abc123", "size": 6}
+                   "sha": "abc123", "size": 6, "encoding": "base64"}
         gh.script[("gh", "api", "repos/o/r/contents/src/a.py?ref=main",
-                   "--jq", "{content, sha, size}")] = json.dumps(payload)
-        text, sha = c.read("o", "r", "src/a.py", "main")
-        assert text == "hello\n"
-        assert sha == "abc123"
+                   "--jq", "{content, sha, size, encoding, type}")] = \
+            json.dumps(payload)
+        blob = c.read("o", "r", "src/a.py", "main")
+        assert blob.text == "hello\n"
+        assert blob.sha == "abc123"
+        assert blob.ranged is False
 
     def test_oversized_files_are_refused(self, client):
         c, gh = client
         payload = {"content": base64.b64encode(b"x").decode(),
                    "sha": "s", "size": 2_000_000}
         gh.script[("gh", "api", "repos/o/r/contents/big.bin?ref=main",
-                   "--jq", "{content, sha, size}")] = json.dumps(payload)
+                   "--jq", "{content, sha, size, encoding, type}")] = \
+            json.dumps(payload)
         with pytest.raises(GitHubError) as exc:
             c.read("o", "r", "big.bin", "main")
         assert "1000000" in str(exc.value)
+        assert exc.value.kind == "too_large"
 
 
 class TestWriting:
@@ -235,16 +242,22 @@ class StubClient:
     def repo_default_branch(self, owner, repo):
         return "main"
 
+    truncated = False
+
     def tree(self, owner, repo, branch):
-        return [
+        return Tree(truncated=self.truncated, entries=[
             {"path": "README.md", "type": "blob", "size": 5},
             {"path": "src", "type": "tree", "size": 0},
             {"path": "src/a.py", "type": "blob", "size": 42},
             {"path": "src/deep/b.py", "type": "blob", "size": 7},
-        ]
+        ])
 
-    def read(self, owner, repo, path, branch):
-        return "hello\n", "sha1"
+    def read(self, owner, repo, path, branch, start=0, end=0):
+        return Blob(text="hello\n", sha="sha1", size=6, path=path,
+                    total_lines=1)
+
+    def forget(self, owner="", repo=""):
+        pass
 
     def ref_sha(self, owner, repo, branch):
         return "headsha"

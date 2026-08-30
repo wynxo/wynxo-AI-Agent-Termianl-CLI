@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from wynxo.gh import GitHubError
+from wynxo.gh import Blob, GitHubError, Tree
 from wynxo.tools.github_tool import GitHubRead, GitHubReadInput, \
     GitHubWrite, GitHubWriteInput
 
@@ -24,16 +24,33 @@ class StubClient:
         return "main"
 
     def tree(self, owner, repo, branch):
-        return [
+        return Tree(entries=[
             {"path": "README.md", "type": "blob", "size": 5},
             {"path": "src", "type": "tree", "size": 0},
             {"path": "src/a.py", "type": "blob", "size": 42},
-        ]
+        ])
 
-    def read(self, owner, repo, path, branch):
+    def read(self, owner, repo, path, branch, start=0, end=0):
         if path == "missing.txt":
-            raise GitHubError("path not found")
-        return "def hello():\n    return 1\n", "sha1"
+            raise GitHubError("path not found", "not_found")
+        # A write is reflected by later reads, as a repository does. Without
+        # that the read-back after a commit sees the old content and the
+        # write reports -- correctly -- that it could not be confirmed.
+        for wrote_path, content, _m, _b, _s in self.writes:
+            if wrote_path == path:
+                return Blob(text=content, sha="sha-after", size=len(content),
+                            path=path, total_lines=content.count("\n") + 1)
+        return Blob(text="def hello():\n    return 1\n", sha="sha1",
+                    size=26, path=path, total_lines=2)
+
+    def search_code(self, owner, repo, query, limit=20):
+        return [{"path": "src/a.py", "sha": "sha1"}]
+
+    def stat(self, owner, repo, path, branch):
+        return {"type": "file", "path": path, "size": 42, "sha": "sha1"}
+
+    def forget(self, owner="", repo=""):
+        pass
 
     def ref_sha(self, owner, repo, branch):
         return "headsha"
@@ -89,6 +106,7 @@ class TestGitHubRead:
             repo="o/r", operation="read", path="missing.txt"))
         assert not result.ok
         assert "path not found" in result.output
+        assert result.metadata["kind"] == "not_found"
 
     async def test_repo_is_required(self, ws):
         result = await _run(_read(workspace=ws),
@@ -116,25 +134,50 @@ class TestGitHubWrite:
         client = StubClient()
         result = await _run(_write(client, ws), GitHubWriteInput(
             repo="o/r", operation="write", branch="feature",
-            path="src/a.py", content="new body", message="rewrite a.py"))
+            path="src/a.py", content="new body", message="rewrite a.py",
+            base_sha="sha1"))
         assert result.ok
         path, content, message, branch, sha = client.writes[0]
         assert (path, content, message, branch) == \
             ("src/a.py", "new body", "rewrite a.py", "feature")
-        assert sha == "sha1"          # existing file -> update, not create
+        # The sha sent is the one the caller was working from, not one this
+        # tool looked up: a freshly fetched sha always matches and so
+        # protects nothing.
+        assert sha == "sha1"
         assert "commit123" in result.output
+
+    async def test_updating_without_the_base_sha_is_refused(self, ws):
+        client = StubClient()
+        result = await _run(_write(client, ws), GitHubWriteInput(
+            repo="o/r", operation="write", branch="feature",
+            path="src/a.py", content="new body", message="rewrite a.py"))
+        assert not result.ok
+        assert client.writes == [], "nothing may be committed without a basis"
+
+    async def test_a_stale_base_sha_is_refused(self, ws):
+        client = StubClient()
+        result = await _run(_write(client, ws), GitHubWriteInput(
+            repo="o/r", operation="write", branch="feature",
+            path="src/a.py", content="new body", message="m",
+            base_sha="an-older-sha"))
+        assert not result.ok
+        assert result.metadata["kind"] == "conflict"
+        assert client.writes == []
 
     async def test_write_a_new_file_has_no_sha(self, ws):
         class NewFileClient(StubClient):
-            def read(self, owner, repo, path, branch):
-                raise GitHubError("not found")
+            def read(self, owner, repo, path, branch, start=0, end=0):
+                raise GitHubError("not found", "not_found")
 
         client = NewFileClient()
         result = await _run(_write(client, ws), GitHubWriteInput(
             repo="o/r", operation="write", branch="feature",
             path="NEW.txt", content="hi", message="add NEW.txt"))
-        assert result.ok
+        # The write goes out with no sha (a create), and then cannot be read
+        # back for confirmation -- which is reported rather than assumed.
         assert client.writes[0][4] is None
+        assert not result.ok
+        assert "could not be confirmed" in result.output
 
     async def test_write_requires_content(self, ws):
         result = await _run(_write(workspace=ws), GitHubWriteInput(

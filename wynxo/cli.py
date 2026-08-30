@@ -3325,12 +3325,18 @@ class Repl:
                 tree = self.gh.tree(owner, repo, branch)
                 self.gh_ws = {"owner": owner, "repo": repo,
                               "branch": branch, "default": default,
-                              "tree": tree}
-                files = sum(1 for e in tree if e.get("type") == "blob")
+                              "tree": tree.entries}
                 self.ui.success(
                     f"opened {owner}/{repo} @ {branch} in the cloud "
-                    f"({files} files). /gh ls to browse, /gh cat <path> to "
-                    f"read, /gh edit <path> to change.")
+                    f"({len(tree.files)} files). /gh ls to browse, /gh cat "
+                    f"<path> to read, /gh edit <path> to change.")
+                if tree.truncated:
+                    # The same thing the tool tells the model, told to the
+                    # person: a listing this large is not the repository.
+                    self.ui.warn(
+                        "GitHub truncated this file listing, so it is only "
+                        "part of the repository -- /gh ls will not show "
+                        "everything.")
                 return True
             if ws is None:
                 self.ui.error("no repository open — /gh open owner/repo first")
@@ -3345,8 +3351,7 @@ class Repl:
                 if len(args) < 2:
                     self.ui.error("usage: /gh cat <path>")
                     return True
-                content, _sha = self.gh.read(owner, repo, args[1], branch)
-                lines = content.splitlines()
+                lines = self.gh.read(owner, repo, args[1], branch).text.splitlines()
                 self.ui.console.print("\n".join(lines[:500]))
                 if len(lines) > 500:
                     self.ui.info(f"... ({len(lines) - 500} more lines)")
@@ -3422,7 +3427,8 @@ class Repl:
 
         owner, repo, branch = ws["owner"], ws["repo"], ws["branch"]
         try:
-            content, sha = self.gh.read(owner, repo, path, branch)
+            blob = self.gh.read(owner, repo, path, branch)
+            content, sha = blob.text, blob.sha
         except GitHubError as exc:
             self.ui.error(str(exc))
             return True
