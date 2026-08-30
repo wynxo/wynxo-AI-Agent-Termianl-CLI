@@ -707,3 +707,54 @@ class TestTerminalControlCannotBeSmuggledIn:
         drawn = self._written(
             lambda u: u.console.print(Panel(Text(self.PAYLOAD))))
         self._assert_clean(drawn)
+
+
+class TestTheWindowsBranchesOfTodaysCode:
+    """Every fix here has a Windows path, and none of it can be run on
+    Windows from this machine. Patched locally rather than globally: a
+    module-level ``os.name`` monkeypatch took the whole suite down once."""
+
+    def test_shutdown_uses_taskkill_rather_than_a_process_group(self):
+        from unittest.mock import MagicMock, patch
+
+        from wynxo.tools import shell as shell_module
+
+        class Process:
+            pid = 4321
+            returncode = None
+
+            def __init__(self):
+                self._transport = MagicMock()
+
+        shell_module._BACKGROUND.clear()
+        shell_module._BACKGROUND["j"] = {"process": Process(),
+                                         "command": "npm run dev"}
+        try:
+            with patch.object(shell_module.os, "name", "nt"), \
+                    patch.object(shell_module.subprocess, "run") as run:
+                stopped = shell_module.shutdown_background(timeout=0.1)
+            assert stopped == 1
+            assert run.called, "Windows has no process groups; taskkill /T is it"
+            assert run.call_args[0][0][:3] == ["taskkill", "/F", "/T"]
+        finally:
+            shell_module._BACKGROUND.clear()
+
+    def test_liveness_is_not_probed_with_a_posix_signal(self):
+        """os.kill(pid, 0) does not mean the same thing on Windows."""
+        from unittest.mock import patch
+
+        from wynxo.tools import shell as shell_module
+
+        class Running:
+            pid = 1234
+            returncode = None
+
+        with patch.object(shell_module.os, "name", "nt"), \
+                patch.object(shell_module.os, "kill",
+                             side_effect=AssertionError("os.kill was called")):
+            assert shell_module._gone(Running()) is False
+
+    def test_the_layout_sheds_furniture_on_every_platform(self):
+        from wynxo.layout import ChatLayout
+
+        assert ChatLayout(width=20, height=3).composer_rows() >= 1
