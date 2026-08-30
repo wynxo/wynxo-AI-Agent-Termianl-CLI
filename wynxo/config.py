@@ -163,6 +163,25 @@ class Config(Schema):
         return path
 
 
+def protocol_of(raw: str) -> str:
+    """The protocol a typed address is asking for, or "" for the default.
+
+    ``normalise_url`` strips a trailing ``/v1`` so every shape of the same
+    address lands on one base URL -- which meant the one part of what
+    somebody typed that said *which API they meant* was thrown away. The
+    only way to reach an OpenAI-compatible server was to hand-edit the
+    config file, so pointing WYNXO_ENDPOINT at llama.cpp's server, LM
+    Studio, vLLM or a real OpenAI account silently spoke Ollama's own /api
+    at it and reported an empty answer -- which reads as a broken model
+    rather than as the wrong protocol.
+
+    Only ``/v1`` is read this way. ``/api`` is Ollama's own prefix and means
+    the default, and no suffix at all means the default too, so nobody's
+    existing address changes meaning.
+    """
+    return "openai" if raw.strip().rstrip("/").endswith("/v1") else ""
+
+
 def normalise_url(raw: str) -> str:
     """Accept the many shapes a person types a server address in.
 
@@ -286,7 +305,10 @@ def load(project_dir: Path | None = None) -> Config:
     # running Ollama remotely will have it set.
     env_url = os.environ.get("WYNXO_ENDPOINT") or os.environ.get("OLLAMA_HOST")
     if env_url:
-        data["endpoints"] = [{"name": "env", "url": normalise_url(env_url)}]
+        endpoint = {"name": "env", "url": normalise_url(env_url)}
+        if kind := protocol_of(env_url):
+            endpoint["kind"] = kind
+        data["endpoints"] = [endpoint]
         data["active_endpoint"] = "env"
     if v := os.environ.get("WYNXO_MODEL"):
         data["model"] = v

@@ -87,6 +87,10 @@ def detect(root: Path) -> Runner | None:
     if runner := _python(root):
         return runner
 
+    # -- jvm ---------------------------------------------------------------
+    if runner := _jvm(root):
+        return runner
+
     # -- others where the file itself is the answer ------------------------
     if (root / "Makefile").is_file() and _has_make_target(root / "Makefile", "test"):
         return Runner("make", "make test", "the Makefile has a test target")
@@ -95,6 +99,36 @@ def detect(root: Path) -> Runner | None:
     if (root / "Gemfile").is_file() and (root / "spec").is_dir():
         return Runner("rspec", "bundle exec rspec",
                       "there is a Gemfile and a spec/ directory")
+    return None
+
+
+def _jvm(root: Path) -> Runner | None:
+    """Gradle or Maven, preferring whatever the project pins.
+
+    Until this existed, a Java or Kotlin project got no runner at all, which
+    meant wynxo never checked its own work there: the verification step
+    skips silently for non-Python changes, and run_tests could only say
+    "provide command explicitly". The tool was reachable, but nothing
+    reached for it on its own.
+
+    The wrapper wins over the installed tool wherever there is one -- that
+    is the whole point of committing a wrapper, and the version it pins is
+    usually not the version on PATH.
+    """
+    for build, wrapper, tool, task in (
+        ("build.gradle", "gradlew", "gradle", "test"),
+        ("build.gradle.kts", "gradlew", "gradle", "test"),
+        ("pom.xml", "mvnw", "mvn", "test"),
+    ):
+        if not (root / build).is_file():
+            continue
+        if _is_windows() and (root / f"{wrapper}.bat").is_file():
+            return Runner(wrapper, f"{wrapper}.bat {task}",
+                          f"there is a {build} and a {wrapper}.bat")
+        if not _is_windows() and (root / wrapper).is_file():
+            return Runner(wrapper, f"./{wrapper} {task}",
+                          f"there is a {build} and a {wrapper}")
+        return Runner(tool, f"{tool} {task}", f"there is a {build}")
     return None
 
 

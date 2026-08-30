@@ -1609,11 +1609,26 @@ class Agent:
             return TurnResult(content=content, iterations=1,
                               elapsed=time.monotonic() - started)
 
+        inline_plan_note = ""
         if self.policy.plan == "inline" and initial is None:
-            request = (
-                f"{request}\n\n"
-                "(If this takes more than a couple of steps, open with a one-line "
-                "plan, then carry it out.)"
+            # Kept apart from the user's words rather than glued onto the end
+            # of them. Appended, it became indistinguishable from what they
+            # typed: the model read the whole thing as the request and
+            # carried wynxo's own sentence into its tool arguments -- an
+            # application query of "plan the retry work\n\nwith a one-line
+            # plan, then carry it out.)" cannot match an installed program.
+            # Worse, it was stored in the conversation as theirs,
+            # so every later turn, every compaction and every /resume showed
+            # them asking for something they never said.
+            #
+            # The explicit-plan path already keeps its instructions in
+            # messages of their own; this is the same thing for the default.
+            # "begin with", not "open with": wynxo's own sentence sat next
+            # to the request, and "open" is one of the words that most says
+            # system action. Its own instructions should not read like one.
+            inline_plan_note = (
+                "(If this takes more than a couple of steps, begin with a "
+                "one-line plan, then carry it out.)"
             )
 
         plan = ""
@@ -1643,6 +1658,8 @@ class Agent:
                 await self.cb.on_stage("executing")
         elif initial is None:
             self.session.add_user(request)
+            if inline_plan_note:
+                self.session.add_user(inline_plan_note)
 
         try:
             result = await self._act(first_turn=initial)

@@ -61,9 +61,27 @@ def _routing_answer(text: str) -> dict | None:
     return {"content": json.dumps({"kind": "coding", "targets": []})}
 
 
+_WYNXO_ASIDE = "(If this takes more than a couple of steps,"
+"""wynxo's own inline-plan note, which it sends as a message of its own.
+
+A real model reads the whole conversation and knows an aside from a
+request. This harness reads one message, so without skipping the aside it
+would answer wynxo's parenthetical instead of the user -- which is a
+property of reading only the last line, not something a model does.
+"""
+
+
+def _last_request(messages: list[dict]) -> dict:
+    for message in reversed(messages or []):
+        if str(message.get("content") or "").startswith(_WYNXO_ASIDE):
+            continue
+        return message
+    return {}
+
+
 def decide(messages: list[dict], tools: list | None) -> dict:
     """Pick a reply. Deliberately simple -- this is a harness, not a model."""
-    last = messages[-1] if messages else {}
+    last = _last_request(messages)
     role = last.get("role", "")
     text = str(last.get("content") or "")
     low = text.lower()

@@ -1131,3 +1131,276 @@ class TestTheDoseShieldDoesNotDependOnGrammar:
         assert offered == [], "tools were offered on a distress turn"
         assert ran == [], f"tools ran on a distress turn: {ran}"
         assert list(workspace.iterdir()) == [], "something was written"
+
+
+class TestWynxosOwnInstructionsAreNotTheUsersWords:
+    """At the default effort, wynxo appended its inline-plan note to the end
+    of the user's message before sending it.
+
+    Glued on, it was indistinguishable from what they typed. The model read
+    the whole thing as the request and carried wynxo's sentence into its
+    tool arguments -- an application query of "plan the retry work\\n\\nwith
+    a one-line plan, then carry it out.)" cannot match an installed program,
+    and that is what a launch was actually attempted with. It was also
+    stored in the conversation as the user's own message, so every later
+    turn, every compaction and every /resume showed them asking for
+    something they never said.
+
+    The explicit-plan path had always kept its instructions in messages of
+    their own. This is the same for the default one.
+    """
+
+    REQUEST = "plan the retry work"
+
+    def _run(self, effort):
+        import json
+        import pathlib
+        import tempfile
+
+        from wynxo.agent import Agent
+        from wynxo.config import Config, Endpoint
+        from wynxo.effort import resolve
+        from wynxo.provider import OllamaClient
+        from wynxo.tools import build_registry
+
+        sent: list[dict] = []
+
+        def handler(request):
+            sent.append(json.loads(request.content or b"{}"))
+            return httpx.Response(200, text=json.dumps(
+                {"message": {"content": "ok"}, "done": True}) + "\n")
+
+        class Callbacks:
+            def __getattr__(self, _name):
+                async def anything(*a, **k):
+                    return None
+                return anything
+
+        async def go():
+            workspace = pathlib.Path(tempfile.mkdtemp())
+            config = Config(
+                endpoints=[Endpoint(name="t", url="http://fake", kind="ollama")],
+                active_endpoint="t", model="m", num_ctx=8192)
+            client = OllamaClient(config)
+            client._client = httpx.AsyncClient(
+                transport=httpx.MockTransport(handler), base_url="http://fake")
+            agent = Agent(client, config, resolve(effort), workspace, Callbacks(),
+                          registry=build_registry(workspace, allow_shell=False))
+            await agent.run(self.REQUEST)
+            await client.aclose()
+            return agent
+
+        return asyncio.run(go()), sent
+
+    def test_the_stored_message_is_exactly_what_was_typed(self):
+        for effort in ("low", "medium", "high"):
+            agent, _sent = self._run(effort)
+            first = next(m for m in agent.session.messages
+                         if m.get("role") == "user")
+            assert first["content"] == self.REQUEST, \
+                f"{effort} stored {first['content']!r}"
+
+    def test_the_note_is_still_sent_at_the_default_effort(self):
+        """Separating it must not lose it: the technique is the point."""
+        agent, _sent = self._run("medium")
+        texts = [str(m.get("content")) for m in agent.session.messages
+                 if m.get("role") == "user"]
+        assert any("one-line plan" in t for t in texts), \
+            "the inline-plan note went missing"
+        assert self.REQUEST in texts
+
+    def test_the_note_is_a_message_of_its_own(self):
+        agent, _sent = self._run("medium")
+        for message in agent.session.messages:
+            body = str(message.get("content") or "")
+            if "one-line plan" in body:
+                assert self.REQUEST not in body, \
+                    "the note is still glued to the request"
+
+    def test_no_note_where_there_is_no_inline_plan(self):
+        for effort in ("low", "high"):
+            agent, _sent = self._run(effort)
+            glued = [str(m.get("content")) for m in agent.session.messages
+                     if m.get("role") == "user"
+                     and "one-line plan" in str(m.get("content"))
+                     and self.REQUEST in str(m.get("content"))]
+            assert glued == [], f"{effort}: {glued}"
+
+    def test_the_note_does_not_read_like_a_system_action(self):
+        """It sits next to the request. "open" is the word that most says
+        launch something, and wynxo's own instruction should not be the
+        thing that puts it there."""
+        import inspect
+
+        from wynxo.agent import Agent
+
+        source = inspect.getsource(Agent.run)
+        note = source.split("inline_plan_note = (", 1)[1].split(")", 1)[0]
+        for verb in ("open", "launch", "start ", "run "):
+            assert verb not in note.lower(), f"the note contains {verb!r}"
+
+
+class TestTheEnvironmentVariableCanSayWhichApi:
+    """WYNXO_ENDPOINT always meant Ollama's own /api.
+
+    ``normalise_url`` strips a trailing ``/v1`` so every shape of the same
+    address lands on one base URL -- which threw away the one part of what
+    somebody typed that said *which API they meant*. Reaching an
+    OpenAI-compatible server needed a hand-edited config file, so pointing
+    the obvious environment variable at llama.cpp's server, LM Studio, vLLM
+    or a real OpenAI account spoke Ollama's /api at it and reported "the
+    model sent back an empty answer" -- which reads as a broken model rather
+    than as the wrong protocol.
+    """
+
+    def _endpoint(self, raw):
+        import importlib
+        import os
+
+        from wynxo import config as config_module
+
+        previous = os.environ.get("WYNXO_ENDPOINT")
+        os.environ["WYNXO_ENDPOINT"] = raw
+        try:
+            importlib.reload(config_module)
+            return config_module.load().endpoints[0]
+        finally:
+            if previous is None:
+                os.environ.pop("WYNXO_ENDPOINT", None)
+            else:
+                os.environ["WYNXO_ENDPOINT"] = previous
+            importlib.reload(config_module)
+
+    def test_a_v1_address_selects_the_openai_client(self):
+        from wynxo.provider import OpenAIClient, make_client
+        from wynxo.config import Config
+
+        endpoint = self._endpoint("http://127.0.0.1:8080/v1")
+        assert endpoint.kind == "openai"
+        config = Config(
+            endpoints=[{"name": endpoint.name, "url": endpoint.url,
+                        "kind": endpoint.kind}],
+            active_endpoint=endpoint.name, model="m", num_ctx=8192)
+        assert isinstance(make_client(config), OpenAIClient)
+
+    def test_the_url_is_still_normalised_the_same_way(self):
+        """The suffix says which API; it is not part of the address."""
+        assert self._endpoint("http://127.0.0.1:8080/v1").url \
+            == "http://127.0.0.1:8080"
+
+    def test_every_other_shape_keeps_its_meaning(self):
+        from wynxo.provider import OllamaClient, make_client
+        from wynxo.config import Config
+
+        for raw in ("http://127.0.0.1:11434", "127.0.0.1:11434",
+                    "http://127.0.0.1:11434/api", "localhost"):
+            endpoint = self._endpoint(raw)
+            assert endpoint.kind == "auto", f"{raw} -> {endpoint.kind}"
+            config = Config(
+                endpoints=[{"name": endpoint.name, "url": endpoint.url,
+                            "kind": endpoint.kind}],
+                active_endpoint=endpoint.name, model="m", num_ctx=8192)
+            assert isinstance(make_client(config), OllamaClient), raw
+
+    def test_the_suffix_is_read_case_and_slash_insensitively(self):
+        from wynxo.config import protocol_of
+
+        assert protocol_of("http://h/v1") == "openai"
+        assert protocol_of("http://h/v1/") == "openai"
+        assert protocol_of("  http://h/v1  ") == "openai"
+        assert protocol_of("http://h/api") == ""
+        assert protocol_of("http://h") == ""
+
+
+class TestAJavaProjectGetsATestCommand:
+    """A Gradle or Maven project got no runner at all.
+
+    The verification step skips silently for non-Python changes, and
+    run_tests could only say "provide command explicitly" -- so on a Java or
+    Kotlin project wynxo never checked its own work unless it was told the
+    command. This is a capability that was missing rather than a defect, and
+    it is two entries in the table that already carries cargo, go, mix and
+    rspec.
+    """
+
+    def _project(self, files, executable=()):
+        import os
+        import pathlib
+        import tempfile
+
+        workspace = pathlib.Path(tempfile.mkdtemp())
+        for name, body in files.items():
+            (workspace / name).write_text(body)
+            if name in executable:
+                os.chmod(workspace / name, 0o755)
+        return workspace
+
+    def test_gradle(self):
+        from wynxo import testing
+
+        runner = testing.detect(self._project({"build.gradle": "plugins {}\n"}))
+        assert runner.command == "gradle test"
+
+    def test_kotlin_dsl(self):
+        from wynxo import testing
+
+        runner = testing.detect(
+            self._project({"build.gradle.kts": "plugins {}\n"}))
+        assert runner.command == "gradle test"
+
+    def test_maven(self):
+        from wynxo import testing
+
+        runner = testing.detect(self._project({"pom.xml": "<project/>\n"}))
+        assert runner.command == "mvn test"
+
+    def test_a_committed_wrapper_wins(self):
+        """That is the whole point of committing one: the version it pins is
+        usually not the version on PATH."""
+        from wynxo import testing
+
+        runner = testing.detect(self._project(
+            {"build.gradle": "x\n", "gradlew": "#!/bin/sh\n"},
+            executable=("gradlew",)))
+        assert runner.command == "./gradlew test"
+
+        runner = testing.detect(self._project(
+            {"pom.xml": "<project/>\n", "mvnw": "#!/bin/sh\n"},
+            executable=("mvnw",)))
+        assert runner.command == "./mvnw test"
+
+    def test_windows_uses_the_batch_wrapper(self):
+        from unittest.mock import patch
+
+        from wynxo import testing
+
+        workspace = self._project({"build.gradle": "x\n",
+                                   "gradlew.bat": "@echo off\n"})
+        with patch.object(testing, "_is_windows", lambda: True):
+            assert testing.detect(workspace).command == "gradlew.bat test"
+
+    def test_a_posix_wrapper_is_not_offered_on_windows(self):
+        """./mvnw would not run there; the installed tool is the answer."""
+        from unittest.mock import patch
+
+        from wynxo import testing
+
+        workspace = self._project({"pom.xml": "<project/>\n",
+                                   "mvnw": "#!/bin/sh\n"})
+        with patch.object(testing, "_is_windows", lambda: True):
+            assert testing.detect(workspace).command == "mvn test"
+
+    def test_python_still_wins_in_a_mixed_project(self):
+        """The order in detect() is the existing decision; adding the JVM
+        must not reshuffle what a polyglot repository already got."""
+        from wynxo import testing
+
+        runner = testing.detect(self._project(
+            {"pyproject.toml": "[tool.pytest.ini_options]\n",
+             "pom.xml": "<project/>\n"}))
+        assert "pytest" in runner.command
+
+    def test_a_project_with_neither_is_unchanged(self):
+        from wynxo import testing
+
+        assert testing.detect(self._project({"README.md": "hi\n"})) is None
