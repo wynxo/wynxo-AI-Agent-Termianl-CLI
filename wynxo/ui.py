@@ -106,7 +106,17 @@ def apply_palette(palette: Palette) -> None:
                 setattr(module, name, here[name])
 
 
-_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+"""C0, DEL, and C1.
+
+The C1 range (U+0080-U+009F) is the single-character form of the same
+sequences ESC introduces: U+009B is CSI, U+009D is OSC. A file holding the
+bytes ``C2 9B`` decodes to U+009B, and terminals that recognise C1 in UTF-8
+-- xterm among them -- then read ``U+009B 2 J`` as "erase the display".
+Stripping ESC while letting its one-character twin through left the shorter
+road open. Nothing in the range is text: they are control codes by
+definition, in every encoding, so there is no legitimate output to lose.
+U+00A0, the non-breaking space, is just past the end and is left alone."""
 
 
 def sanitise(text: str) -> str:

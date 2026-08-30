@@ -911,3 +911,118 @@ class TestWynxoKeepsItsOwnNotesOutOfTheRepository:
         from wynxo.memory import claim_directory
 
         claim_directory("/proc/nonexistent/wynxo")      # must not raise
+
+
+class TestTheShorterRoadToTheTerminalIsClosedToo:
+    """ESC was stripped; its one-character twin was not.
+
+    The C1 range (U+0080-U+009F) is the single-character form of the
+    sequences ESC introduces: U+009B is CSI, U+009D is OSC. A file holding
+    the bytes ``C2 9B`` decodes to U+009B, and terminals that recognise C1
+    in UTF-8 -- xterm among them -- read ``U+009B 2 J`` as "erase the
+    display". So the same attack that the ESC scrub blocked went through
+    one character shorter.
+    """
+
+    C1 = {"single-byte CSI erase": "\x9b2J",
+          "single-byte OSC title": "\x9d0;pwned\x07",
+          "single-byte DCS": "\x90q\x9c",
+          "single-byte APC": "\x9fGf=1\x9c",
+          "string terminator": "\x9c"}
+
+    def _drawn(self, payload):
+        import io
+
+        from wynxo.ui import UI
+
+        ui = UI()
+        sink = io.StringIO()
+        ui.console.file = sink
+        ui.tool_result("read_file", True, payload, payload)
+        ui.tool_output(payload)
+        ui.error(payload)
+        ui.code(payload, "text")
+        return sink.getvalue()
+
+    def test_no_c1_control_reaches_the_terminal(self):
+        for label, payload in self.C1.items():
+            drawn = self._drawn(payload)
+            leaked = [ch for ch in drawn if 0x80 <= ord(ch) <= 0x9F]
+            assert not leaked, f"{label} let {[hex(ord(c)) for c in leaked]} out"
+
+    def test_the_escape_form_is_still_blocked(self):
+        assert "\x1b[" not in self._drawn("\x1b[2J")
+        assert "\x1b]" not in self._drawn("\x1b]0;t\x07")
+
+    def test_a_non_breaking_space_is_just_past_the_end(self):
+        """U+00A0 is text. The range must stop at U+009F."""
+        from wynxo.ui import sanitise
+
+        assert sanitise("a\xa0b") == "a\xa0b"
+
+    def test_ordinary_text_of_every_script_survives(self):
+        from wynxo.ui import sanitise
+
+        for text in ("café", "naïve", "日本語", "한국어", "العربية", "עברית",
+                     "🎉👩‍💻🇯🇵", "Ｆｕｌｌｗｉｄｔｈ", "a\tb", "line\nline"):
+            assert sanitise(text) == text, text
+
+
+class TestWidthIsMeasuredInColumnsEverywhere:
+    """A CJK character occupies two columns, a combining mark none, and an
+    emoji two. Anywhere a length stands in for a width, the box breaks."""
+
+    SCRIPTS = {
+        "cjk": "日本語のテストファイル",
+        "korean": "한국어테스트파일이름",
+        "arabic": "اسم-الملف-العربي-الطويل",
+        "hebrew": "שם-קובץ-בעברית",
+        "emoji": "🎉🎊🥳🎈🎁🍰🎂🧁",
+        "zwj": "👨‍👩‍👧‍👦👩‍💻🏳️‍🌈",
+        "combining": "éàîõü" * 4,
+        "fullwidth": "ＦＵＬＬＷＩＤＴＨ",
+        "mixed": "src/日本/naïve_🎉_файл.py",
+        "long": "測試" * 200,
+    }
+
+    def test_the_card_border_never_overflows(self):
+        from rich.cells import cell_len
+
+        from wynxo.livediff import DiffCard
+        from wynxo.ui import Glyphs
+
+        for label, text in self.SCRIPTS.items():
+            card = DiffCard(tool="write_file", path=text, before="")
+            card.feed(f"x = '{text}'\n" * 3)
+            card.finish()
+            for width in (40, 60, 80, 100, 120):
+                widest = max(cell_len(row)
+                             for row in card.render(Glyphs(True), width))
+                assert widest <= width, f"{label}: {widest} in {width}"
+
+    def test_fit_trims_to_columns(self):
+        from rich.cells import cell_len
+
+        from wynxo.livediff import fit
+
+        for label, text in self.SCRIPTS.items():
+            for cells in (5, 10, 20, 40):
+                assert cell_len(fit(text, cells)) <= cells, f"{label}/{cells}"
+
+    def test_the_composer_stays_within_its_cap(self):
+        from wynxo.layout import ChatLayout
+
+        for label, text in self.SCRIPTS.items():
+            layout = ChatLayout(width=40, height=24)
+            layout.buffer.text = text
+            rows = layout.composer_rows()
+            assert 1 <= rows <= ChatLayout.COMPOSER_MAX_ROWS, f"{label}: {rows}"
+
+    def test_the_overlay_stays_within_the_screen(self):
+        from wynxo.layout import ChatLayout
+
+        for label, text in self.SCRIPTS.items():
+            for width in (20, 40, 80, 120):
+                layout = ChatLayout(width=width, height=24,
+                                    overlay=lambda t=text: [t] * 5)
+                assert layout._overlay_width() <= width, f"{label}/{width}"
