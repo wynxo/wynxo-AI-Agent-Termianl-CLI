@@ -81,10 +81,59 @@ class Chunk:
     be an animation pretending to be a stream.
     """
     done: bool = False
+    truncated: bool = False
+    """The stream ended without the provider ever saying it had finished.
+
+    A server that dies, is killed, or unloads a model mid-generation closes
+    its connection cleanly, so from the client's side that is indistinguish-
+    able from a well-formed stream except for the missing end marker -- and
+    without checking for one, half an answer was handed back as a whole one
+    and the agent went on to act on it. Local models make this ordinary
+    rather than exotic: an OOM during generation looks exactly like this.
+    """
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_duration_ns: int = 0
     load_duration_ns: int = 0
+
+
+def _payload(response, what: str, where: str) -> dict:
+    """The response body as a mapping, or a ProviderError worth reading.
+
+    Every one of these calls used to assume a 200 meant JSON. A wrong port,
+    a proxy's HTML error page, a captive-portal login redirect, or a server
+    that answers 200 with nothing at all all produced a bare
+    JSONDecodeError, uncaught, on the start-up path -- so pointing wynxo at
+    the wrong address crashed it with "Expecting value: line 1 column 1"
+    instead of telling anybody what was wrong.
+
+    A list is accepted and reported as such rather than silently coerced:
+    some shims answer /v1/models with a bare array, and treating that as an
+    empty mapping would report "no models" for a server that has plenty.
+    """
+    try:
+        data = response.json()
+    except ValueError as exc:
+        body = (response.text or "").strip()
+        looks_like_html = body[:1] == "<"
+        detail = ("an HTML page" if looks_like_html
+                  else "an empty body" if not body
+                  else f"{body[:60]!r}")
+        raise ProviderError(
+            f"{where} answered {what} with {detail} rather than JSON. "
+            "That address is reachable but is not the API wynxo expects -- "
+            "check the port, and whether something (a proxy, a login page) "
+            "is sitting in front of it."
+        ) from exc
+    if isinstance(data, list):
+        return {"_list": data}
+    if not isinstance(data, dict):
+        raise ProviderError(
+            f"{where} answered {what} with {type(data).__name__} rather than "
+            "an object. That address is reachable but is not the API wynxo "
+            "expects."
+        )
+    return data
 
 
 _TRANSIENT = (
@@ -154,7 +203,8 @@ class OllamaClient:
         try:
             r = await self._client.get("/api/version", timeout=10.0)
             r.raise_for_status()
-            return r.json().get("version", "unknown")
+            return _payload(r, "/api/version", self.base_url).get(
+                "version", "unknown")
         except httpx.ConnectError as exc:
             raise ProviderError(
                 f"Cannot reach an Ollama server at {self.base_url}.\n"
@@ -178,7 +228,10 @@ class OllamaClient:
         except httpx.HTTPError as exc:
             raise ProviderError(f"Could not list models: {exc}") from exc
         out = []
-        for m in r.json().get("models", []):
+        payload = _payload(r, "/api/tags", self.base_url)
+        for m in payload.get("models", payload.get("_list", [])):
+            if not isinstance(m, dict):
+                continue
             details = m.get("details") or {}
             out.append(
                 ModelInfo(
@@ -199,7 +252,7 @@ class OllamaClient:
             r.raise_for_status()
         except httpx.HTTPError as exc:
             raise ProviderError(f"Could not inspect {model!r}: {exc}") from exc
-        data = r.json()
+        data = _payload(r, "/api/show", self.base_url)
         details = data.get("details") or {}
         info = ModelInfo(
             name=model,
@@ -333,6 +386,8 @@ class OllamaClient:
                         self._explain_error(response.status_code, body, payload)
                     )
             else:
+                finished = False
+                produced = False
                 async for line in response.aiter_lines():
                     if not line.strip():
                         continue
@@ -347,7 +402,18 @@ class OllamaClient:
                         # was the model's output and not their machine.
                         raise ProviderError(
                             self._explain_error(200, str(err), payload))
-                    yield self._to_chunk(data)
+                    chunk = self._to_chunk(data)
+                    finished = finished or chunk.done
+                    produced = produced or bool(
+                        chunk.content or chunk.thinking or chunk.tool_calls)
+                    yield chunk
+                if produced and not finished:
+                    # The socket stopped without Ollama ever sending
+                    # `done: true`: the model was still generating. Reported
+                    # rather than raised, because half an answer is still
+                    # worth reading -- it just must not be mistaken for a
+                    # whole one.
+                    yield Chunk(done=True, truncated=True)
                 return
 
         # Only reached after a think-level downgrade.
@@ -518,9 +584,11 @@ class OpenAIClient:
             r.raise_for_status()
         except httpx.HTTPError as exc:
             raise ProviderError(f"Could not list models: {exc}") from exc
+        payload = _payload(r, _OpenAI_MODELS_PATH, self.base_url)
         out = [
             ModelInfo(name=m.get("id", "?"))
-            for m in r.json().get("data", []) if isinstance(m, dict)
+            for m in payload.get("data", payload.get("_list", []))
+            if isinstance(m, dict)
         ]
         out.sort(key=lambda m: m.name)
         return out
@@ -579,6 +647,11 @@ class OpenAIClient:
             calls: dict[int, dict] = {}
             prompt_tokens = 0
             completion_tokens = 0
+            finished = False
+            """Whether the provider said it was done, rather than the socket
+            simply stopping. Either [DONE] or a finish_reason counts; shims
+            differ about which they send, and some send both."""
+            produced = False
             async with self._client.stream(
                 "POST", _OpenAI_CHAT_PATH, json=payload,
                 timeout=self.config.request_timeout,
@@ -593,6 +666,7 @@ class OpenAIClient:
                         continue
                     data = line[5:].strip()
                     if data == "[DONE]":
+                        finished = True
                         break
                     try:
                         obj = json.loads(data)
@@ -605,8 +679,11 @@ class OpenAIClient:
                     choices = obj.get("choices")
                     if not isinstance(choices, list) or not choices:
                         continue
+                    if choices[0].get("finish_reason"):
+                        finished = True
                     delta = choices[0].get("delta") or {}
                     if content := as_text(delta.get("content")):
+                        produced = True
                         yield Chunk(content=content)
                     if thinking := as_text(delta.get("reasoning")) \
                           or as_text(delta.get("thinking")):
@@ -621,6 +698,7 @@ class OpenAIClient:
                         if fn.get("name"):
                             acc["name"] = fn["name"]
                         if fn.get("arguments"):
+                            produced = True
                             acc["arguments"].append(fn["arguments"])
                             # Emitted as it arrives, as well as accumulated
                             # for the finished call below.
@@ -644,6 +722,10 @@ class OpenAIClient:
             yield Chunk(
                 tool_calls=tool_calls,
                 done=True,
+                # Only when something was actually being generated. A stream
+                # that produced nothing at all is the empty-answer case, which
+                # already has its own handling and its own message.
+                truncated=produced and not finished,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
             )

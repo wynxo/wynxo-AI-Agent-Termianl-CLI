@@ -496,6 +496,7 @@ class Agent:
         # text-mode form of a tool call, applied to the native one.
         argument_buffer = ""
         argument_shown = 0
+        truncated = False
         stream = self.backend.chat(
             messages if messages is not None else self.session.wire(),
             model=self.config.model,
@@ -531,12 +532,22 @@ class Agent:
             if chunk.tool_calls:
                 native_calls.extend(chunk.tool_calls)
             if chunk.done:
+                truncated = truncated or chunk.truncated
                 self.session.usage.add_chunk(
                     chunk.prompt_tokens, chunk.completion_tokens, chunk.total_duration_ns
                 )
 
         if stream_content and (trailing := live_filter.finish()):
             await self.cb.on_content(trailing)
+        if truncated and not silent:
+            # The reply is kept: half an answer is still worth reading, and
+            # discarding it would lose the only evidence of what the model
+            # was doing. It just must not be mistaken for a finished one --
+            # silently, the agent went on to act on half a thought.
+            await self.cb.on_warning(
+                "The server stopped sending before the model had finished, so "
+                "this answer is cut off. With a local model that usually "
+                "means it ran out of memory or was unloaded mid-answer.")
         if live_filter.saw_dangling_close:
             self._template_prefills_think = True
 
