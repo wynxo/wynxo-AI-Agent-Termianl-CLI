@@ -838,3 +838,76 @@ class TestAnInterpreterThatDoesNotRunHasNoAnswer:
 
         source = inspect.getsource(doctor)
         assert 'env.version or "unknown"' in source
+
+
+class TestWynxoKeepsItsOwnNotesOutOfTheRepository:
+    """Every project wynxo touched grew a permanent untracked entry.
+
+    It writes its project notes and its map into ``.wynxo/`` inside the
+    repository it is working in, and nothing ignored them -- so `git status`
+    carried an untracked directory forever afterwards, and one careless
+    `git add -A` committed wynxo's notes into somebody's history. A
+    directory that ignores itself needs no cooperation from the user's own
+    .gitignore and cannot conflict with it.
+    """
+
+    def _workspace(self):
+        import pathlib
+        import tempfile
+
+        return pathlib.Path(tempfile.mkdtemp())
+
+    def test_remembering_something_leaves_the_directory_ignored(self):
+        from wynxo.memory import PROJECT_DIR, Memory
+
+        workspace = self._workspace()
+        added, _ = Memory(workspace).remember("this project uses uv")
+        assert added
+        marker = workspace / PROJECT_DIR / ".gitignore"
+        assert marker.is_file(), "the directory does not ignore itself"
+        assert marker.read_text(encoding="utf-8").strip().endswith("*")
+
+    def test_writing_the_map_does_too(self):
+        from wynxo import projectmap
+        from wynxo.memory import PROJECT_DIR
+
+        workspace = self._workspace()
+        (workspace / "a.py").write_text("x = 1\n", encoding="utf-8")
+        projectmap.load(workspace)
+        marker = workspace / PROJECT_DIR / ".gitignore"
+        assert marker.is_file()
+
+    def test_git_sees_nothing(self):
+        """The point, checked with git rather than by reading the file."""
+        import shutil
+        import subprocess
+
+        if shutil.which("git") is None:
+            return
+        from wynxo.memory import Memory
+
+        workspace = self._workspace()
+        for argv in (["init", "-q"], ["config", "user.email", "t@t"],
+                     ["config", "user.name", "t"]):
+            subprocess.run(["git", *argv], cwd=workspace, capture_output=True)
+        Memory(workspace).remember("this project uses uv")
+        out = subprocess.run(["git", "status", "--porcelain"], cwd=workspace,
+                             capture_output=True, text=True).stdout
+        assert ".wynxo" not in out, out
+
+    def test_an_existing_marker_is_left_alone(self):
+        from wynxo.memory import PROJECT_DIR, claim_directory
+
+        workspace = self._workspace()
+        directory = workspace / PROJECT_DIR
+        directory.mkdir(parents=True)
+        (directory / ".gitignore").write_text("mine\n", encoding="utf-8")
+        claim_directory(directory)
+        assert (directory / ".gitignore").read_text(encoding="utf-8") == "mine\n"
+
+    def test_an_unwritable_project_is_not_a_failure(self):
+        """A read-only checkout is a reason to carry on without the marker,
+        not to fail whatever was being written."""
+        from wynxo.memory import claim_directory
+
+        claim_directory("/proc/nonexistent/wynxo")      # must not raise

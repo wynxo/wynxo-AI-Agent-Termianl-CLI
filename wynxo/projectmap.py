@@ -287,7 +287,9 @@ def load(root: Path, max_age: float = 0.0) -> str:
     fresh = build(root)
     if fresh:
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            from .memory import claim_directory
+
+            claim_directory(path.parent)
             path.write_text(fresh, encoding="utf-8")
         except OSError:
             pass          # an unwritable project still gets the map in-prompt

@@ -31,6 +31,35 @@ PROJECT_DIR = ".wynxo"
 PROJECT_FILE = "memory.md"
 USER_FILE = "user.md"
 
+_SELF_IGNORE = "# Created by wynxo. Its notes about this project live here.\n*\n"
+"""What goes in .wynxo/.gitignore the first time the directory is made.
+
+wynxo writes its project notes and map into the repository it is working
+in, and nothing was ignoring them -- so every project it touched grew a
+permanent untracked entry in `git status`, and one careless `git add -A`
+committed wynxo's notes into somebody's history. A directory that ignores
+itself needs no cooperation from the user's own .gitignore and cannot
+conflict with it; pytest and pip do the same with their caches.
+"""
+
+
+def claim_directory(path) -> None:
+    """Make a .wynxo directory that keeps itself out of the way.
+
+    Best effort: a read-only checkout is a reason to carry on without the
+    marker, not to fail whatever was being written.
+    """
+    from pathlib import Path
+
+    directory = Path(path)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        marker = directory / ".gitignore"
+        if not marker.exists():
+            marker.write_text(_SELF_IGNORE, encoding="utf-8")
+    except OSError:
+        pass
+
 MAX_PROJECT_CHARS = 8_000
 MAX_USER_CHARS = 4_000
 MAX_ENTRY_CHARS = 500
@@ -98,7 +127,7 @@ class MemoryFile:
         text = self._trim(text)
 
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            claim_directory(self.path.parent)
             atomic_write(self.path, text)
         except OSError as exc:
             return False, f"Could not write {self.path}: {exc}"
