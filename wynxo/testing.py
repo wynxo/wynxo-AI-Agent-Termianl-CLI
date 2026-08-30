@@ -540,12 +540,25 @@ def _interpreter_argv(interpreter: str) -> list[str]:
 
 
 def _run_interpreter(interpreter: str, code: str) -> str:
-    """Run a snippet in the resolved interpreter; empty on any failure."""
+    """Run a snippet in the resolved interpreter; empty on any failure.
+
+    A non-zero exit is a failure, which the promise above always intended
+    and the code did not keep: it returned stderr whenever stdout was empty,
+    so an interpreter that did not run had its complaint taken for an
+    answer. A half-built .venv -- an interrupted `python -m venv`, a venv
+    copied between machines -- reported its error message as the project's
+    Python *version*, and /doctor duly displayed it.
+
+    stderr is still read on success, because a working interpreter may warn
+    there while answering on stdout.
+    """
     argv = _interpreter_argv(interpreter) + ["-c", code]
     try:
         proc = subprocess.run(argv, capture_output=True, text=True,
                               timeout=30, check=False)
     except (OSError, subprocess.SubprocessError):
+        return ""
+    if proc.returncode != 0:
         return ""
     return (proc.stdout or proc.stderr or "").strip()
 

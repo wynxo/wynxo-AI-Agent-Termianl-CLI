@@ -752,3 +752,89 @@ class TestLeavingAConversationLeavesItBehind:
         assert todo.outstanding(), "the fixture must actually have items"
         repl._leave_conversation()
         assert todo.outstanding() == []
+
+
+class TestAnInterpreterThatDoesNotRunHasNoAnswer:
+    """A half-built .venv reported its error message as the Python version.
+
+    ``_run_interpreter`` promised "empty on any failure" and returned
+    ``stdout or stderr`` without ever looking at the exit code -- so an
+    interpreter that did not run had its complaint taken for an answer. An
+    interrupted `python -m venv`, or a venv copied between machines, gave
+    /doctor a "python version" of whatever the shell script inside it
+    happened to print, and turned "is pytest installed?" into a guess based
+    on an error message.
+    """
+
+    def _workspace(self, script: str):
+        import os
+        import pathlib
+        import tempfile
+
+        workspace = pathlib.Path(tempfile.mkdtemp())
+        (workspace / ".venv" / "bin").mkdir(parents=True)
+        interpreter = workspace / ".venv" / "bin" / "python"
+        interpreter.write_text(script)
+        os.chmod(interpreter, 0o755)
+        (workspace / "tests").mkdir()
+        (workspace / "tests" / "test_a.py").write_text("def test_a(): pass\n")
+        return workspace
+
+    def test_a_failing_interpreter_reports_no_version(self):
+        import sys
+
+        if sys.platform == "win32":
+            return                          # no shebang scripts to stand in
+        from wynxo import testing
+
+        workspace = self._workspace(
+            "#!/bin/sh\necho 'venv is half built' >&2\nexit 1\n")
+        info = testing.environment_info(workspace)
+        assert info.version == "", f"reported {info.version!r} as a version"
+
+    def test_it_does_not_guess_at_installed_packages_either(self):
+        import sys
+
+        if sys.platform == "win32":
+            return
+        from wynxo import testing
+
+        workspace = self._workspace(
+            "#!/bin/sh\necho 'ImportError: broken' >&2\nexit 1\n")
+        assert testing.pytest_installed(workspace) is None, (
+            "unknown is not the same as no, and neither is an error message")
+
+    def test_a_working_interpreter_still_answers(self):
+        """The fix must not cost the ordinary case."""
+        import pathlib
+        import re
+        import tempfile
+
+        from wynxo import testing
+
+        info = testing.environment_info(pathlib.Path(tempfile.mkdtemp()))
+        assert re.match(r"^\d+\.\d+", info.version), info.version
+        assert info.pytest_installed is True
+
+    def test_stderr_is_still_read_when_the_run_succeeds(self):
+        """A working interpreter may warn on stderr while answering."""
+        import sys
+
+        if sys.platform == "win32":
+            return
+        from wynxo import testing
+
+        workspace = self._workspace(
+            "#!/bin/sh\necho 'the answer' >&2\nexit 0\n")
+        assert testing._run_interpreter(
+            str(workspace / ".venv" / "bin" / "python"), "pass") == "the answer"
+
+    def test_doctor_calls_a_missing_version_unknown(self):
+        """It already did the right thing with an empty version; it was
+        never given one."""
+        import inspect
+
+        from wynxo import doctor
+
+        source = inspect.getsource(doctor)
+        assert 'env.version or "unknown"' in source
