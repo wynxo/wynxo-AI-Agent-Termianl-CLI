@@ -2145,7 +2145,7 @@ class Repl:
 
         if name == "/clear":
             self.agent.session = Session(workspace=self.workspace)
-            self.agent.task_state.reset()
+            self._leave_conversation()
             self.agent.refresh_system_prompt()
             self.ui.info("conversation cleared")
             return True
@@ -2557,6 +2557,7 @@ class Repl:
         # would quietly reinstate the old ones.
         self.agent.session = restored
         self.agent.checkpoints.clear()
+        self._leave_conversation()
         self.agent.refresh_system_prompt()
         self._last_elapsed = 0.0
 
@@ -2564,6 +2565,32 @@ class Repl:
                         f"{len(restored.messages)} messages")
         self.ui.info("undo history is not restored; it belonged to that run")
         return True
+
+    def _leave_conversation(self) -> None:
+        """Drop everything that belonged to the conversation being left.
+
+        Three commands replace the conversation -- /clear, /new and /resume
+        -- and each kept its own idea of what that meant. Only /clear reset
+        the task state, and none of them cleared the checklist, so work from
+        an abandoned chat followed you into the next one: a recovery block
+        citing failures from a different task, a completion report claiming
+        files changed in another conversation, the repeat detector treating
+        a first action as a repetition, a compaction summary told that
+        someone else's steps were "still outstanding", and the plan panel
+        sitting in the corner insisting on a checklist nobody was working
+        on.
+
+        The conversation's *history* is the caller's business -- restored,
+        replaced or emptied depending on which command it is. This is only
+        the state that has no meaning outside the chat it came from.
+        """
+        self.agent.task_state.reset()
+        todo = self.agent.tools.get("todo_write")
+        if todo is not None and hasattr(todo, "items"):
+            todo.items = []
+        self.callbacks.plan_lines.clear()
+        if self.chat is not None:
+            self.chat.invalidate()
 
     def cmd_new(self) -> bool:
         """A new chat, the way opening a new tab is new.
@@ -2579,6 +2606,7 @@ class Repl:
         """
         self.agent.session = Session(workspace=self.workspace)
         self.agent.checkpoints.clear()
+        self._leave_conversation()
         self.agent.refresh_system_prompt()
         self.callbacks.tokens = 0
         self._last_elapsed = 0.0

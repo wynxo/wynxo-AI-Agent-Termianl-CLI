@@ -627,3 +627,128 @@ class TestALargeDiffDoesNotFreezeTheScreen:
         card.feed("one\ntwo\n")
         card.finish()
         assert card.body(100) == card.diff_lines()
+
+
+class TestLeavingAConversationLeavesItBehind:
+    """Work from an abandoned chat followed you into the next one.
+
+    Three commands replace the conversation -- /clear, /new and /resume --
+    and each kept its own idea of what that meant. Only /clear reset the
+    task state, and none of them cleared the checklist. So after switching
+    conversations the agent still carried the previous objective, its
+    failures, its root cause, its changed files and its action
+    fingerprints: a recovery block would hand the model failures from a
+    task nobody was working on, a completion report would claim files
+    changed in a different chat, the repeat detector would flag a first
+    action as a repetition, a compaction summary would be told someone
+    else's steps were "still outstanding", and the plan panel sat in the
+    corner insisting on a checklist that had been abandoned.
+    """
+
+    def _repl(self, workspace):
+        from wynxo.cli import Repl, TerminalCallbacks
+        from wynxo.layout import Transcript
+        from wynxo.session import Session
+        from wynxo.task_state import TaskState, TaskStateMachine
+        from wynxo.tools import build_registry
+        from wynxo.ui import UI
+
+        ui = UI()
+        ui.attach(Transcript(90))
+        repl = Repl.__new__(Repl)
+        repl.workspace = workspace
+        repl.ui = ui
+        repl.chat = None
+        repl._last_elapsed = 0.0
+        repl.callbacks = TerminalCallbacks(ui, prompt_session=None)
+        repl.callbacks.workspace = workspace
+        registry = build_registry(workspace, allow_shell=False)
+
+        class Agent:
+            session = Session(workspace=workspace)
+            task_state = TaskStateMachine()
+            tools = registry
+
+            class checkpoints:
+                @staticmethod
+                def clear():
+                    pass
+
+            @staticmethod
+            def refresh_system_prompt():
+                pass
+
+        repl.agent = Agent()
+
+        machine = repl.agent.task_state
+        machine.begin("delete the auth system")
+        machine.transition(TaskState.EXECUTING)
+        machine.add_file("auth.py", changed=True)
+        machine.record_failure("test_login failed")
+        machine.record_action("write_file:auth.py")
+        machine.set_root_cause("the token was never refreshed")
+
+        todo = registry.get("todo_write")
+        asyncio.run(todo.run(todo.Input(items=[
+            {"task": "delete the auth system", "status": "in_progress"},
+            {"task": "update the tests", "status": "pending"}])))
+        repl.callbacks.plan_lines[:] = ["| [>] delete the auth system |"]
+        return repl, todo
+
+    def _workspace(self):
+        import pathlib
+        import tempfile
+
+        return pathlib.Path(tempfile.mkdtemp())
+
+    def _assert_left_behind(self, repl, todo):
+        machine = repl.agent.task_state
+        assert machine.objective == "", machine.objective
+        assert machine.changed_files == [], machine.changed_files
+        assert machine.failures == [], machine.failures
+        assert machine.root_cause == "", machine.root_cause
+        assert machine.action_fingerprints == []
+        assert machine.state.value == "idle", machine.state
+        assert todo.items == [], "the abandoned checklist came along"
+        assert repl.callbacks.plan_lines == [], "the plan panel came along"
+
+    def test_it_is_all_dropped(self):
+        repl, todo = self._repl(self._workspace())
+        repl._leave_conversation()
+        self._assert_left_behind(repl, todo)
+
+    def test_resume_drops_it_and_restores_the_conversation(self):
+        from wynxo.session import Session
+
+        workspace = self._workspace()
+        saved = Session(workspace=workspace)
+        saved.add_user("rename the widget module")
+        saved.add_assistant("ok")
+        saved.save()
+
+        repl, todo = self._repl(workspace)
+        repl._load_session(saved.session_id)
+        assert len(repl.agent.session.messages) == 2, "the point of resuming"
+        self._assert_left_behind(repl, todo)
+
+    def test_every_command_that_swaps_the_conversation_calls_it(self):
+        """The bug was that they disagreed. A test is cheaper than
+        rediscovering which one was forgotten."""
+        import inspect
+
+        from wynxo.cli import Repl
+
+        for name, source in [
+            ("/new", inspect.getsource(Repl.cmd_new)),
+            ("/resume", inspect.getsource(Repl._load_session)),
+            ("/clear", inspect.getsource(Repl.command)),
+        ]:
+            assert "_leave_conversation()" in source, name
+
+    def test_a_compaction_is_not_told_about_the_old_checklist(self):
+        """The one place outstanding() is read. Left standing, the summary
+        of the new conversation was told to finish the old one's steps."""
+        repl, todo = self._repl(self._workspace())
+        assert todo.outstanding(), "the fixture must actually have items"
+        repl._leave_conversation()
+        assert todo.outstanding() == []
