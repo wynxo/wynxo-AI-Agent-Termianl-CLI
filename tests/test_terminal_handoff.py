@@ -148,14 +148,24 @@ class TestAToolResultClosesWhatWasStreaming:
         assert callbacks.streamer is None
 
     async def test_streamed_code_is_closed_too(self):
+        """A stream in flight must be closed by the result that ends it.
+
+        Streamed edit content goes to the live card in the overlay rather
+        than into the transcript now -- the transcript is append-only, and a
+        whole file written there could never be compacted afterwards. What
+        the result has to do is still the same: close what was open and
+        leave one honest line behind, here a refusal rather than a count.
+        """
         import re
 
         callbacks, ui = self._callbacks()
         await callbacks.on_code("def f():\n    pass\n")
+        assert callbacks.card is not None and callbacks.card.live
         await callbacks.on_tool_result("write_file", False, "refused", "refused")
+        assert not callbacks.card.live, "the card must not be left streaming"
         written = re.sub(r"\x1b\[[0-9;]*m", "", ui.console.file.getvalue())
-        assert "def f()" in written
-        assert written.index("def f()") < written.index("refused")
+        assert "write_file" in written
+        assert "refused" in written
 
     async def test_a_normal_result_is_unaffected(self):
         callbacks, ui = self._callbacks()

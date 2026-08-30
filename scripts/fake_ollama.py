@@ -116,6 +116,16 @@ def decide(messages: list[dict], tools: list | None) -> dict:
             return {"tool_calls": [{"function": {
                 "name": "launch_application",
                 "arguments": {"query": target or "editor"}}}]}
+        # A real edit, so the live diff card can be driven end to end.
+        if re.search(r"\bfix\b", low) and "write_file" in names:
+            return {"tool_calls": [{"function": {
+                "name": "write_file",
+                "arguments": {"path": "demo.py",
+                              "content": "def average(values):\n"
+                                         "    total = 0\n"
+                                         "    for value in values:\n"
+                                         "        total += value\n"
+                                         "    return total / len(values)\n"}}}]}
         if "plan" in low and "todo_write" in names:
             return {"tool_calls": [{"function": {
                 "name": "todo_write",

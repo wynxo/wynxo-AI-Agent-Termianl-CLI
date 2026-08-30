@@ -34,6 +34,7 @@ from .discovery import Discovery
 from .config import Config, Endpoint, data_dir, is_configured, load, normalise_url
 from . import motion
 from .corner import CornerPlan
+from . import livediff
 from .layout import ChatLayout
 from .doctor import run_doctor
 from .effort import ORDER, resolve
@@ -54,8 +55,8 @@ from .tools import build_registry
 from .tools.appcatalog import ApplicationCatalog
 from rich.text import Text
 
-from .ui import (ACCENT, BAR_ACCENT, FAINT, MUTED, ActivityBar, CodeStreamer,
-                 ThoughtStreamer, UI, _ansi_of, effort_meter)
+from .ui import (ACCENT, BAD, BAR_ACCENT, FAINT, GOOD, MUTED, ActivityBar,
+                 CodeStreamer, ThoughtStreamer, UI, _ansi_of, effort_meter)
 
 # What the activity bar says while each tool runs.
 _ACTIVITY = {
@@ -67,7 +68,8 @@ _ACTIVITY = {
 _LANGUAGE = {"read_file": "python", "shell": "console"}
 
 # Keys that work *while the agent is running*, not just at the prompt.
-LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail", "ctrl+c": "stop"}
+LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail",
+             "ctrl+d": "diff", "ctrl+c": "stop"}
 from .platforms import (
     is_dumb_terminal, ollama_server_help as server_help,
     suspicious_workspace, terminal_height, terminal_width)
@@ -326,6 +328,15 @@ class TerminalCallbacks(Callbacks):
         """The full-screen layout, when one is running. Set by Repl."""
         self.plan_lines: list[str] = []
         """The plan, rendered, for the layout's overlay Float."""
+        self.card: livediff.DiffCard | None = None
+        """The edit being streamed right now, or the last one finished. Fed
+        by on_code with the provider's real fragments."""
+        self.detail_diffs = False
+        """Ctrl-D. Whether a finished edit prints its whole diff into the
+        transcript instead of one summary line."""
+        self.workspace = None
+        """Set by Repl, so a card can read the file it is about to replace
+        and diff against it."""
         self.active_tool = ""
         """The tool running right now, or "". The companion's scene is chosen
         from this and the task state together: "executing" is equally true of
@@ -453,6 +464,24 @@ class TerminalCallbacks(Callbacks):
             return ""
         return f"{words} words thought  ^O to read"
 
+    def toggle_diff_detail(self) -> None:
+        """Ctrl-D. Show the whole diff, or just the summary line.
+
+        Works during a stream and after it: while an edit is live the card
+        in the overlay grows to full height, and a finished edit prints its
+        diff into the transcript on the spot rather than making the user
+        cause another one to see it.
+        """
+        self.detail_diffs = not self.detail_diffs
+        self._note("Diffs: full" if self.detail_diffs else "")
+        card = self.card
+        if self.detail_diffs and card is not None and not card.live:
+            for line in card.render(self.ui.g, self.ui.width - 4,
+                                    expanded=True):
+                self.ui.console.print(Text(f"  {line}", style=MUTED))
+        if self.chat is not None:
+            self.chat.invalidate()
+
     def toggle_verbose(self) -> None:
         self.verbose_tools = not self.verbose_tools
         self._status_message = "Tool output: full" if self.verbose_tools else ""
@@ -551,6 +580,27 @@ class TerminalCallbacks(Callbacks):
     async def _on_tool_start_locked(self, name: str, summary: str, event: ToolEvent | None = None) -> None:
         self.active_tool = name
         self._end_code()
+        if livediff.is_edit(name):
+            # The card may already exist: the arguments stream arrives before
+            # the call has been parsed, so on_code opens one as soon as the
+            # first fragment lands and this fills in what only becomes known
+            # now -- which tool it was, which file, and the file's contents
+            # before the tool replaces them.
+            path = ""
+            if event is not None:
+                path = str(getattr(event, "target", "") or "")
+            if not path:
+                path = summary.strip().split()[-1] if summary.strip() else ""
+            before = (livediff.read_before(self.workspace, path)
+                      if self.workspace is not None else "")
+            streamed = self.card.streamed if self.card is not None \
+                and self.card.live else ""
+            self.card = livediff.DiffCard(tool=name, path=path, before=before,
+                                          streamed=streamed)
+        elif self.card is not None and self.card.live:
+            # A different tool ran while a card was open: whatever was
+            # streaming was not an edit after all.
+            self.card = None
         if self.journal is not None:
             self.journal.tool(name, {"summary": summary})
         self._end_stream()
@@ -571,6 +621,16 @@ class TerminalCallbacks(Callbacks):
 
     async def _on_tool_result_locked(self, name: str, ok: bool, display: str, output: str, event: ToolEvent | None = None) -> None:
         self.active_tool = ""
+        if self.card is not None and self.card.tool == name and self.card.live:
+            settled = ""
+            if ok and not self.card.streamed and self.workspace is not None:
+                # Nothing streamed: an atomic provider. The file itself is
+                # the honest source for what changed.
+                settled = livediff.read_before(self.workspace, self.card.path)
+            self.card.finish(ok=ok, error="" if ok else (output or "")[:200],
+                             settled=settled)
+            self._commit_card()
+            return
         # Normally on_tool_start has already closed whatever was streaming.
         # Not always: an unknown tool, one blocked by the mode, or one the
         # user declined never starts, and the result went out while the
@@ -608,12 +668,44 @@ class TerminalCallbacks(Callbacks):
         """
         if self._streaming:
             self._end_stream()
+        if self.card is None or not self.card.live:
+            # The fragments arrive before the call has been parsed, so there
+            # is no tool name or path yet. Opened blank and filled in by
+            # on_tool_start; opening it there instead meant the card was
+            # created after the stream it existed to catch.
+            self.card = livediff.DiffCard(tool="write_file")
+        if self.card.live:
+            # An edit in flight: the fragments belong to its card, which
+            # draws in the overlay. Streaming them into the transcript as
+            # well would put the whole file in the conversation twice.
+            self.card.feed(text)
+            if self.chat is not None:
+                self.chat.invalidate()
+            return
         if self._coder is None:
             self.ui.console.print()
             self.ui.console.print(Text("  writing", style=f"bold {MUTED}"))
             self._coder = CodeStreamer(self.ui, indent="    ",
                                        style=MUTED, code=False, literal=True)
         self._coder.feed(text)
+
+    def _commit_card(self) -> None:
+        """Put the finished edit into the transcript.
+
+        One line by default. The live body was drawn in the overlay, which is
+        a layer rather than a record -- the transcript is append-only, so
+        anything written into it while streaming could never be compacted
+        afterwards.
+        """
+        card = self.card
+        if card is None:
+            return
+        self.ui.console.print(Text(f"  {card.summary(self.ui.g)}",
+                                   style=GOOD if card.state == "done" else BAD))
+        if self.detail_diffs:
+            for line in card.render(self.ui.g, self.ui.width - 4,
+                                    expanded=True):
+                self.ui.console.print(Text(f"  {line}", style=MUTED))
 
     def _end_code(self) -> None:
         if self._coder is not None:
@@ -849,6 +941,16 @@ class Repl:
             """Ctrl-T toggles full tool output."""
             self.callbacks.toggle_verbose()
 
+        @bindings.add("c-d")
+        def _(event):
+            """Ctrl-D expands or collapses the edit detail.
+
+            Bound explicitly so it can never fall through to prompt_toolkit's
+            default, which treats Ctrl-D on an empty buffer as end-of-file
+            and would quit the session mid-edit.
+            """
+            self.callbacks.toggle_diff_detail()
+
         @bindings.add("c-e")
         def _(event):
             """Ctrl-E steps the effort level up; Ctrl-B steps it down."""
@@ -883,6 +985,7 @@ class Repl:
         the composer's geometry; the classic prompt above is the fallback
         for a dumb terminal, a pipe, or -p."""
         self.callbacks = TerminalCallbacks(ui, self.prompt_session)
+        self.callbacks.workspace = workspace
         self.callbacks.journal = self.journal
         self.callbacks.pet = self.pet
         self.project_info = self.discovery.scan()
@@ -1184,7 +1287,12 @@ class Repl:
         the tool actually in flight -- it is not on a timer, and it cannot
         show typing while nothing is being written.
         """
-        lines = list(self.callbacks.plan_lines)
+        lines: list[str] = []
+        card = self.callbacks.card
+        if card is not None and card.live:
+            lines.extend(card.render(self.ui.g, self.ui.width))
+            lines.append("")
+        lines.extend(self.callbacks.plan_lines)
         if not self.pet.enabled:
             return lines
         scene = motion.scene_for_state(
@@ -1922,6 +2030,7 @@ class Repl:
                 ["key", "does"],
                 [("Ctrl-O", "show or hide the model's thinking (works mid-answer)"),
                  ("Ctrl-T", "full tool output vs. one-line summary (mid-answer)"),
+                 ("Ctrl-D", "expand or collapse the edit diff (during or after)"),
                  ("Ctrl-R", "speak a message: record, transcribe, review in the composer"),
                  ("Ctrl-E", "step effort up"),
                  ("Ctrl-B", "step effort down"),

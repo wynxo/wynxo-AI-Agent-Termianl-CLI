@@ -240,6 +240,10 @@ class ChatLayout:
     is clipped off, which reads as a broken box rather than a narrow one.
     tests/test_layout_geometry.py pins the two together."""
     TODO_MAX_ROWS = 12
+    OVERLAY_MAX_ROWS = 26
+    """The overlay carries the live edit as well as the plan now, so it needs
+    the rows a diff needs. Still a Float: however tall it gets it reports no
+    height into the vertical split and cannot move the composer."""
 
     def __init__(self, *, completer=None, unicode: bool = True,
                  accent: str = "ansimagenta",
@@ -409,10 +413,21 @@ class ChatLayout:
     def _overlay_fragments(self):
         return ANSI("\n".join(self._overlay()))
 
+    def _overlay_width(self) -> int:
+        """Wide enough for whatever the overlay is currently holding, capped
+        so it never crowds the conversation on a narrow terminal."""
+        width, _ = self.size()
+        widest = max((len(row) for row in self._overlay()), default=0)
+        return max(self.TODO_WIDTH, min(widest + 2, max(20, width - 8)))
+
     def _overlay_height(self) -> int:
         """The float's own height. It is *not* part of the vertical split, so
         whatever this returns cannot move the composer or the footer."""
-        return max(0, min(len(self._overlay()), self.TODO_MAX_ROWS))
+        _, height = self.size()
+        # Never more than half the screen: an overlay that covers the
+        # conversation it is annotating has stopped being an overlay.
+        room = max(3, height // 2)
+        return max(0, min(len(self._overlay()), self.OVERLAY_MAX_ROWS, room))
 
     def _composer_prefix(self, line_number: int, wrap_count: int):
         """The caret, on the first row only; continuation rows get a gutter
@@ -676,7 +691,7 @@ class ChatLayout:
             content=body,
             floats=[
                 Float(top=1, right=0,
-                      width=self.TODO_WIDTH, height=self._overlay_height,
+                      width=self._overlay_width, height=self._overlay_height,
                       content=Window(
                           content=FormattedTextControl(self._overlay_fragments,
                                                        focusable=False),
