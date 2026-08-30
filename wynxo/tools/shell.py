@@ -8,6 +8,7 @@ import re
 import shlex
 import signal
 import subprocess
+import time
 from collections import deque
 
 from ..platforms import default_shell
@@ -58,6 +59,39 @@ def _signal_group(process, terminate: bool) -> None:
     try:
         process.terminate() if terminate else process.kill()
     except (ProcessLookupError, OSError, ValueError):
+        pass
+
+
+def _close_transports(process, force: bool = False) -> None:
+    """Retire a finished process's pipe transports.
+
+    ``process.stdout`` is a StreamReader, and StreamReader has no close().
+    So the ``stream.close()`` this replaces raised AttributeError into a
+    bare ``except Exception`` on every command that ever ran, and the
+    transports were never retired at all -- the Windows deallocator message
+    the docstring above describes was never actually prevented, and on POSIX
+    a killed background job left its stdout pipe open for the rest of the
+    session. What owns the pipes is the subprocess transport underneath.
+
+    Only ever on a process that has stopped: closing a subprocess transport
+    kills a process that is still running, which would turn a tidy-up into
+    a way to lose a command. ``force`` is for the one caller that has just
+    killed it itself -- there the returncode is still unset, because the
+    child watcher that fills it in needs a running loop and shutdown may be
+    happening without one.
+    """
+    if not force and getattr(process, "returncode", None) is None:
+        return
+    transport = getattr(process, "_transport", None)
+    if transport is None:
+        return
+    try:
+        transport.close()
+    except Exception:
+        # Closing a pipe schedules work on the event loop, and there may not
+        # be one left -- this also runs from an atexit hook. The transport
+        # marks itself closed before it gets that far, which is the part
+        # that matters: it is what stops __del__ complaining later.
         pass
 
 
@@ -441,16 +475,11 @@ class Shell(Tool):
         -- the exact shape of a cancelled or timed-out command -- the
         deallocator later runs against an already-closed socket and the
         interpreter prints "Exception ignored while calling deallocator"
-        (asyncio: I/O operation on closed pipe). Explicitly closing the
-        stream retires the transport cleanly, which any asyncio program
-        should do once the process has been reaped.
+        (asyncio: I/O operation on closed pipe). Explicitly closing it
+        retires the transport cleanly, which any asyncio program should do
+        once the process has been reaped.
         """
-        try:
-            stream = getattr(process, "stdout", None)
-            if stream is not None:
-                stream.close()
-        except Exception:
-            pass
+        _close_transports(process)
 
     @staticmethod
     async def _terminate(process) -> None:
@@ -490,10 +519,99 @@ class Shell(Tool):
 _BACKGROUND: dict[str, dict] = {}
 """job id -> job state, for the lifetime of this interpreter."""
 
+_ATEXIT_REGISTERED = False
+
+
+def shutdown_background(timeout: float = 3.0) -> int:
+    """Stop every background job still running. Returns how many were killed.
+
+    A background command is started in its own session so that the whole of
+    it can be killed rather than just the shell that launched it -- and that
+    same detachment means the terminal never hangs it up either. So quitting
+    wynxo left `npm run dev`, a watcher, or a `while true` loop running
+    forever, still writing into the project, with nothing left that knew its
+    pid. The docstring on the job table said jobs live only for the lifetime
+    of the session; the *processes* did not.
+
+    Synchronous on purpose: it is called from an atexit hook as well as from
+    the REPL's teardown, and by the time atexit runs there is no event loop
+    left to await anything on.
+    """
+    # Jobs already signalled are skipped rather than re-signalled. The REPL's
+    # teardown and the atexit backstop both run on a normal quit, and without
+    # this the second pass sat out its whole grace period sending SIGTERM to
+    # pids it had already killed.
+    doomed = [job["process"] for job in _BACKGROUND.values()
+              if job["process"].returncode is None and not job.get("stopped")]
+    if not doomed:
+        return 0
+    for job in _BACKGROUND.values():
+        job["stopped"] = True
+    # asyncio reaps these children on a watcher thread per child. Killing
+    # them from an atexit hook wakes those threads after the loop has been
+    # closed, and each one logs "Loop ... that handles pid N is closed"
+    # straight onto the user's terminal as wynxo quits. The processes are
+    # being stopped deliberately; the complaint about it is noise.
+    import logging
+
+    asyncio_log = logging.getLogger("asyncio")
+    previous = asyncio_log.level
+    asyncio_log.setLevel(logging.CRITICAL)
+    try:
+        for process in doomed:
+            _signal_group(process, terminate=True)
+        # A short grace period, then insist. Anything that ignores SIGTERM --
+        # a shell trapping it, a wedged compiler -- would otherwise still be
+        # there.
+        deadline = time.monotonic() + max(0.0, timeout)
+        while time.monotonic() < deadline:
+            if all(_gone(process) for process in doomed):
+                break
+            time.sleep(0.05)
+        for process in doomed:
+            if not _gone(process):
+                _signal_group(process, terminate=False)
+            _close_transports(process, force=True)
+    finally:
+        asyncio_log.setLevel(previous)
+    return len(doomed)
+
+
+def _gone(process) -> bool:
+    """True when the process is no longer running.
+
+    ``returncode`` is filled in by the event loop's child watcher, which is
+    not running during atexit -- so the process table is asked directly,
+    with signal 0, rather than waited on. Waiting here would reap a child
+    the watcher thread is also waiting on, and the loser of that race raises
+    inside a thread nobody is reading.
+    """
+    if process.returncode is not None:
+        return True
+    if process.pid is None or os.name == "nt":
+        return process.returncode is not None
+    try:
+        os.kill(process.pid, 0)
+        return False
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError):
+        return False
+
 
 async def _launch_background(process, command: str) -> ToolResult:
     """Register a running process as a pollable job and return immediately."""
+    import atexit
     import uuid
+
+    # Registered on the first background job rather than at import, so a run
+    # that never starts one adds no hook. atexit is the backstop for the
+    # paths that never reach the REPL's teardown -- a crash, a hard quit --
+    # and is idempotent because a second shutdown finds nothing running.
+    global _ATEXIT_REGISTERED
+    if not _ATEXIT_REGISTERED:
+        atexit.register(shutdown_background)
+        _ATEXIT_REGISTERED = True
 
     job_id = uuid.uuid4().hex[:8]
     job = {
@@ -532,11 +650,7 @@ async def _background_reader(job: dict) -> None:
     finally:
         job["exit_code"] = process.returncode
         job["done"].set()
-        try:
-            if process.stdout is not None:
-                process.stdout.close()
-        except Exception:
-            pass
+        _close_transports(process)
 
 
 def _job_output(job: dict) -> str:

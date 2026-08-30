@@ -337,6 +337,10 @@ class TerminalCallbacks(Callbacks):
         self.workspace = None
         """Set by Repl, so a card can read the file it is about to replace
         and diff against it."""
+        self.boundary = None
+        """The same wall the tools use. The card reads independently of the
+        tool, so without it a path the tool would refuse to write was still
+        read and drawn."""
         self.active_tool = ""
         """The tool running right now, or "". The companion's scene is chosen
         from this and the task state together: "executing" is equally true of
@@ -591,7 +595,8 @@ class TerminalCallbacks(Callbacks):
                 path = str(getattr(event, "target", "") or "")
             if not path:
                 path = summary.strip().split()[-1] if summary.strip() else ""
-            before = (livediff.read_before(self.workspace, path)
+            before = (livediff.read_before(self.workspace, path,
+                                           self.boundary)
                       if self.workspace is not None else "")
             streamed = self.card.streamed if self.card is not None \
                 and self.card.live else ""
@@ -626,7 +631,8 @@ class TerminalCallbacks(Callbacks):
             if ok and not self.card.streamed and self.workspace is not None:
                 # Nothing streamed: an atomic provider. The file itself is
                 # the honest source for what changed.
-                settled = livediff.read_before(self.workspace, self.card.path)
+                settled = livediff.read_before(self.workspace,
+                                               self.card.path, self.boundary)
             self.card.finish(ok=ok, error="" if ok else (output or "")[:200],
                              settled=settled)
             self._commit_card()
@@ -706,6 +712,20 @@ class TerminalCallbacks(Callbacks):
             for line in card.render(self.ui.g, self.ui.width - 4,
                                     expanded=True):
                 self.ui.console.print(Text(f"  {line}", style=MUTED))
+
+    def close_card(self) -> None:
+        """Close an edit left streaming, at the end of a turn.
+
+        A cancelled turn never delivers a tool result, so the card stayed
+        live and the overlay went on saying "streaming..." into the next
+        turn -- describing an edit that had already stopped. Deliberately not
+        folded into _end_stream(): that runs *during* a turn as well, and
+        would close the card moments after on_code opened it.
+        """
+        if self.card is not None and self.card.live:
+            self.card.finish(ok=False, error="interrupted")
+            self._commit_card()
+        self.active_tool = ""
 
     def _end_code(self) -> None:
         if self._coder is not None:
@@ -812,12 +832,25 @@ class TerminalCallbacks(Callbacks):
         if preview:
             self.ui.diff(preview) if preview.lstrip().startswith(("---", "+", "-")) else self.ui.code(preview)
 
+        question = "[y] yes  [a] always  [n] no  [q] stop:"
         while True:
             try:
-                answer = (await self.prompt_session.prompt_async(
-                    HTML(f'<style fg="{ACCENT}">  [y] yes  [a] always '
-                         f'[n] no  [q] stop: </style>')
-                )).strip().lower()
+                if self.chat is not None:
+                    # The layout's own one-line question, which draws in place
+                    # of the caret. Going through prompt_async here instead
+                    # lost the question outright: that method takes the same
+                    # arguments PromptSession does but the layout has nowhere
+                    # to *put* a message -- its composer draws a fixed caret
+                    # -- so the text was accepted and dropped. The permission
+                    # prompt is the one place in wynxo where that is not
+                    # cosmetic: the agent stopped and waited on an invisible
+                    # question, with the screen showing an ordinary empty
+                    # composer and no hint that anything wanted an answer.
+                    answer = (await self.chat.ask(question)).strip().lower()
+                else:
+                    answer = (await self.prompt_session.prompt_async(
+                        HTML(f'<style fg="{ACCENT}">  {question} </style>')
+                    )).strip().lower()
             except (EOFError, KeyboardInterrupt):
                 return Decision.ABORT
             if answer in ("", "y", "yes"):
@@ -986,6 +1019,7 @@ class Repl:
         for a dumb terminal, a pipe, or -p."""
         self.callbacks = TerminalCallbacks(ui, self.prompt_session)
         self.callbacks.workspace = workspace
+        self.callbacks.boundary = self.boundary
         self.callbacks.journal = self.journal
         self.callbacks.pet = self.pet
         self.project_info = self.discovery.scan()
@@ -1323,6 +1357,15 @@ class Repl:
             # prompt loop, where a chat-layout path around it would have
             # skipped it silently.
             self.speaker.stop()
+            # And so does anything started with shell(background=true). It is
+            # in its own session so the whole command can be killed at once,
+            # which also means the terminal never hangs it up -- a watcher or
+            # a dev server would go on writing into the project long after
+            # wynxo was gone.
+            from .tools.shell import shutdown_background
+
+            with contextlib.suppress(Exception):
+                shutdown_background()
             await self.client.aclose()
             # The pet signs off -- a warm end, but never louder than a plain
             # "bye" when it is disabled.
@@ -1529,6 +1572,7 @@ class Repl:
             # unflushed line with it.
             if self.chat is None:
                 watcher.stop()
+            self.callbacks.close_card()
             self.callbacks._end_stream()
             bar.stop()
             self.callbacks.bar = None

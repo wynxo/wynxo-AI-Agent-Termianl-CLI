@@ -1,3 +1,4 @@
+import asyncio
 import sys
 
 import pytest
@@ -570,31 +571,59 @@ class TestShellStreamCleanup:
     stdout; when the loop closes while that transport is still alive, its
     deallocator later runs against an already-closed socket and the
     interpreter prints "Exception ignored while calling deallocator
-    (asyncio: I/O operation on closed pipe)". Explicitly closing the stream
-    is what makes the teardown clean.
+    (asyncio: I/O operation on closed pipe)". Retiring the transport is what
+    makes the teardown clean.
+
+    These used to close ``process.stdout`` and assert it on a MagicMock,
+    which grows a ``close()`` on demand. The real ``process.stdout`` is an
+    ``asyncio.StreamReader`` and has no such method, so the code under test
+    raised AttributeError into a bare except every time and retired nothing
+    -- and the test passed anyway, because it was measuring the mock. What
+    owns the pipes is the subprocess transport, so that is what these ask
+    about now.
     """
 
-    async def test_a_live_stream_is_closed(self):
-        from unittest.mock import MagicMock
+    class _Transport:
+        def __init__(self, explode=None):
+            self.closed = False
+            self._explode = explode
 
-        stream = MagicMock()
-        process = MagicMock()
-        process.stdout = stream
+        def close(self):
+            self.closed = True
+            if self._explode is not None:
+                raise self._explode
+
+    class _Process:
+        def __init__(self, transport, returncode=0):
+            self._transport = transport
+            self.returncode = returncode
+
+    async def test_a_finished_process_retires_its_transport(self):
+        transport = self._Transport()
+        await Shell._close_streams(self._Process(transport))
+        assert transport.closed
+
+    async def test_no_transport_is_not_an_error(self):
+        await Shell._close_streams(self._Process(None))      # must not raise
+
+    async def test_an_already_closed_transport_is_tolerated(self):
+        transport = self._Transport(
+            explode=ValueError("I/O operation on closed pipe"))
+        await Shell._close_streams(self._Process(transport))  # must not raise
+
+    async def test_a_running_process_is_left_alone(self):
+        """Closing a subprocess transport kills the process it belongs to."""
+        transport = self._Transport()
+        await Shell._close_streams(self._Process(transport, returncode=None))
+        assert not transport.closed
+
+    async def test_a_real_command_retires_its_transport(self):
+        """The whole point: against the real asyncio types, not a mock."""
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", "print('hi')",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT)
+        await process.stdout.read()
+        await process.wait()
         await Shell._close_streams(process)
-        stream.close.assert_called_once()
-
-    async def test_no_stream_is_not_an_error(self):
-        from unittest.mock import MagicMock
-
-        process = MagicMock()
-        process.stdout = None
-        await Shell._close_streams(process)      # must not raise
-
-    async def test_an_already_closed_stream_is_tolerated(self):
-        from unittest.mock import MagicMock
-
-        stream = MagicMock()
-        stream.close.side_effect = ValueError("I/O operation on closed pipe")
-        process = MagicMock()
-        process.stdout = stream
-        await Shell._close_streams(process)      # must not raise
+        assert process._transport._closed

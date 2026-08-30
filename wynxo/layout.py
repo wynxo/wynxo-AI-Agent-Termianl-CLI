@@ -194,7 +194,14 @@ class Transcript:
                 self._buffer.write(tail)
         finally:
             self._draining = False
-        pieces = head.split("\n")
+        # A trailing CR is a line ending, not content. Windows subprocess
+        # output, a CRLF file being written and a model echoing one all
+        # arrive as \r\n; splitting on \n alone left the \r on the end of
+        # every row, and it survives into the rendered fragments as a literal
+        # character -- where a terminal reads it as "return to column 0" and
+        # the row is overdrawn by whatever comes next.
+        pieces = [line[:-1] if line.endswith("\r") else line
+                  for line in head.split("\n")]
         self.lines.extend(pieces)
         if len(self.lines) > MAX_SCROLLBACK:
             del self.lines[: len(self.lines) - MAX_SCROLLBACK]
@@ -318,6 +325,29 @@ class ChatLayout:
 
     # -- geometry ----------------------------------------------------------
 
+    def header_rows(self) -> int:
+        """One row, until the screen cannot spare it.
+
+        Below a certain height the fixed furniture alone costs more rows than
+        the terminal has, and a split whose minimums exceed its height is not
+        a squeezed layout -- ``HSplit._divide_heights`` answers None and
+        prompt_toolkit draws an entirely blank screen. So the furniture is
+        shed, in the order it can be done without: the rule first (it only
+        separates two things that are still adjacent), then the header, then
+        the footer. The composer and one row of conversation are what is
+        actually being used and are the last things to go.
+        """
+        _, height = self.size()
+        return self.HEADER_ROWS if height >= 4 else 0
+
+    def rule_rows(self) -> int:
+        _, height = self.size()
+        return self.RULE_ROWS if height >= 5 else 0
+
+    def footer_rows(self) -> int:
+        _, height = self.size()
+        return self.FOOTER_ROWS if height >= 3 else 0
+
     def composer_rows(self) -> int:
         """Rows the input needs right now: its own content, capped.
 
@@ -326,18 +356,26 @@ class ChatLayout:
         be a range -- and a range is what let it inflate into a tall empty
         box whenever the conversation was short.
         """
-        width, _ = self.size()
+        width, height = self.size()
         room = max(1, width - 4)          # border, gutter, caret
         rows = 0
         for line in (self.buffer.text or "").split("\n"):
             rows += max(1, math.ceil(len(line) / room))
-        return max(1, min(rows, self.COMPOSER_MAX_ROWS))
+        # Never more than the screen can seat alongside the fixed rows. On a
+        # short terminal a five-line paste asked for more rows than existed,
+        # the sum of the split's minimums exceeded the height, and
+        # _divide_heights answered None -- which prompt_toolkit renders as an
+        # entirely blank screen. The composer gives way there; the
+        # alternative is showing nothing at all.
+        seatable = max(1, height - self.header_rows() - self.rule_rows()
+                       - self.footer_rows())
+        return max(1, min(rows, self.COMPOSER_MAX_ROWS, seatable))
 
     def transcript_rows(self) -> int:
         """What the transcript is entitled to: everything left over."""
         _, height = self.size()
-        fixed = (self.HEADER_ROWS + self.RULE_ROWS
-                 + self.composer_rows() + self.FOOTER_ROWS)
+        fixed = (self.header_rows() + self.rule_rows()
+                 + self.composer_rows() + self.footer_rows())
         return max(0, height - fixed)
 
     # -- scrolling ---------------------------------------------------------
@@ -418,7 +456,11 @@ class ChatLayout:
         so it never crowds the conversation on a narrow terminal."""
         width, _ = self.size()
         widest = max((len(row) for row in self._overlay()), default=0)
-        return max(self.TODO_WIDTH, min(widest + 2, max(20, width - 8)))
+        # The screen is the hard limit. TODO_WIDTH is a preference, and as a
+        # floor it won a 20-column terminal outright -- a 36-column float on
+        # a screen that has 20.
+        room = max(8, width - 4)
+        return min(room, max(min(self.TODO_WIDTH, room), min(widest + 2, room)))
 
     def _overlay_height(self) -> int:
         """The float's own height. It is *not* part of the vertical split, so
@@ -426,7 +468,7 @@ class ChatLayout:
         _, height = self.size()
         # Never more than half the screen: an overlay that covers the
         # conversation it is annotating has stopped being an overlay.
-        room = max(3, height // 2)
+        room = max(1, min(height - 2, max(3, height // 2)))
         return max(0, min(len(self._overlay()), self.OVERLAY_MAX_ROWS, room))
 
     def _composer_prefix(self, line_number: int, wrap_count: int):
@@ -627,7 +669,7 @@ class ChatLayout:
         header = Window(
             content=FormattedTextControl(self._header_fragments,
                                          focusable=False),
-            height=Dimension.exact(self.HEADER_ROWS),
+            height=lambda: Dimension.exact(self.header_rows()),
             style="class:header",
         )
 
@@ -645,7 +687,7 @@ class ChatLayout:
         rule = Window(
             content=FormattedTextControl(self._rule_fragments,
                                          focusable=False),
-            height=Dimension.exact(self.RULE_ROWS),
+            height=lambda: Dimension.exact(self.rule_rows()),
         )
 
         # COMPOSER -- exact, of its own measured content. This is the whole
@@ -669,7 +711,7 @@ class ChatLayout:
         footer = Window(
             content=FormattedTextControl(self._footer_fragments,
                                          focusable=False),
-            height=Dimension.exact(self.FOOTER_ROWS),
+            height=lambda: Dimension.exact(self.footer_rows()),
             style="class:footer",
         )
 

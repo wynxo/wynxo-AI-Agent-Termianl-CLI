@@ -23,6 +23,7 @@ everybody by default.
 from __future__ import annotations
 
 import difflib
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -143,7 +144,7 @@ class DiffCard:
         if not lines:
             return []
         room = max(8, width - 4)
-        clipped = [line[:room] for line in lines]
+        clipped = [fit(line, room) for line in lines]
         if len(clipped) <= rows:
             return clipped
         if self.live:
@@ -154,8 +155,10 @@ class DiffCard:
         """The whole card: a framed title, the diff, and a state line."""
         inner = max(20, min(width, 100)) - 2
         top = f"{glyphs.tl}{glyphs.hbar}{glyphs.hbar} "
-        title = self.title(glyphs)[:inner - 4]
-        rule = glyphs.hbar * max(0, inner - len(title) - 4)
+        from rich.cells import cell_len
+
+        title = fit(self.title(glyphs), inner - 4)
+        rule = glyphs.hbar * max(0, inner - cell_len(title) - 4)
         out = [f"{top}{title} {rule}{glyphs.tr}"]
         rows = 10_000 if expanded else MAX_LIVE_ROWS
         for line in self.body(inner, rows):
@@ -171,23 +174,70 @@ class DiffCard:
         return out
 
 
+def fit(text: str, cells: int) -> str:
+    """``text`` trimmed to ``cells`` *display columns*, not codepoints.
+
+    A CJK character occupies two columns and a combining accent none, so
+    slicing by len() overflowed the card's border by up to double on a
+    Japanese filename and produced a box that wrapped onto the next row.
+    """
+    from rich.cells import cell_len
+
+    if cell_len(text) <= cells:
+        return text
+    out, used = [], 0
+    for char in text:
+        width = cell_len(char)
+        if used + width > cells:
+            break
+        out.append(char)
+        used += width
+    return "".join(out)
+
+
 def is_edit(tool: str) -> bool:
     return (tool or "").strip().lower() in EDIT_TOOLS
 
 
-def read_before(workspace: Path, raw_path: str) -> str:
+def read_before(workspace: Path, raw_path: str, boundary=None) -> str:
     """The file as it stands, for the diff to be against something.
 
-    Best effort by design: a new file, an unreadable one or a path outside
-    the workspace all mean "nothing to compare with", which makes every line
-    an addition -- the honest reading in each case.
+    The path comes from the model's tool arguments, so it is checked against
+    the same boundary the tools use before anything is opened. The tool would
+    refuse to *write* outside the workspace, but this reads independently of
+    it, and without the check a call naming ``../../../etc/shadow`` had its
+    contents read and drawn into the card -- the write refused, the file
+    disclosed anyway.
+
+    Best effort otherwise, by design: a new file, an unreadable one or one
+    outside the boundary all mean "nothing to compare with", which makes
+    every line an addition -- the honest reading in each case.
     """
     if not raw_path:
         return ""
     try:
-        candidate = Path(raw_path)
+        candidate = Path(raw_path).expanduser()
         if not candidate.is_absolute():
             candidate = workspace / candidate
+        candidate = Path(os.path.normpath(str(candidate)))
+        if boundary is not None:
+            if not boundary.contains(candidate):
+                return ""
+        elif not _within(workspace, candidate):
+            return ""
         return candidate.read_text(encoding="utf-8", errors="replace")
     except (OSError, ValueError):
         return ""
+
+
+def _within(workspace: Path, candidate: Path) -> bool:
+    """Fallback containment check for callers with no boundary to hand.
+
+    Resolves first: a symlink pointing out of the workspace is outside it,
+    whatever its name says.
+    """
+    try:
+        candidate.resolve().relative_to(workspace.resolve())
+        return True
+    except (ValueError, OSError, RuntimeError):
+        return False
