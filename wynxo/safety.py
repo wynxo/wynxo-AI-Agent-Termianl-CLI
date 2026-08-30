@@ -40,7 +40,12 @@ _PROCEDURAL = re.compile(
     r"|\b(?:overdose|OD)\s+(?:on|with)\s+\w+"
     r"|\bhow\s+(?:much|many)\s+\w+\s+(?:would|will|to)\s+"
     r"(?:kill|be\s+lethal|be\s+fatal)"
-    r"|\b(?:take|swallow|ingest)\s+\d+\s*(?:mg|g|pills?|tablets?)"
+    # A quantity of medication, with or without a verb in front of it.
+    # Requiring one meant "about 30 tablets would" -- a dose, stated plainly
+    # -- read as ordinary prose, because the sentence happened not to be an
+    # instruction. On a turn already established as distress, a number of
+    # pills is the thing being screened for however it is phrased.
+    r"|\b\d+\s*(?:mg|mcg|g|grams?|pills?|tablets?|capsules?)\b"
     r"|\bmost\s+(?:effective|painless|reliable)\s+way\s+to\s+"
     r"(?:die|kill|end)\b"
     r")",
