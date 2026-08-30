@@ -55,6 +55,16 @@ class DiffCard:
     state: str = LIVE
     error: str = ""
     _committed: list[str] = field(default_factory=list, repr=False)
+    _diff: tuple = field(default=(), repr=False, compare=False)
+    """(before, streamed, lines) for the diff last computed.
+
+    The card is redrawn on every repaint, and each redraw ran the diff twice
+    -- once for the body and once for the counts -- from scratch. On a
+    four-thousand-line file that was 1.5 seconds *per frame*, so the whole
+    UI stopped while a large edit sat on the screen. Keyed on the content
+    rather than invalidated by hand: feed() is not the only thing that can
+    change what is being compared, and a cache that has to be remembered
+    about is a cache that will one day be stale."""
 
     # -- the stream --------------------------------------------------------
 
@@ -90,14 +100,13 @@ class DiffCard:
         """(added, removed), by comparing what arrived with what was there.
 
         Computed from the content itself rather than reported by the tool, so
-        a card cannot claim a change the file does not contain.
+        a card cannot claim a change the file does not contain. Counted off
+        the same diff the body draws rather than a second one of its own:
+        context rows begin with a space, and the file headers are excluded,
+        so the two agree by construction as well as by arithmetic.
         """
-        if not self.streamed:
-            return (0, 0)
-        old = self.before.splitlines()
-        new = self.streamed.splitlines()
         added = removed = 0
-        for line in difflib.unified_diff(old, new, lineterm="", n=0):
+        for line in self.diff_lines():
             if line.startswith("+") and not line.startswith("+++"):
                 added += 1
             elif line.startswith("-") and not line.startswith("---"):
@@ -108,13 +117,14 @@ class DiffCard:
         """The unified diff, as rows. Empty while nothing has arrived."""
         if not self.streamed:
             return []
-        old = self.before.splitlines()
-        new = self.streamed.splitlines()
+        if self._diff[:2] == (self.before, self.streamed):
+            return self._diff[2]
         name = self.path or self.tool
-        return [
-            line for line in difflib.unified_diff(
-                old, new, fromfile=name, tofile=name, lineterm="", n=2)
-        ]
+        lines = list(difflib.unified_diff(
+            self.before.splitlines(), self.streamed.splitlines(),
+            fromfile=name, tofile=name, lineterm="", n=2))
+        self._diff = (self.before, self.streamed, lines)
+        return lines
 
     # -- how it looks ------------------------------------------------------
 
@@ -144,12 +154,16 @@ class DiffCard:
         if not lines:
             return []
         room = max(8, width - 4)
-        clipped = [fit(line, room) for line in lines]
-        if len(clipped) <= rows:
-            return clipped
+        # Chosen before trimmed, not after. fit() measures display columns a
+        # character at a time, and running it over every row of a
+        # thousand-line diff to then show twelve of them was most of what a
+        # repaint cost. Slicing first is the same answer: fit() is per row.
+        if len(lines) <= rows:
+            return [fit(line, room) for line in lines]
         if self.live:
-            return clipped[-rows:]
-        return clipped[:rows - 1] + [f"... {len(clipped) - rows + 1} more lines"]
+            return [fit(line, room) for line in lines[-rows:]]
+        return [fit(line, room) for line in lines[:rows - 1]] \
+            + [f"... {len(lines) - rows + 1} more lines"]
 
     def render(self, glyphs, width: int, expanded: bool = False) -> list[str]:
         """The whole card: a framed title, the diff, and a state line."""

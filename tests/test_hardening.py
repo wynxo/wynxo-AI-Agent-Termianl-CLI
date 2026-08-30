@@ -503,3 +503,127 @@ class TestOnlyOneThingReadsTheKeyboard:
 
         assert re.search(r"if self\.chat is None:\s*\n\s*watcher\.start\(\)",
                          turn), "the turn no longer guards the watcher"
+
+
+class TestALargeDiffDoesNotFreezeTheScreen:
+    """A four-thousand-line edit cost 1.5 seconds *per frame*.
+
+    The card is redrawn on every repaint, and each redraw ran difflib over
+    the whole file twice -- once for the body, once for the counts -- from
+    scratch, then measured the display width of every one of the resulting
+    rows in order to show twelve of them. So the entire UI stopped for as
+    long as a large edit sat on the screen.
+
+    Asserted as work done rather than wall time: a timing test on a shared
+    machine tells you about the machine.
+    """
+
+    def _card(self, lines=400):
+        from wynxo.livediff import DiffCard
+
+        before = "\n".join(f"line {i}" for i in range(lines))
+        after = "\n".join(f"line {i}" + ("!" if i % 3 == 0 else "")
+                          for i in range(lines))
+        card = DiffCard(tool="edit_file", path="big.py", before=before)
+        card.feed(after)
+        card.finish()
+        return card
+
+    def _counting(self, module, name):
+        """Wrap ``module.name``, returning (restore, calls)."""
+        original = getattr(module, name)
+        calls = []
+
+        def counted(*args, **kwargs):
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        setattr(module, name, counted)
+        return (lambda: setattr(module, name, original)), calls
+
+    def test_repainting_does_not_re_diff(self):
+        import difflib
+
+        from wynxo import livediff
+        from wynxo.ui import Glyphs
+
+        card = self._card()
+        card.render(Glyphs(True), 100)          # prime it
+        restore, calls = self._counting(difflib, "unified_diff")
+        try:
+            for _ in range(20):
+                card.render(Glyphs(True), 100)
+        finally:
+            restore()
+        assert calls == [], (
+            f"{len(calls)} diffs for 20 repaints of content that did not "
+            "change")
+        assert livediff is not None
+
+    def test_the_body_and_the_counts_share_one_diff(self):
+        import difflib
+
+        card = self._card()
+        restore, calls = self._counting(difflib, "unified_diff")
+        try:
+            card.counts()
+            card.diff_lines()
+            card.body(100)
+        finally:
+            restore()
+        assert len(calls) == 1, f"{len(calls)} diffs where one would do"
+
+    def test_new_content_is_diffed_again(self):
+        """A cache that does not notice new content is a wrong answer, which
+        is worse than a slow one."""
+        card = self._card()
+        first = card.counts()
+        card.state = "live"
+        card.feed("\nan extra line")
+        card.finish()
+        assert card.counts() != first
+        assert "an extra line" in "\n".join(card.diff_lines())
+
+    def test_only_the_rows_shown_are_measured(self):
+        from wynxo import livediff
+        from wynxo.livediff import MAX_LIVE_ROWS
+
+        card = self._card()
+        card.diff_lines()                        # prime the diff cache
+        restore, calls = self._counting(livediff, "fit")
+        try:
+            rows = card.body(100, MAX_LIVE_ROWS)
+        finally:
+            restore()
+        assert len(rows) == MAX_LIVE_ROWS
+        assert len(calls) <= MAX_LIVE_ROWS, (
+            f"measured {len(calls)} rows to show {len(rows)}")
+
+    def test_the_rows_shown_are_the_same_rows(self):
+        """Slicing before trimming must not change which rows appear."""
+        from wynxo.livediff import MAX_LIVE_ROWS, fit
+
+        card = self._card()
+        lines = card.diff_lines()
+        room = max(8, 100 - 4)
+        expected = [fit(line, room) for line in lines[:MAX_LIVE_ROWS - 1]]
+        expected.append(f"... {len(lines) - MAX_LIVE_ROWS + 1} more lines")
+        assert card.body(100, MAX_LIVE_ROWS) == expected
+
+    def test_a_live_card_still_shows_the_tail(self):
+        from wynxo.livediff import DiffCard, MAX_LIVE_ROWS, fit
+
+        card = DiffCard(tool="write_file", path="x.py", before="")
+        card.feed("\n".join(f"line {i}" for i in range(100)))
+        rows = card.body(100, MAX_LIVE_ROWS)
+        lines = card.diff_lines()
+        room = max(8, 100 - 4)
+        assert rows == [fit(line, room) for line in lines[-MAX_LIVE_ROWS:]]
+
+    def test_a_short_diff_is_shown_whole(self):
+        from wynxo.livediff import DiffCard
+
+        card = DiffCard(tool="write_file", path="x.py", before="")
+        card.feed("one\ntwo\n")
+        card.finish()
+        assert card.body(100) == card.diff_lines()
