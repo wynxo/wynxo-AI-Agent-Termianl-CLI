@@ -1404,3 +1404,137 @@ class TestAJavaProjectGetsATestCommand:
         from wynxo import testing
 
         assert testing.detect(self._project({"README.md": "hi\n"})) is None
+
+
+class TestAQuickCommandDoesNotFillTheConversation:
+    """Eleven rows of pytest preamble, twice per coding turn, for "1 passed".
+
+    A running command's output goes to the screen because silence is worst
+    while you wait -- but a command that finishes in a moment was never
+    waited on, and the conversation is append-only, so its whole transcript
+    stayed there forever. The bar still shows the current line throughout,
+    so it is always visible that something is happening.
+
+    Held rather than dropped: a slow command shows its output from the
+    first line rather than from whenever the clock ran out, and a failure
+    flushes everything, because that is when those lines are the point.
+    """
+
+    def _callbacks(self):
+        import pathlib
+        import tempfile
+
+        from wynxo.cli import TerminalCallbacks
+        from wynxo.layout import Transcript
+        from wynxo.ui import UI
+
+        ui = UI()
+        transcript = Transcript(90)
+        ui.attach(transcript)
+        callbacks = TerminalCallbacks(ui, prompt_session=None)
+        callbacks.workspace = pathlib.Path(tempfile.mkdtemp())
+        return callbacks, transcript
+
+    def _rows(self, transcript, prefix="output line"):
+        import re
+
+        return [re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+                for line in transcript.lines
+                if prefix in re.sub(r"\x1b\[[0-9;]*m", "", line)]
+
+    def _stream(self, callbacks, pace, lines=6, ok=True, result=True):
+        async def go():
+            await callbacks.on_tool_start("shell", "pytest")
+            for i in range(lines):
+                await callbacks.on_tool_output("shell", f"output line {i}")
+                if pace:
+                    await asyncio.sleep(pace)
+            if result:
+                await callbacks.on_tool_result("shell", ok, "$ pytest", "done")
+
+        asyncio.run(go())
+
+    def test_a_quick_command_leaves_nothing_behind(self):
+        callbacks, transcript = self._callbacks()
+        self._stream(callbacks, pace=0)
+        assert self._rows(transcript) == []
+
+    def test_a_slow_command_shows_everything_from_the_start(self):
+        from wynxo.cli import TerminalCallbacks
+
+        callbacks, transcript = self._callbacks()
+        self._stream(callbacks,
+                     pace=TerminalCallbacks.OUTPUT_AFTER_SECONDS / 4,
+                     lines=8)
+        rows = self._rows(transcript)
+        assert rows, "a slow command showed nothing"
+        assert rows[0] == "output line 0", \
+            f"the head was lost; first row was {rows[0]!r}"
+        assert rows[-1] == "output line 7"
+
+    def test_a_failure_flushes_what_was_held(self):
+        """The whole reason holding was safe is that it worked out."""
+        callbacks, transcript = self._callbacks()
+        self._stream(callbacks, pace=0, ok=False)
+        rows = self._rows(transcript)
+        assert rows, "a failing command hid why it failed"
+        assert rows[0] == "output line 0"
+
+    def test_verbose_shows_everything_at_once(self):
+        """Ctrl-T is an explicit ask; it must not be subject to a delay."""
+        callbacks, transcript = self._callbacks()
+        callbacks.verbose_tools = True
+        self._stream(callbacks, pace=0)
+        assert len(self._rows(transcript)) == 6
+
+    def test_the_bar_still_reports_a_held_line(self):
+        """Nothing on the screen must not mean nothing is happening."""
+        callbacks, _transcript = self._callbacks()
+
+        class Bar:
+            def __init__(self):
+                self.detail = ""
+
+            def update(self, **kwargs):
+                self.detail = kwargs.get("detail", self.detail)
+
+            def __getattr__(self, _name):
+                return lambda *a, **k: None
+
+        callbacks.bar = Bar()
+        self._stream(callbacks, pace=0, result=False)
+        assert "output line" in callbacks.bar.detail
+
+    def test_nothing_is_held_across_two_commands(self):
+        callbacks, transcript = self._callbacks()
+        self._stream(callbacks, pace=0)
+
+        async def second():
+            await callbacks.on_tool_start("shell", "ls")
+            await callbacks.on_tool_result("shell", False, "$ ls", "boom")
+
+        asyncio.run(second())
+        assert self._rows(transcript) == [], \
+            "the first command's output leaked into the second's failure"
+
+    def test_the_held_buffer_is_bounded(self):
+        from wynxo.cli import TerminalCallbacks
+
+        callbacks, _transcript = self._callbacks()
+
+        async def go():
+            await callbacks.on_tool_start("shell", "noisy")
+            for i in range(TerminalCallbacks.HELD_OUTPUT_LINES * 3):
+                await callbacks.on_tool_output("shell", f"line {i}")
+
+        asyncio.run(go())
+        assert len(callbacks._held_output) <= TerminalCallbacks.HELD_OUTPUT_LINES
+
+    def test_only_shell_output_is_affected(self):
+        """The rule is about a running command's chatter, nothing else."""
+        import inspect
+
+        from wynxo.cli import TerminalCallbacks
+
+        source = inspect.getsource(TerminalCallbacks._on_tool_output_locked)
+        assert 'if name != "shell":' in source

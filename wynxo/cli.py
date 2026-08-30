@@ -347,6 +347,11 @@ class TerminalCallbacks(Callbacks):
         reading a file and of writing one, and those must not look alike."""
         self.streamer: CodeStreamer | None = None
         self.verbose_tools = False
+        self._tool_started = 0.0
+        """When the running tool began, for deciding whether anybody is
+        waiting on its output."""
+        self._held_output: list[str] = []
+        """Lines from a command too young to be worth showing yet."""
         """Ctrl-T: show full tool output instead of a one-line summary."""
         self.tokens = 0
         self._coder: CodeStreamer | None = None
@@ -486,6 +491,23 @@ class TerminalCallbacks(Callbacks):
         if self.chat is not None:
             self.chat.invalidate()
 
+    OUTPUT_AFTER_SECONDS = 1.5
+    """How long a command must run before its output goes to the screen.
+
+    Under this it reads as instant and its transcript is noise; over it,
+    somebody is watching a progress bar that does not exist yet."""
+    HELD_OUTPUT_LINES = 400
+    """How much of a young command's output to keep for the flush. A bound,
+    so a chatty command cannot grow this without limit before the threshold."""
+
+    def _streaming_output(self) -> bool:
+        """Whether a running command's output belongs on the screen yet."""
+        if self.verbose_tools:
+            return True          # asked for explicitly; show everything
+        if not self._tool_started:
+            return True          # no start time: never hold on a guess
+        return time.monotonic() - self._tool_started >= self.OUTPUT_AFTER_SECONDS
+
     def toggle_verbose(self) -> None:
         self.verbose_tools = not self.verbose_tools
         self._status_message = "Tool output: full" if self.verbose_tools else ""
@@ -583,6 +605,8 @@ class TerminalCallbacks(Callbacks):
 
     async def _on_tool_start_locked(self, name: str, summary: str, event: ToolEvent | None = None) -> None:
         self.active_tool = name
+        self._tool_started = time.monotonic()
+        self._held_output.clear()
         self._end_code()
         if livediff.is_edit(name):
             # The card may already exist: the arguments stream arrives before
@@ -653,6 +677,14 @@ class TerminalCallbacks(Callbacks):
         # scrolls, which is exactly what pinning the panel was meant to stop.
         if name == "todo_write" and ok and self.bar is not None:
             return
+        # Whatever was held back because the command looked too quick to be
+        # worth watching. It worked out is the only reason holding it was
+        # safe; a failure is exactly when those lines are the whole point,
+        # and the result line carries only the first of them.
+        if not ok and self._held_output:
+            for held in self._held_output:
+                self.ui.tool_output(held)
+        self._held_output.clear()
         if self.verbose_tools and output.strip():
             self.ui.tool_result(name, ok, "", "")
             self.ui.code(output[:4000], _LANGUAGE.get(name, "text"))
@@ -748,7 +780,28 @@ class TerminalCallbacks(Callbacks):
         """
         if name != "shell":
             return
+        # Held until somebody is actually waiting. The reason for showing a
+        # running command's output is that silence is worst while you wait --
+        # but a command that finishes in a moment was never waited on, and
+        # dumping its whole transcript into an append-only conversation left
+        # eleven rows of pytest preamble behind for a result of "1 passed",
+        # twice per coding turn. Below the threshold nothing lands here; the
+        # pinned bar below still shows the current line, so it is visible
+        # that something is happening.
+        #
+        # Held rather than dropped, so a slow command still shows its output
+        # from the beginning rather than from whenever the clock ran out.
+        if not self._streaming_output():
+            self._held_output.append(line)
+            del self._held_output[:-self.HELD_OUTPUT_LINES]
+            if self.bar is not None:
+                self.bar.update(detail=line.strip()[:60])
+            return
         self._end_stream()
+        if self._held_output:
+            for held in self._held_output:
+                self.ui.tool_output(held)
+            self._held_output.clear()
         self.ui.tool_output(line)
         if self.bar is not None:
             # Doubles as the keep-alive: the pinned bar now says what the
