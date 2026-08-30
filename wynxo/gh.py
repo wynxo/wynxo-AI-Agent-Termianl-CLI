@@ -145,10 +145,6 @@ def _b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
-def _unb64(text: str) -> str:
-    return base64.b64decode(text).decode("utf-8", "replace")
-
-
 class GitHubClient:
     """A thin wrapper over ``gh api`` for the operations a coding agent
     needs: browse a repo, read and write files, create branches, open PRs.

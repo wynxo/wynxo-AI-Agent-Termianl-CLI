@@ -100,6 +100,20 @@ class GitHubRead(Tool):
             return ToolResult.failure(str(exc), kind=exc.kind,
                                       repo=args.repo, operation=args.operation)
 
+    def _refuse_secret(self, path: str) -> str:
+        """Why this remote path may not be read, or "" if it may.
+
+        Asked of the path alone. There is no local file to consult, and the
+        name is what the local shield keys on anyway -- .env is .env
+        wherever it lives.
+        """
+        from pathlib import PurePosixPath
+
+        from ..secrets import is_secret_file, refusal
+
+        clean = (path or "").strip().lstrip("/")
+        return refusal(clean) if is_secret_file(PurePosixPath(clean)) else ""
+
     # -- the operations ----------------------------------------------------
 
     def _search(self, owner, repo, branch, args) -> ToolResult:
@@ -182,20 +196,30 @@ class GitHubRead(Tool):
     def _read(self, owner, repo, branch, args) -> ToolResult:
         if not args.path:
             return ToolResult.failure("operation 'read' needs a path.")
+        # The same wall a local read hits. A committed .env is a committed
+        # .env whether it is on this disk or on GitHub, and refusing one
+        # while handing over the other put the credential in the model's
+        # context and in the transcript by the longer route.
+        if refused := self._refuse_secret(args.path):
+            return ToolResult.failure(refused, kind="secret")
         blob = self._client.read(owner, repo, args.path, branch,
                                  start=max(0, args.start_line),
                                  end=max(0, args.end_line))
+        # And credentials inside a file that is otherwise fine to read are
+        # masked, exactly as they are locally.
+        text, masked = self.shield.clean(blob.text)
         where = f"{args.repo}:{args.path} ({branch})"
         if blob.ranged:
             where += f" lines {blob.start}-{blob.end} of {blob.total_lines}"
         # The sha goes back with the content because it is what the *edit*
         # has to be based on: github_write needs the version this was read
         # at, not whatever is there when the write happens.
+        note = (f"\n[{masked} credential(s) masked]" if masked else "")
         return ToolResult.success(
-            f"--- {where} ---\n{blob.text}\n"
-            f"--- blob sha: {blob.sha} (pass this to github_write) ---",
+            f"--- {where} ---\n{text}\n"
+            f"--- blob sha: {blob.sha} (pass this to github_write) ---{note}",
             sha=blob.sha, path=args.path, branch=branch,
-            lines=blob.total_lines, ranged=blob.ranged)
+            lines=blob.total_lines, ranged=blob.ranged, masked=masked)
 
 
 class GitHubWriteInput(Schema):

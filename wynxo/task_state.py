@@ -35,7 +35,6 @@ class TaskStateMachine:
         self.state = TaskState.IDLE
         self.objective = ""
         self.root_cause = ""
-        self.relevant_files: list[str] = []
         self.changed_files: list[str] = []
         self.failures: list[str] = []
         self.successes: list[str] = []
@@ -95,11 +94,26 @@ class TaskStateMachine:
         self.root_cause = cause.strip()
 
     def add_file(self, path: str, changed: bool = False) -> None:
-        target = self.changed_files if changed else self.relevant_files
-        if path and path not in target:
+        """Record a file this turn touched.
+
+        One list per kind. A file that was only looked at used to be
+        appended to two lists that were kept in lockstep and never read
+        apart -- and neither of them reached the model or the screen, so the
+        whole of it was bookkeeping for nobody. What was inspected is worth
+        keeping, because a stuck turn benefits from being told where it has
+        already been; the second copy was not.
+        """
+        if not path:
+            return
+        target = self.changed_files if changed else self.inspected_files
+        if path not in target:
             target.append(path)
-        if path and not changed and path not in self.inspected_files:
-            self.inspected_files.append(path)
+
+    @property
+    def relevant_files(self) -> list[str]:
+        """What the turn has looked at. Kept as a name because it reads
+        better at the call sites that ask the question that way."""
+        return self.inspected_files
 
     def record_verification(self, check: str) -> None:
         if check and check not in self.verification:
@@ -138,6 +152,12 @@ class TaskStateMachine:
                 lines.append(f"    - {failure[:200]}")
         if self.changed_files:
             lines.append("  changed files: " + ", ".join(self.changed_files[-6:]))
+        if self.inspected_files:
+            # Recorded all along and never shown to anybody. A turn that is
+            # repeating itself is exactly the one that benefits from being
+            # told where it has already looked.
+            lines.append("  already inspected: "
+                         + ", ".join(self.inspected_files[-8:]))
         if self.root_cause:
             lines.append(f"  root cause so far: {self.root_cause[:200]}")
         lines.append("")
@@ -189,7 +209,6 @@ class TaskStateMachine:
         self.state = TaskState.IDLE
         self.objective = ""
         self.root_cause = ""
-        self.relevant_files = []
         self.changed_files = []
         self.failures = []
         self.successes = []

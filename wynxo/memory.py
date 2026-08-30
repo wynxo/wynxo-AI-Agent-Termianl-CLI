@@ -239,7 +239,20 @@ class Memory:
             return False, "User memory requires an explicit user request via /memory add."
         return self.file_for(scope).append(note)
 
-    def forget(self, pattern: str, scope: str = "project") -> tuple[int, str]:
+    def forget(self, pattern: str, scope: str = "project",
+               explicit: bool = False) -> tuple[int, str]:
+        """Drop entries, under the same rule that governs writing them.
+
+        The guard used to sit on remember() alone, which left the model
+        unable to add a personal fact and free to delete one -- and deletion
+        is the more destructive of the two, is silent, and has no undo. A
+        model that is not trusted to write user memory is not trusted to
+        remove it either.
+        """
+        if scope.strip().lower() in ("user", "me", "global") \
+                and not explicit and self._agent_write:
+            return 0, ("Forgetting user memory requires an explicit user "
+                       "request via /memory forget.")
         return self.file_for(scope).forget(pattern)
 
     def counts(self) -> tuple[int, int]:

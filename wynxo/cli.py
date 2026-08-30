@@ -72,7 +72,7 @@ LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail",
              "ctrl+d": "diff", "ctrl+c": "stop"}
 from .platforms import (
     is_dumb_terminal, ollama_server_help as server_help,
-    suspicious_workspace, terminal_height, terminal_width)
+    suspicious_workspace, terminal_width)
 from .wizard import probe, run_wizard
 
 # Short forms for the prefixes that are genuinely ambiguous. An exact command
@@ -924,21 +924,6 @@ class TerminalCallbacks(Callbacks):
             if answer in ("q", "quit", "stop"):
                 return Decision.ABORT
             self.ui.warn("y, a, n or q.")
-
-
-def _menu_rows() -> int:
-    """How many rows the completion menu may reserve, given the window.
-
-    The prompt itself and its toolbar need room too, so on a short terminal
-    the menu gives way: a suggestion list is a convenience, and a prompt
-    that cannot be drawn at all is not.
-    """
-    rows = terminal_height()
-    if rows >= 14:
-        return 6
-    if rows >= 10:
-        return 2
-    return 0
 
 
 class _LazyPromptSession:
@@ -4315,9 +4300,9 @@ class Repl:
             return True
 
         if action in ("forget", "remove") and rest:
-            count, message = memory.forget(rest)
+            count, message = memory.forget(rest, explicit=True)
             if not count:
-                count, message = memory.forget(rest, "user")
+                count, message = memory.forget(rest, "user", explicit=True)
             self.ui.info(message)
             self.agent.refresh_system_prompt()
             return True

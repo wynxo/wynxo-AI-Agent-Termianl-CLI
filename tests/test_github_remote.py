@@ -474,3 +474,51 @@ class TestNotAskingTwiceForTheSameThing:
         client.forget("o", "r")
         client.repo_default_branch("o", "other")
         assert len([c for c in github.calls if "default_branch" in c]) == 2
+
+
+class TestARemoteFileHitsTheSameWallAsALocalOne:
+    """A committed .env is a committed .env whether it is on this disk or on
+    GitHub. The local read refused one and the remote read handed it over,
+    which put the credential in the model's context and in the transcript by
+    the longer route."""
+
+    SECRET = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY\n"
+    IN_CODE = "TOKEN = 'ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789'\nx = 1\n"
+
+    def _read(self, github, path, body):
+        github.files[path] = (body, "sha-x")
+        read, _write, _c = _tools()
+        return _run(read, operation="read", repo="o/r", path=path)
+
+    @pytest.mark.parametrize("path", [".env", ".env.local", "id_rsa",
+                                      "config/.env.production"])
+    def test_a_credentials_file_is_refused(self, github, path):
+        result = self._read(github, path, self.SECRET)
+        assert not result.ok, f"{path} was handed over"
+        assert "wJalrXUtnFEMI" not in result.output
+        assert result.metadata["kind"] == "secret"
+
+    def test_the_local_tool_refuses_the_same_name(self, github):
+        """The premise: these two must not disagree."""
+        import pathlib
+        import tempfile
+
+        from wynxo.tools.files import ReadFile
+
+        workspace = pathlib.Path(tempfile.mkdtemp())
+        (workspace / ".env").write_text(self.SECRET)
+        local = ReadFile(workspace)
+        assert not asyncio.run(local.run(local.Input(path=".env"))).ok
+
+    def test_a_credential_inside_an_ordinary_file_is_masked(self, github):
+        result = self._read(github, "src/app.py", self.IN_CODE)
+        assert result.ok
+        assert "ghp_aBcDeFgHiJkLmNoP" not in result.output
+        assert result.metadata["masked"] == 1
+        assert "x = 1" in result.output, "the rest of the file still arrives"
+
+    def test_an_ordinary_file_is_untouched(self, github):
+        result = self._read(github, "README.md", "# hello\nworld\n")
+        assert result.ok
+        assert "world" in result.output
+        assert result.metadata["masked"] == 0
