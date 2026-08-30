@@ -817,7 +817,16 @@ class TerminalCallbacks(Callbacks):
     def _resume_live(self) -> None:
         if self.bar is not None:
             self.bar.start()
-        if self.watcher is not None:
+        # Only where the watcher was the reader to begin with. It holds the
+        # terminal in cbreak mode and reads stdin directly, which is right
+        # for the scrolling prompt and catastrophic under the layout, where
+        # prompt_toolkit's application is running the whole time and owns the
+        # input. Started here anyway, every permission prompt left a second
+        # reader racing the composer for the rest of the turn -- and it won
+        # often enough that the first character of the next message was
+        # simply gone. The turn only ever starts it under the same condition;
+        # this is the site that forgot.
+        if self.watcher is not None and self.chat is None:
             self.watcher.start()
 
     async def _ask(self, name: str, summary: str, preview: str) -> Decision:
@@ -1322,15 +1331,21 @@ class Repl:
         show typing while nothing is being written.
         """
         lines: list[str] = []
+        state = self.agent.task_state.state.value
+        running = not motion.task_is_over(state)
         card = self.callbacks.card
-        if card is not None and card.live:
+        # A card is live only while there is a turn to be live in. The card
+        # is closed by that turn's teardown, and between a cancellation and
+        # the teardown there is a repaint -- "Interrupted. The conversation
+        # is intact" is printed first -- so the overlay went on saying
+        # "streaming..." underneath a message that the work had stopped.
+        if card is not None and card.live and running:
             lines.extend(card.render(self.ui.g, self.ui.width))
             lines.append("")
         lines.extend(self.callbacks.plan_lines)
         if not self.pet.enabled:
             return lines
-        scene = motion.scene_for_state(
-            self.agent.task_state.state.value, self.callbacks.active_tool)
+        scene = motion.scene_for_state(state, self.callbacks.active_tool)
         frames = motion.select(scene, unicode=self.ui.g.unicode,
                                width=self.ui.width,
                                reduced=not self.config.animations)

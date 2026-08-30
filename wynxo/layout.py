@@ -511,6 +511,28 @@ class ChatLayout:
             self.buffer.reset()
             self.invalidate()
 
+    def cancel_ask(self) -> None:
+        """Abandon the open question, as Ctrl-C.
+
+        Raised into whoever is awaiting rather than returned as a value:
+        every caller of ask() already has an ``except (EOFError,
+        KeyboardInterrupt)`` written for exactly this, and the permission
+        prompt turns it into Decision.ABORT. Those handlers were unreachable
+        -- nothing under the layout ever raised -- so Ctrl-C at a blocking
+        permission prompt did nothing at all, which is the moment somebody
+        most wants a way out.
+
+        EOFError rather than KeyboardInterrupt, though both are caught:
+        KeyboardInterrupt is a BaseException, and asyncio does not contain
+        those the way it contains ordinary exceptions -- setting one on a
+        future propagates it out through the event loop itself, which tore
+        down the whole application instead of the question. EOFError is also
+        the more honest description: the answer is never coming.
+        """
+        ask = self._ask
+        if ask is not None and not ask["future"].done():
+            ask["future"].set_exception(EOFError("the question was abandoned"))
+
     async def pick(self, title: str, choices: list, default: int = 0):
         """An arrow-key chooser, drawn as an overlay in this application.
 
@@ -532,6 +554,10 @@ class ChatLayout:
 
     def picking(self) -> bool:
         return self._picker is not None
+
+    def asking(self) -> bool:
+        """Whether a question is currently borrowing the composer."""
+        return self._ask is not None
 
     def _picker_fragments(self):
         picker = self._picker
@@ -622,6 +648,13 @@ class ChatLayout:
         def _(event):
             if not self._picker["future"].done():
                 self._picker["future"].set_result(None)
+
+        asking = Condition(self.asking)
+
+        @keys.add("c-c", filter=asking)
+        @keys.add("escape", filter=asking)
+        def _(event):
+            self.cancel_ask()
 
         @keys.add("f2")
         def _(event):

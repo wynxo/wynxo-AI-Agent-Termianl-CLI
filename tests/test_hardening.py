@@ -240,3 +240,266 @@ class TestAnEndpointThatIsNotTheApiDoesNotCrashStartup:
             return version
 
         assert asyncio.run(go()) == "0.5.7"
+
+
+class TestTheOverlayCannotContradictTheTranscript:
+    """The companion typed underneath the word "Interrupted".
+
+    The running tool and the live edit card are both forgotten by a turn's
+    teardown -- but the teardown is not the first thing that happens. On
+    Ctrl-C the REPL prints "Interrupted. The conversation is intact" *before*
+    its finally block, and that print repaints the layout. So for that frame
+    the overlay drew the cat coding and a card saying "streaming...", under
+    a message saying the work had stopped.
+
+    Fixed where the two facts are combined rather than by reordering the
+    teardown: a state that says the task is over is a statement about the
+    whole task, and outranks a tool that by then is not running. That makes
+    the contradiction impossible regardless of what order anything else
+    happens in.
+    """
+
+    def _repl(self):
+        import pathlib
+        import tempfile
+
+        from wynxo.cli import Repl, TerminalCallbacks
+        from wynxo.layout import Transcript
+        from wynxo.pet import Pet
+        from wynxo.task_state import TaskStateMachine
+        from wynxo.ui import UI
+
+        ui = UI()
+        ui.attach(Transcript(80))
+        repl = Repl.__new__(Repl)
+        repl.ui = ui
+        repl.callbacks = TerminalCallbacks(ui, prompt_session=None)
+        repl.callbacks.workspace = pathlib.Path(tempfile.mkdtemp())
+        repl.pet = Pet()
+        repl._pet_frame = 0
+        repl.config = type("Config", (), {"animations": True})()
+        repl.agent = type("Agent", (), {"task_state": TaskStateMachine()})()
+        return repl
+
+    def _mid_edit(self):
+        from wynxo.task_state import TaskState
+
+        repl = self._repl()
+        repl.agent.task_state.begin("fix the bug")
+        repl.agent.task_state.transition(TaskState.EXECUTING)
+        asyncio.run(repl.callbacks.on_tool_start("write_file", "a.py"))
+        asyncio.run(repl.callbacks.on_code("half an edit\n"))
+        return repl
+
+    def test_the_card_is_shown_while_the_edit_is_running(self):
+        """The fix must not cost the thing it is protecting."""
+        assert "streaming" in "\n".join(self._mid_edit()._chat_overlay())
+
+    def test_the_pet_codes_while_the_edit_is_running(self):
+        from wynxo import motion
+
+        assert motion.scene_for_state("executing", "write_file").name == "coding"
+
+    def test_the_card_stops_the_moment_the_task_is_over(self):
+        from wynxo.task_state import TaskState
+
+        repl = self._mid_edit()
+        repl.agent.task_state.transition(TaskState.CANCELLED)
+        drawn = "\n".join(repl._chat_overlay())
+        assert "streaming" not in drawn
+        assert "write_file" not in drawn
+
+    def test_a_leftover_tool_cannot_animate_a_finished_task(self):
+        from wynxo import motion
+
+        for state in ("cancelled", "failed", "completed", "idle"):
+            for tool in ("write_file", "grep", "run_tests", "shell"):
+                scene = motion.scene_for_state(state, tool)
+                assert scene.name not in {"coding", "reading", "searching",
+                                          "running", "testing", "working"}, \
+                    f"{state} + {tool} showed {scene.name}"
+
+    def test_a_running_task_still_follows_the_tool(self):
+        from wynxo import motion
+
+        for state in ("executing", "thinking", "planning", "recovering"):
+            assert motion.scene_for_state(state, "edit_file").name == "coding"
+
+    def test_task_is_over_agrees_with_the_state_machine(self):
+        """The two must not drift apart: the overlay uses this to decide
+        whether anything is in flight at all."""
+        from wynxo import motion
+        from wynxo.task_state import TaskState
+
+        over = {TaskState.IDLE, TaskState.COMPLETED, TaskState.FAILED,
+                TaskState.CANCELLED}
+        for state in TaskState:
+            assert motion.task_is_over(state.value) is (state in over), state
+
+
+class TestAPermissionPromptCanBeAbandoned:
+    """Ctrl-C at a blocking permission prompt did nothing at all.
+
+    ``_ask`` has always had ``except (EOFError, KeyboardInterrupt): return
+    Decision.ABORT`` written for exactly this. Under the layout that handler
+    was unreachable, because ChatLayout.ask() had no way to end other than
+    an answer -- so the agent sat waiting on a question with no way out
+    except typing one of four letters, at the moment somebody most wants
+    out.
+    """
+
+    def _layout(self):
+        from wynxo.layout import ChatLayout
+
+        return ChatLayout(width=80, height=24)
+
+    def test_cancelling_raises_into_the_asker(self):
+        async def go():
+            layout = self._layout()
+            asked = asyncio.ensure_future(layout.ask("[y] yes [n] no:"))
+            await asyncio.sleep(0)
+            layout.cancel_ask()
+            return await asked
+
+        try:
+            asyncio.run(go())
+        except EOFError:
+            return
+        raise AssertionError("the question could not be abandoned")
+
+    def test_it_raises_something_asyncio_can_contain(self):
+        """KeyboardInterrupt is a BaseException, and asyncio does not contain
+        those the way it contains ordinary exceptions: set on a future it
+        propagates out through the event loop itself and takes the whole
+        application down rather than the question."""
+        import inspect
+
+        from wynxo.layout import ChatLayout
+
+        source = inspect.getsource(ChatLayout.cancel_ask)
+        assert "set_exception(EOFError" in source
+        assert "set_exception(KeyboardInterrupt" not in source
+
+    def test_the_question_is_closed_afterwards(self):
+        async def go():
+            layout = self._layout()
+            asked = asyncio.ensure_future(layout.ask("[y] yes [n] no:"))
+            await asyncio.sleep(0)
+            layout.cancel_ask()
+            try:
+                await asked
+            except EOFError:
+                pass
+            return layout.asking(), layout.buffer.text
+
+        asking, text = asyncio.run(go())
+        assert asking is False, "the composer is still borrowed"
+        assert text == "", "the abandoned answer was left in the composer"
+
+    def test_cancelling_when_nothing_is_asked_is_harmless(self):
+        self._layout().cancel_ask()
+
+    def test_an_answer_still_wins_over_a_later_cancel(self):
+        async def go():
+            layout = self._layout()
+            asked = asyncio.ensure_future(layout.ask("[y] yes [n] no:"))
+            await asyncio.sleep(0)
+            layout.buffer.text = "n"
+            layout._accept(layout.buffer)
+            layout.cancel_ask()
+            return await asked
+
+        assert asyncio.run(go()) == "n"
+
+    def test_the_permission_prompt_turns_it_into_an_abort(self):
+        from wynxo.cli import TerminalCallbacks
+        from wynxo.layout import Transcript
+        from wynxo.permissions import Decision
+        from wynxo.ui import UI
+
+        ui = UI()
+        ui.attach(Transcript(80))
+
+        class Chat:
+            async def ask(self, question, default=""):
+                raise EOFError("abandoned")
+
+            def invalidate(self):
+                pass
+
+        # A prompt_session must exist or ask_permission short-circuits to
+        # ALLOW -- that is the non-interactive path, not this one.
+        callbacks = TerminalCallbacks(ui, prompt_session=Chat())
+        callbacks.chat = Chat()
+        assert asyncio.run(
+            callbacks.ask_permission("shell", "rm -rf build", "")) \
+            is Decision.ABORT
+
+
+class TestOnlyOneThingReadsTheKeyboard:
+    """Every permission prompt left a second reader racing the composer.
+
+    The KeyWatcher holds the terminal in cbreak mode and reads stdin
+    directly. That is right for the scrolling prompt, where nothing else is
+    reading during a turn, and catastrophic under the layout, where
+    prompt_toolkit's application runs the whole time and owns the input --
+    which is why the turn only ever starts it when there is no layout.
+    ``_resume_live`` started it unconditionally, so answering (or
+    abandoning) a permission prompt armed a rival reader for the rest of the
+    turn, and it won often enough that the first character of the user's
+    next message was simply gone.
+    """
+
+    def _callbacks(self, chat):
+        from wynxo.cli import TerminalCallbacks
+        from wynxo.layout import Transcript
+        from wynxo.ui import UI
+
+        ui = UI()
+        ui.attach(Transcript(80))
+        callbacks = TerminalCallbacks(ui, prompt_session=None)
+        callbacks.chat = chat
+        callbacks.watcher = self._Watcher()
+        return callbacks
+
+    class _Watcher:
+        def __init__(self):
+            self.running = False
+            self.starts = 0
+
+        def start(self):
+            self.running = True
+            self.starts += 1
+
+        def stop(self):
+            self.running = False
+
+    def test_the_layout_keeps_the_keyboard_to_itself(self):
+        callbacks = self._callbacks(chat=object())
+        callbacks._resume_live()
+        assert callbacks.watcher.starts == 0, (
+            "a second stdin reader was started while the layout owned the "
+            "input")
+
+    def test_the_scrolling_prompt_still_gets_its_watcher_back(self):
+        """The fix must not cost the fallback path, where the watcher *is*
+        the reader and stopping it for good would kill the mid-turn keys."""
+        callbacks = self._callbacks(chat=None)
+        callbacks._suspend_live()
+        callbacks._resume_live()
+        assert callbacks.watcher.running
+
+    def test_the_turn_and_the_prompt_agree_on_the_condition(self):
+        """Two sites start the watcher. They disagreed once; a test is
+        cheaper than finding out again."""
+        import inspect
+
+        from wynxo.cli import Repl, TerminalCallbacks
+
+        resume = inspect.getsource(TerminalCallbacks._resume_live)
+        turn = inspect.getsource(Repl._turn_locked)
+        assert "self.chat is None" in resume
+        import re
+
+        assert re.search(r"if self\.chat is None:\s*\n\s*watcher\.start\(\)",
+                         turn), "the turn no longer guards the watcher"

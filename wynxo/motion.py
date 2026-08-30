@@ -281,6 +281,19 @@ TOOL_SCENES: dict[str, str] = {
 }
 
 
+_OVER = frozenset({"idle", "completed", "failed", "cancelled", ""})
+"""States that mean there is no task running, whatever a leftover tool says."""
+
+
+def task_is_over(state: str) -> bool:
+    """Whether the task state says there is nothing in flight.
+
+    Shared with the overlay so the companion and the live edit card cannot
+    disagree about whether anything is happening.
+    """
+    return str(state).strip().lower() in _OVER
+
+
 def scene_for_state(state: str, tool: str = "") -> Scene:
     """The scene for what the agent is really doing.
 
@@ -289,8 +302,15 @@ def scene_for_state(state: str, tool: str = "") -> Scene:
     same. Anything unrecognised falls back to the state, and an unrecognised
     state falls back to idle -- a companion that does something plausible on
     an unknown event is better than one that raises inside a repaint.
+
+    It wins only while there is a task, though. The tool is forgotten by the
+    turn's teardown, and between a cancellation and that teardown there is a
+    repaint -- the "Interrupted. The conversation is intact" line is printed
+    first -- so the companion sat there typing underneath a message saying
+    the work had stopped. A state that says the task is over is a statement
+    about the whole task, and outranks a tool that by then is not running.
     """
-    if tool:
+    if tool and str(state).strip().lower() not in _OVER:
         name = TOOL_SCENES.get(tool.strip().lower())
         if name:
             return SCENES[name]
