@@ -71,9 +71,19 @@ class TestPreview:
         assert motion.preview("thinking") == motion.preview("thinking")
 
     def test_preview_of_a_looping_scene_cycles(self):
-        strip = motion.preview("thinking", n=5)
-        # Five frames of a three-frame loop: the cycle wraps.
-        assert strip.count("≽") >= 5
+        """Five frames of a three-frame loop: the cycle wraps.
+
+        Counted structurally rather than by looking for a glyph the art
+        happens to use, so this keeps asking the question when the character
+        is redrawn -- which is what happened to the version of this test
+        that counted the old face."""
+        scene = motion.scene_for("thinking")
+        assert 1 < len(scene.frames) < 5, "the premise: a short loop"
+        one = motion.preview("thinking", n=1)
+        five = motion.preview("thinking", n=5)
+        width = max(len(line) for line in one.split("\n"))
+        widest = max(len(line) for line in five.split("\n"))
+        assert widest >= width * 4, "the strip did not lay out five frames"
 
     def test_preview_of_a_one_shot_shows_each_frame_once(self):
         strip = motion.preview("sparkle")
@@ -81,4 +91,4 @@ class TestPreview:
 
     def test_preview_respects_reduced_motion(self):
         scene = motion.scene_for("thinking")
-        assert motion.select(scene, reduced=True) == (scene.frames[0],)
+        assert motion.select(scene, reduced=True) == (scene.frames[0],)

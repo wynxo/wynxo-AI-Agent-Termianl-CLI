@@ -37,6 +37,26 @@ class Scene:
 # read as the same character as the one in the status bar, which is what
 # makes a showcase look like one product rather than a clip-art drawer.
 
+
+def _from_companion(key: str, state) -> Scene:
+    """A showcase Scene backed by the companion's own staging.
+
+    The character used to be drawn twice -- a two-line face here, a
+    different one in the status bar -- and the two drifted, so /animate
+    showed something the running application never displayed. There is one
+    set of frames now; this is the view of it that /animate and /pet want.
+    """
+    from . import companion
+
+    return Scene(
+        key,
+        frames=companion.frames_for(state),
+        label=companion.label_for(state),
+        fps=5.0,
+        ascii=companion.frames_for(state, unicode=False),
+    )
+
+
 SCENES: dict[str, Scene] = {
     # Small 3-line scenes for the showcase (/pet show, /animate). The face
     # is the same one the status bar uses, with a tiny body hint per state.
@@ -179,6 +199,27 @@ SCENES: dict[str, Scene] = {
 }
 
 # Pet moods -> scene, so one lookup answers "what is the cat doing right now".
+# The character's own states come from companion.py, which is where the
+# staging lives. Anything left in SCENES above is showcase decoration --
+# sparkle and the like -- which is not the character and never was.
+from .companion import State as _CompanionState  # noqa: E402
+
+for _key, _state in (
+    ("idle", _CompanionState.IDLE),
+    ("thinking", _CompanionState.THINKING),
+    ("searching", _CompanionState.SEARCHING),
+    ("reading", _CompanionState.READING),
+    ("coding", _CompanionState.CODING),
+    ("working", _CompanionState.CODING),
+    ("testing", _CompanionState.TESTING),
+    ("happy", _CompanionState.SUCCESS),
+    ("error", _CompanionState.ERROR),
+    ("running", _CompanionState.TESTING),
+):
+    SCENES[_key] = _from_companion(_key, _state)
+del _key, _state
+
+
 MOOD_SCENES = {
     "idle": "idle", "thinking": "thinking", "working": "coding",
     "reading": "reading", "searching": "searching", "testing": "testing",

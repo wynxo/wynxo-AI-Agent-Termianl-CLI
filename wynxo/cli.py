@@ -32,7 +32,7 @@ from .events import ToolEvent
 from .task_state import TaskState
 from .discovery import Discovery
 from .config import Config, Endpoint, data_dir, is_configured, load, normalise_url
-from . import motion
+from . import companion
 from .corner import CornerPlan
 from . import livediff
 from .layout import ChatLayout
@@ -1384,8 +1384,21 @@ class Repl:
         show typing while nothing is being written.
         """
         lines: list[str] = []
-        state = self.agent.task_state.state.value
-        running = not motion.task_is_over(state)
+        task = self.agent.task_state.state.value
+        # Voice is real state too: dictation is running, or she is talking.
+        # Both are things the person is waiting on, which is exactly when a
+        # companion that shows it is worth having.
+        # getattr, not attribute access: the overlay is reached on a Repl
+        # built with __new__ from several paths -- the same reason
+        # _live_chat() exists -- and a companion frame is not worth an
+        # AttributeError.
+        dictation = getattr(self, "_dictation_task", None)
+        speaker = getattr(self, "speaker", None)
+        state = companion.state_for(
+            task, self.callbacks.active_tool,
+            listening=dictation is not None and not dictation.done(),
+            speaking=bool(speaker and speaker.is_speaking()))
+        running = not companion.is_over(state)
         card = self.callbacks.card
         # A card is live only while there is a turn to be live in. The card
         # is closed by that turn's teardown, and between a cancellation and
@@ -1398,20 +1411,20 @@ class Repl:
         lines.extend(self.callbacks.plan_lines)
         if not self.pet.enabled:
             return lines
-        scene = motion.scene_for_state(state, self.callbacks.active_tool)
-        frames = motion.select(scene, unicode=self.ui.g.unicode,
-                               width=self.ui.width,
-                               reduced=not self.config.animations)
         # The frame advances per repaint, not on a clock of its own. A
-        # scheduler here would keep animating through a stall; riding the
-        # repaint means the companion moves exactly while the agent does.
+        # scheduler here would keep animating through a stall, showing
+        # typing while nothing is being written; riding the repaint means
+        # the companion moves exactly while the agent does, and stops the
+        # instant it stops.
         self._pet_frame += 1
-        frame = frames[(self._pet_frame // 3) % len(frames)]
         if lines:
             lines.append("")
-        lines.extend(f"  {row}" for row in frame.splitlines())
-        if scene.label:
-            lines.append(f"  {scene.label}")
+        lines.extend(companion.panel(
+            state, self._pet_frame // 3,
+            unicode=self.ui.g.unicode,
+            reduced=not self.config.animations,
+            width=min(self.ui.width, companion.WIDTH + 4),
+            title=self.pet.name))
         return lines
 
     async def _loop(self) -> int:
