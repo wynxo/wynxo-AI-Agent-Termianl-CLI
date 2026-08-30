@@ -584,3 +584,126 @@ class TestPipeTransportsAreActuallyRetired:
         process = shell_module._BACKGROUND[job_id]["process"]
         shell_module.shutdown_background()
         assert process._transport._closed, "the stdout pipe was left open"
+
+
+class TestTerminalControlCannotBeSmuggledIn:
+    """``sanitise`` was opt-in, and seven display helpers did not opt in.
+
+    ``tool_start`` drew the model's own tool arguments raw on every single
+    tool call. ``error`` drew whatever message it was handed. ``highlight``
+    and ``code_line`` drew file contents. ``rule``, ``table``, ``todos`` and
+    ``shorten_path`` drew whatever they were given. So a file in the
+    workspace containing ESC ] 52 ; c ; <base64> BEL wrote to the user's
+    clipboard when the agent read it, ESC [ ? 1049 h switched the terminal
+    to its alternate screen, and ESC [ 1 ; 5 r pinned a scroll region and
+    wedged the display. None of it needs a hostile model -- a log with
+    colour codes in it is enough.
+
+    The fix is at rich's own render seam rather than at each call site, so
+    a helper added later is covered without knowing about any of this.
+    """
+
+    PAYLOAD = "\x1b]52;c;aGVsbG8=\x07 \x1b[?1049h \x1b[1;5r \x1b[2J \x1b[H"
+    DANGEROUS = {"clipboard write": "\x1b]52;",
+                 "alternate screen": "\x1b[?1049h",
+                 "scroll region": "\x1b[1;5r",
+                 "erase display": "\x1b[2J",
+                 "cursor home": "\x1b[H"}
+
+    def _written(self, draw):
+        """What actually reaches the file a Console writes to."""
+        import io
+
+        from wynxo.ui import UI
+
+        ui = UI()
+        sink = io.StringIO()
+        ui.console.file = sink
+        ui.console._force_terminal = True
+        draw(ui)
+        return sink.getvalue()
+
+    def _assert_clean(self, drawn):
+        for name, sequence in self.DANGEROUS.items():
+            assert sequence not in drawn, f"{name} reached the terminal"
+
+    def test_every_helper_that_draws_foreign_text(self):
+        payload = self.PAYLOAD
+        for label, draw in [
+            ("info", lambda u: u.info(payload)),
+            ("warn", lambda u: u.warn(payload)),
+            ("error", lambda u: u.error(payload)),
+            ("success", lambda u: u.success(payload)),
+            ("assistant_markdown", lambda u: u.assistant_markdown(payload)),
+            ("tool_start", lambda u: u.tool_start("read_file", payload)),
+            ("tool_result",
+             lambda u: u.tool_result("read_file", True, payload, payload)),
+            ("tool_output", lambda u: u.tool_output(payload)),
+            ("diff", lambda u: u.diff("--- a\n+++ b\n+" + payload)),
+            ("code", lambda u: u.code(payload, "python")),
+            ("todos", lambda u: u.todos(payload)),
+            ("highlight",
+             lambda u: u.console.print(u.highlight(payload, "python"))),
+            ("code_line",
+             lambda u: u.console.print(u.code_line(payload, "python"))),
+            ("table", lambda u: u.table(["c"], [[payload]], payload)),
+            ("rule", lambda u: u.rule(payload)),
+            ("shorten_path",
+             lambda u: u.console.print(u.shorten_path(payload))),
+        ]:
+            drawn = self._written(draw)
+            for name, sequence in self.DANGEROUS.items():
+                assert sequence not in drawn, f"{label} let {name} through"
+
+    def test_the_transcript_console_is_covered_too(self):
+        _, transcript = _attached()
+        transcript.console.print("tool said: " + self.PAYLOAD)
+        self._assert_clean("\n".join(transcript.lines))
+
+    def _console(self):
+        import io
+
+        from wynxo.ui import SafeConsole
+
+        sink = io.StringIO()
+        return SafeConsole(file=sink, width=80, highlight=False,
+                           force_terminal=True, color_system="truecolor"), sink
+
+    def test_wynxo_keeps_its_own_colour(self):
+        """A scrub that took the styling with it would be a different bug.
+        rich holds its own styling in the segment's style rather than in its
+        text, which is exactly what makes the two separable."""
+        import re
+
+        console, sink = self._console()
+        console.print("[bold red]a warning[/]")
+        assert re.search(r"\x1b\[[0-9;]*m", sink.getvalue()), \
+            "styling was stripped"
+
+    def test_ordinary_text_survives_intact(self):
+        console, sink = self._console()
+        console.print("a\tb")
+        # rich expands the tab into spaces before any of this; what matters
+        # is that the content is all still there.
+        assert "a" in sink.getvalue() and "b" in sink.getvalue()
+        assert sink.getvalue().endswith("\n")
+
+    def test_rich_own_control_segments_are_left_alone(self):
+        """Cursor moves are what a Live display is made of. Scrubbing those
+        would break the activity bar rather than protect anything."""
+        from rich.segment import Segment
+
+        from wynxo.ui import _scrubbed
+
+        control = Segment("\x1b[2J", None, [(3,)])
+        assert list(_scrubbed([control])) == [control]
+
+    def test_a_helper_added_later_is_covered(self):
+        """The point of fixing it at the render seam: this renderable has
+        never heard of sanitise()."""
+        from rich.panel import Panel
+        from rich.text import Text
+
+        drawn = self._written(
+            lambda u: u.console.print(Panel(Text(self.PAYLOAD))))
+        self._assert_clean(drawn)

@@ -131,6 +131,49 @@ def sanitise(text: str) -> str:
     return _CONTROL.sub("", text)
 
 
+class SafeConsole(Console):
+    """A Console that cannot be talked into writing control sequences.
+
+    ``sanitise`` above is opt-in: every call site that draws somebody else's
+    text has to remember it, and seven of them did not. ``tool_start`` drew
+    the model's own tool arguments raw on every single tool call;
+    ``error`` drew the message it was handed; ``highlight`` and
+    ``code_line`` drew file contents; ``rule``, ``table`` and ``todos`` drew
+    whatever they were given. A file in the workspace containing
+    ``ESC ] 52 ; c ; <base64> BEL`` wrote to the user's clipboard when the
+    agent read it; ``ESC [ ? 1049 h`` switched the terminal to its alternate
+    screen; ``ESC [ 1 ; 5 r`` pinned a scroll region and wedged the display.
+    None of that needs a hostile model -- a log with colour codes in it is
+    enough.
+
+    Doing it here instead makes it structural. rich renders everything, of
+    every kind, down to segments before it writes, and it keeps its *own*
+    styling in ``Segment.style`` rather than in the text -- so scrubbing the
+    text of every non-control segment removes exactly what somebody else put
+    there and nothing wynxo chose. A display helper added tomorrow is
+    covered without knowing this exists.
+    """
+
+    def _render_buffer(self, buffer) -> str:
+        return super()._render_buffer(_scrubbed(buffer))
+
+
+def _scrubbed(buffer):
+    """Segments with foreign control characters removed.
+
+    Control segments are rich's own cursor moves -- what a Live display is
+    made of -- and are passed through untouched. They carry no text from
+    anywhere else.
+    """
+    for segment in buffer:
+        if segment.control or not segment.text:
+            yield segment
+        elif _CONTROL.search(segment.text):
+            yield segment._replace(text=_CONTROL.sub("", segment.text))
+        else:
+            yield segment
+
+
 def _supports_unicode() -> bool:
     encoding = (getattr(sys.stdout, "encoding", "") or "").lower()
     if "utf" in encoding:
@@ -222,7 +265,7 @@ class _SaidOnce:
 
 class UI:
     def __init__(self, theme: str = "purple", show_thinking: bool = False):
-        self.console = Console(
+        self.console = SafeConsole(
             highlight=False,
             soft_wrap=False,
             # legacy_windows=False forces modern VT output on Windows Terminal.

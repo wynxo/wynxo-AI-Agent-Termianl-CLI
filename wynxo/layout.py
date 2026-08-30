@@ -139,9 +139,9 @@ class Transcript:
         self.on_change: Callable[[int], None] | None = None
 
     def _make_console(self):
-        from rich.console import Console
+        from .ui import SafeConsole
 
-        return Console(
+        return SafeConsole(
             file=self._buffer,
             force_terminal=True,          # keep colour: it is going to a screen
             color_system="truecolor",
