@@ -9,7 +9,6 @@ everyone else on the project.
 """
 
 import asyncio
-from pathlib import Path
 
 import pytest
 
