@@ -754,11 +754,15 @@ def focused_command(root: Path, changed: list[Path]) -> str | None:
     runner = detect(root)
     if runner is None or runner.name != "pytest":
         return None
-    tests_root = root / "tests" if (root / "tests").is_dir() else root
-    from .navigation import affected_tests
-    files = affected_tests([Path(c) for c in changed], tests_root)
+    from .navigation import covering_tests
+    # Which tests can this change break? A test that imports the module --
+    # directly, or through something that does -- can. Matching test file
+    # names against source file names, which is what this used to do,
+    # averaged about 30% recall here and selected nothing at all for a
+    # module no test is named after.
+    files = covering_tests(root, [Path(c) for c in changed])
     if not files:
         return None
     parts = [f"{python_command(root)} -m pytest"]
-    parts.extend(quote_arg(str(f.relative_to(root))) for f in files)
+    parts.extend(quote_arg(path) for path in files)
     return " ".join(parts)

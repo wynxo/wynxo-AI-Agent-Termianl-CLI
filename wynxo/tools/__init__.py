@@ -17,6 +17,7 @@ from .todo import TodoWrite
 from .apps import LaunchApplication
 from .appcatalog import ApplicationCatalog
 from .navigation_tool import NavigateSymbols
+from .references_tool import FindReferences
 from .github_tool import GitHubRead, GitHubWrite
 from .web import WebSearch
 
@@ -76,6 +77,7 @@ def build_registry(
         TodoWrite(workspace, boundary, shield),
         LaunchApplication(workspace, boundary, shield, catalog=app_catalog),
         NavigateSymbols(workspace, boundary, shield),
+        FindReferences(workspace, boundary, shield),
         GitHubRead(workspace, boundary, shield),
         GitHubWrite(workspace, boundary, shield),
         Remember(workspace, boundary, memory, shield),
