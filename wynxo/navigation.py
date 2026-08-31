@@ -372,11 +372,27 @@ _NOT_A_NAME = frozenset({
 """Control flow reads exactly like a method declaration."""
 
 
+_GO_FUNC = re.compile(r"^\s*func\s+(?:\([^)]*\)\s*)?(\w+)", re.MULTILINE)
+"""Every Go function and method, exported or not.
+
+The project map matches only capitalised names, which is the right filter
+for a summary of a package's public surface. For an index it is a bug: an
+unexported ``func helper()`` is exactly the kind of thing someone asks
+where to find, and answering "nowhere in this project" is worse than the
+grep this replaced.
+"""
+
+_GO_TYPE = re.compile(
+    r"^\s*type\s+(\w+)\s+(?:struct|interface|func|map|\[|\*|\w)",
+    re.MULTILINE)
+"""``type Cart struct``. Nothing matched these at all, so in a Go project
+every struct, interface and named type was missing from the index."""
+
 _KINDS = {
-    "go": ("func", projectmap._GO),
-    "rust": ("definition", projectmap._RUST),
-    "ruby": ("definition", projectmap._RUBY),
-    "shell": ("function", projectmap._SHELL),
+    "go": ("definition", (_GO_TYPE, _GO_FUNC)),
+    "rust": ("definition", (projectmap._RUST,)),
+    "ruby": ("definition", (projectmap._RUBY,)),
+    "shell": ("function", (projectmap._SHELL,)),
 }
 
 
@@ -387,7 +403,7 @@ def _regex_definitions(text: str, language: str) -> list[Definition]:
     line is still a better answer than forty call sites.
     """
     if language in _KINDS:
-        kind, patterns = _KINDS[language][0], [_KINDS[language][1]]
+        kind, patterns = _KINDS[language][0], list(_KINDS[language][1])
     else:
         kind, patterns = "definition", [projectmap._CLIKE,
                                         projectmap._CLIKE_CONST_FN,

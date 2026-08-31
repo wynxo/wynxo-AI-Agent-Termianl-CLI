@@ -433,3 +433,111 @@ def test_a_javascript_project_can_be_searched_end_to_end(tmp_path):
     })
     assert [h.describe() for h in navigation.find(tree, "total")] == \
            ["src/cart.js:3  total()"]
+
+
+# -- languages other than Python ----------------------------------------------
+#
+# Support is not equal and this pins where the line is. Python goes through
+# ast and is exact. Everything else is a regex over the text, so a name in a
+# comment or a string can produce a spurious entry. What must not happen is
+# the opposite: a definition that exists and cannot be found, because
+# "nowhere in this project" is a confident wrong answer.
+
+
+LANGUAGE_SAMPLES = {
+    "go": ("go", """
+        package main
+
+        type Cart struct {
+        \tn int
+        }
+
+        type Priced interface {
+        \tPrice() int
+        }
+
+        func (c Cart) Total() int {
+        \treturn c.n
+        }
+
+        func helper() int {
+        \treturn Cart{}.Total()
+        }
+    """),
+    "rust": ("rust", """
+        pub struct Cart {
+            n: i32,
+        }
+
+        pub trait Priced {
+            fn price(&self) -> i32;
+        }
+
+        impl Cart {
+            pub fn total(&self) -> i32 {
+                self.n
+            }
+        }
+
+        pub fn helper() -> i32 {
+            Cart { n: 0 }.total()
+        }
+    """),
+    "java": ("clike", """
+        public class Cart {
+            public int total() { return 1; }
+            public static int helper() { return new Cart().total(); }
+        }
+    """),
+    "typescript": ("clike", """
+        export class Cart {
+          private total(): number { return 1; }
+        }
+        export function helper(): number { return new Cart().total(); }
+    """),
+    "ruby": ("ruby", """
+        class Cart
+          def total
+            1
+          end
+        end
+
+        def helper
+          Cart.new.total
+        end
+    """),
+}
+
+
+@pytest.mark.parametrize("label", sorted(LANGUAGE_SAMPLES))
+def test_each_language_resolves_a_type_a_method_and_a_function(label):
+    language, source = LANGUAGE_SAMPLES[label]
+    names = {d.name.lower()
+             for d in navigation.definitions_in(textwrap.dedent(source), language)}
+    assert "cart" in names, f"{label}: the type is missing"
+    assert "total" in names, f"{label}: the method is missing"
+    assert "helper" in names, f"{label}: the function is missing"
+
+
+def test_a_go_type_is_indexed():
+    # Nothing matched `type X struct` at all, so every struct, interface and
+    # named type in a Go project was missing from the index.
+    names = {d.name for d in
+             navigation.definitions_in(LANGUAGE_SAMPLES["go"][1], "go")}
+    assert {"Cart", "Priced"} <= names
+
+
+def test_an_unexported_go_function_is_indexed():
+    # The map matches only capitalised names, which is right for a summary
+    # of a package's public surface and wrong for a lookup table.
+    names = {d.name for d in
+             navigation.definitions_in(LANGUAGE_SAMPLES["go"][1], "go")}
+    assert "helper" in names
+
+
+def test_the_project_map_still_summarises_go_by_public_surface():
+    # The index gained unexported names; the map must not, or every Go
+    # package's map fills up with internals.
+    from wynxo import projectmap
+
+    assert projectmap.symbols_in(LANGUAGE_SAMPLES["go"][1], "go") == ["Total"]
