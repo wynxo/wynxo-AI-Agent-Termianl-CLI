@@ -346,3 +346,90 @@ def test_a_secret_in_a_signature_is_masked(tmp_path):
     result = run(tool(tree), name="connect")
     assert result.ok
     assert "sk-abcdefghijklmnopqrstuvwxyz0123456789" not in result.output
+
+
+# -- languages that are not Python --------------------------------------------
+#
+# ast is exact; everything else is a regex, which guesses. A guess that
+# points at a line still beats forty call sites, but a guess that says
+# "not defined anywhere" when it is, or points at the wrong line, is worse
+# than the grep it replaced.
+
+
+def clike(source: str):
+    return navigation.definitions_in(textwrap.dedent(source), "clike")
+
+
+def test_a_javascript_method_is_indexed():
+    # The project map lists only `function` and `class`, which in a JS
+    # project means every method is missing. An index that missed them
+    # would answer "total is not defined in this project" -- confidently,
+    # and wrongly.
+    found = clike("""
+        export class Cart {
+          constructor() { this.items = []; }
+          add(item) { this.items.push(item); }
+          total() { return 0; }
+        }
+    """)
+    assert {d.name for d in found} == {"Cart", "constructor", "add", "total"}
+
+
+def test_a_declaration_after_a_blank_line_reports_the_right_line():
+    # These patterns begin with ^\s*, and \s eats the preceding newline.
+    # An off-by-one line number is a confident wrong answer.
+    found = clike("""
+        const x = 1;
+
+        export function later(a) {
+          return a;
+        }
+    """)
+    assert [(d.name, d.line) for d in found] == [("later", 4)]
+
+
+def test_control_flow_is_not_mistaken_for_a_definition():
+    found = clike("""
+        class S {
+          go() {
+            if (a) { b(); }
+            for (const x of xs) { }
+            while (t) { }
+            switch (k) { case 1: break; }
+            try { f(); } catch (err) { g(err); }
+            return fetch(u).then((r) => r.json());
+          }
+        }
+    """)
+    assert {d.name for d in found} == {"S", "go"}
+
+
+def test_a_typed_method_signature_is_indexed():
+    found = clike("""
+        public class Cart {
+            public int total() {
+                if (items == null) { return 0; }
+                return 1;
+            }
+            private static String name(String a) { return a; }
+        }
+    """)
+    assert {d.name for d in found} == {"Cart", "total", "name"}
+
+
+def test_a_declaration_matched_by_two_patterns_is_reported_once():
+    found = clike("export function once(a) {\n  return a;\n}\n")
+    assert [d.name for d in found] == ["once"]
+
+
+def test_a_javascript_project_can_be_searched_end_to_end(tmp_path):
+    tree = project(tmp_path, {
+        "package.json": '{"name": "demo"}',
+        "src/cart.js": """
+            export class Cart {
+              total() { return 0; }
+            }
+        """,
+    })
+    assert [h.describe() for h in navigation.find(tree, "total")] == \
+           ["src/cart.js:3  total()"]

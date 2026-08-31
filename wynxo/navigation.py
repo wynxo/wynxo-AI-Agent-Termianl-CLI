@@ -10,6 +10,7 @@ module answers it directly.
 from __future__ import annotations
 
 import ast
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -164,6 +165,35 @@ def _signature(node: ast.FunctionDef | ast.AsyncFunctionDef, parent: str) -> str
     return rendered if len(rendered) <= 160 else rendered[:157] + "..."
 
 
+_CLIKE_METHOD = re.compile(
+    r"^[ \t]*(?:(?:public|private|protected|internal|static|final|readonly|"
+    r"abstract|override|virtual|async|get|set|export|default)\s+)*"
+    r"(?:[A-Za-z_$][\w$<>,\[\]]*\s+)?"
+    r"([A-Za-z_$][\w$]*)\s*\([^)\n]*\)\s*(?::\s*[^{;\n]+)?\{",
+    re.MULTILINE,
+)
+"""A method inside a class body -- ``total() {``, ``async load(x) {``,
+``public int size() {``.
+
+The declaration patterns the project map uses find only ``function`` and
+``class``, which in a JavaScript or TypeScript project means every method
+is missing. The map can afford that: it is a summary, and a method it
+leaves out is an abbreviation. An index cannot -- a missing method makes
+"where is total defined?" answer "nowhere in this project", which is a
+confident wrong answer, and worse than the grep it replaced.
+
+Regex here is a guess, so it is aimed at the failure that costs less: a
+spurious entry is one extra line in a result, while a missed one is a lie.
+"""
+
+_NOT_A_NAME = frozenset({
+    "if", "for", "while", "switch", "catch", "return", "function", "do",
+    "else", "new", "typeof", "await", "with", "class", "try", "finally",
+    "case", "delete", "in", "of", "yield", "throw", "void", "super",
+})
+"""Control flow reads exactly like a method declaration."""
+
+
 _KINDS = {
     "go": ("func", projectmap._GO),
     "rust": ("definition", projectmap._RUST),
@@ -182,16 +212,28 @@ def _regex_definitions(text: str, language: str) -> list[Definition]:
         kind, patterns = _KINDS[language][0], [_KINDS[language][1]]
     else:
         kind, patterns = "definition", [projectmap._CLIKE,
-                                        projectmap._CLIKE_CONST_FN]
+                                        projectmap._CLIKE_CONST_FN,
+                                        _CLIKE_METHOD]
     found: list[Definition] = []
+    seen: set[tuple[str, int]] = set()
     for pattern in patterns:
         for match in pattern.finditer(text):
             name = match.group(1)
-            if not name:
+            if not name or name in _NOT_A_NAME:
                 continue
-            line = text.count("\n", 0, match.start()) + 1
+            # The name's own position, not the match's: these patterns all
+            # begin with ``^\s*``, and ``\s`` eats the newline before the
+            # line they matched. Anchoring on the match start reported every
+            # declaration that follows a blank line one line too early --
+            # a wrong line number being exactly the confident wrong answer
+            # this tool exists to avoid.
+            line = text.count("\n", 0, match.start(1)) + 1
+            if (name, line) in seen:
+                continue        # a class both patterns matched
+            seen.add((name, line))
+            signature = match.group(0).strip().rstrip("{").strip()
             found.append(Definition(name=name, kind=kind, path="", line=line,
-                                    signature=match.group(0).strip()[:160]))
+                                    signature=signature[:160]))
     return sorted(found, key=lambda d: d.line)
 
 
