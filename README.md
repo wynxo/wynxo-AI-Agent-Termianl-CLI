@@ -1037,9 +1037,27 @@ are rejected on the way in, with numbers treated as distinguishing so
 | `list_dir` | | Tree view, skipping vcs and build noise |
 | `glob` | | Find files by name pattern |
 | `grep` | | Regex search across the project |
+| `find_symbols` | | Where a name is **defined**, anywhere in the project |
+| `find_references` | | What calls it, subclasses it, imports it, or tests it |
+| `run_tests` | ✓ | Run the project's tests, grouped by root cause when they fail |
+| `git` | | status, diff and log, without a permission prompt |
+| `github_read` | | Search, list, stat and read a GitHub repo without cloning |
+| `github_write` | ✓ | Commit, branch and open a PR through the API |
+| `web_search` | | Look something up when the answer may have changed |
+| `launch_application` | ✓ | Open an app installed on the machine, by the name you call it |
+| `background_poll` | | Check on a command started with `shell(background=true)` |
 | `shell` | ✓ | Run a command — PowerShell on Windows, your login shell elsewhere |
 | `todo_write` | | The visible plan, which also survives compaction |
 | `remember` | ✓ | Write a durable fact to memory, or forget one |
+
+`find_symbols` and `find_references` are there because grep answers a
+different question than the one usually being asked. "Where is `Cart`
+defined?" through grep is every line that mentions `Cart`; through
+`find_symbols` it is one line with the file, the line number and the
+signature. Both are built from one pass over the project, cached against
+its newest timestamp. Python goes through `ast` and is exact; JavaScript,
+TypeScript, Go, Rust, Java, C and Ruby go through patterns and can produce
+the occasional spurious entry from a comment or a string.
 
 **Reads are free. Writes ask**, and show you the diff before you answer:
 
