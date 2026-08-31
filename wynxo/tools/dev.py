@@ -75,4 +75,13 @@ class RunTests(Tool):
             if match:
                 result.metadata["exit_code"] = int(match.group(1))
         result.display = f"{'passed' if result.ok else 'failed'}: {command} ({duration:.1f}s)"
+        if not result.ok:
+            # The same treatment the automatic verify pass gives a failure.
+            # Raw output went straight to the model here: 27 failures of one
+            # missing guard were 16,000 characters of mostly identical
+            # tracebacks, which on a small context window is the difference
+            # between fixing the bug and compacting in the middle of it.
+            result.output = (testing.summarise(result.output)
+                             + testing.failure_report(result.output,
+                                                      self.workspace))
         return result

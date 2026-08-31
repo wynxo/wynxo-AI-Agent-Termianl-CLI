@@ -25,7 +25,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -524,27 +524,108 @@ def _is_test_path(path: str, root: Path) -> bool:
     return rel.split(os.sep)[0] in ("tests", "test", "spec")
 
 
+MAX_REPORTED_CAUSES = 6
+"""Distinct root causes worth spelling out. Not distinct failures: one
+bug routinely fails twenty tests, and twenty copies of the same
+ZeroDivisionError is the same information twenty times."""
+
+
+def group_failures(failures: list[Failure]) -> list[tuple[Failure, list[str]]]:
+    """Collapse failures to their root causes, with the tests each broke.
+
+    Two failures at the same file, line and exception type are one bug. A
+    run of 27 failures from a single missing guard used to be reported as
+    27 findings, which cost 16,000 characters to say one thing and buried
+    any second, genuinely different cause underneath.
+
+    Failures whose location the parser could not determine are folded into
+    a located cause of the same type when there is exactly one -- pytest
+    prints the same exception twice, once in the traceback with a file and
+    once in the end-of-run summary without one, and reporting both makes
+    every failure look like two.
+    """
+    groups: dict[tuple[str, str, int], tuple[Failure, list[str]]] = {}
+    for failure in failures:
+        if not failure.file:
+            continue
+        key = (failure.kind, failure.file, failure.line)
+        if key not in groups:
+            groups[key] = (failure, [])
+        name = failure.test.rsplit("::", 1)[-1] if failure.test else ""
+        if name and name not in groups[key][1]:
+            groups[key][1].append(name)
+
+    for failure in failures:
+        if failure.file:
+            continue
+        located = [key for key in groups if key[0] == failure.kind]
+        name = failure.test.rsplit("::", 1)[-1] if failure.test else ""
+        if len(located) == 1:
+            key = located[0]
+            carrier, tests = groups[key]
+            if name and name not in tests:
+                tests.append(name)
+            # pytest prints the type and the file in the traceback and the
+            # type and the message in the end-of-run summary. Folding the
+            # two together is what makes them one finding instead of two,
+            # so the message comes along rather than being dropped.
+            if not carrier.message and failure.message:
+                groups[key] = (replace(carrier, message=failure.message), tests)
+        elif not located:
+            # Genuinely unlocated: still worth reporting, once.
+            key = (failure.kind, "", 0)
+            if key not in groups:
+                groups[key] = (failure, [])
+            if name and name not in groups[key][1]:
+                groups[key][1].append(name)
+
+    # pytest states the type and the file in the traceback and the type and
+    # the message in the end-of-run summary. A cause that ended up with the
+    # location but not the words borrows them from another failure of the
+    # same type in the same run, so no finding reads "(no message)" while
+    # the message is sitting in the output.
+    messages = {failure.kind: failure.message
+                for failure in failures if failure.message}
+    return [(failure if failure.message
+             else replace(failure, message=messages.get(failure.kind, "")),
+             tests)
+            for failure, tests in groups.values()]
+
+
 def failure_report(output: str, root: Path) -> str:
     """The structured, classified version of a test run, for the model.
 
     Appends to the raw tail the things the model can act on directly:
-    exception type, file:line, test node id, and what kind of problem it is
-    (environment vs code vs test) with the right next move.
+    exception type, file:line, which tests broke, and what kind of problem
+    it is (environment vs code vs test) with the right next move -- one
+    entry per root cause rather than one per failing test.
     """
     failures = parse_failures(output)
     if not failures:
         return ""
-    lines = ["", "[structured failure analysis]"]
-    for failure in failures[:6]:
+    causes = group_failures(failures)
+    if not causes:
+        return ""
+    total = sum(len(tests) for _, tests in causes)
+    headline = (f"[structured failure analysis: {len(causes)} root cause"
+                f"{'s' if len(causes) != 1 else ''}"
+                + (f" across {total} failing tests]" if total > len(causes)
+                   else "]"))
+    lines = ["", headline]
+    for failure, tests in causes[:MAX_REPORTED_CAUSES]:
         where = f"{failure.file}:{failure.line}" if failure.file else "?"
         lines.append(f"\u2022 {failure.kind}: {failure.message or '(no message)'}")
-        if failure.test:
-            lines.append(f"  test: {failure.test}")
         lines.append(f"  at {where}")
+        if tests:
+            shown = ", ".join(tests[:4])
+            more = f" and {len(tests) - 4} more" if len(tests) > 4 else ""
+            lines.append(f"  breaks {len(tests)} test"
+                         f"{'s' if len(tests) != 1 else ''}: {shown}{more}")
         category, reason = classify_failure(failure, root)
         lines.append(f"  \u2192 {category}: {reason}")
-    if len(failures) > 6:
-        lines.append(f"  \u2026 and {len(failures) - 6} more failures")
+    if len(causes) > MAX_REPORTED_CAUSES:
+        lines.append(f"  \u2026 and {len(causes) - MAX_REPORTED_CAUSES} "
+                     f"more distinct causes")
     return "\n".join(lines)
 
 
