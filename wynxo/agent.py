@@ -66,19 +66,39 @@ contents, on the other hand, are superseded the instant the file is read
 again -- which the read-edit-verify loop does every single turn.
 """
 
+_STATE_VIEW_TOOLS = frozenset({"run_tests"})
+"""Tools whose result is a statement about the current state of something.
+
+A test run says what the suite does now. Run it again and the earlier
+answer is not a second opinion, it is the old answer -- the same relation a
+re-read has to an earlier read, and superseded the same way. This is
+narrower than shell on purpose: ``git log`` and ``ls`` and a curl are
+about a moment, and running one twice does not make the first untrue.
+
+The loop detector reads its own failure signatures rather than the
+conversation, so collapsing an old run does not cost it anything.
+"""
+
 
 def _subject_of(call, result) -> str:
     """What a tool result is *about*, when two results about it cannot both
     be current -- a file and the ref it was read from. Empty for everything
     else, and empty is the safe answer: it only means nothing is collapsed.
     """
-    if call.name not in _FILE_VIEW_TOOLS:
+    if call.name not in _FILE_VIEW_TOOLS and call.name not in _STATE_VIEW_TOOLS:
         return ""
-    if not getattr(result, "ok", False):
-        return ""          # an error is not a view of the file
     arguments = call.arguments or {}
     if not isinstance(arguments, dict):
         return ""
+    if call.name in _STATE_VIEW_TOOLS:
+        # Keyed by the command, so a focused run and a full run are two
+        # different statements and neither erases the other. A failed run
+        # supersedes as readily as a passing one: both describe the suite.
+        command = str(getattr(result, "metadata", {}).get("command")
+                      or arguments.get("command") or "").strip()
+        return f"{call.name}:{command}" if command else ""
+    if not getattr(result, "ok", False):
+        return ""          # an error is not a view of the file
     if call.name == "github_read" and str(arguments.get("operation") or "") != "read":
         return ""          # a search, a listing and a stat are not the file
     path = str(arguments.get("path") or "").strip()

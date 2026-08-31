@@ -264,3 +264,75 @@ def test_a_missing_or_junk_path_has_no_subject():
     assert subject("read_file", {}) == ""
     assert subject("read_file", {"path": "   "}) == ""
     assert subject("read_file", None) == ""
+
+
+# -- superseding a stale test run ---------------------------------------------
+#
+# A test run says what the suite does now. Run it again and the earlier
+# answer is not a second opinion, it is the old answer. On a realistic long
+# task this was the largest single consumer of context after file reads.
+
+
+def call_and_result(name, arguments, ok=True, metadata=None):
+    from wynxo.parsing import ToolCall
+    from wynxo.tools.base import ToolResult
+
+    result = ToolResult.success("body") if ok else ToolResult.failure("no")
+    result.metadata.update(metadata or {})
+    return ToolCall(name=name, arguments=arguments), result
+
+
+def test_a_second_run_of_the_same_suite_supersedes_the_first():
+    from wynxo.agent import _subject_of
+
+    call, result = call_and_result("run_tests", {}, metadata={"command": "pytest"})
+    assert _subject_of(call, result) == "run_tests:pytest"
+
+
+def test_a_focused_run_and_a_full_run_are_different_statements():
+    # Neither erases the other: they are answers to different questions.
+    from wynxo.agent import _subject_of
+
+    focused = call_and_result("run_tests", {},
+                              metadata={"command": "pytest tests/test_a.py"})
+    full = call_and_result("run_tests", {}, metadata={"command": "pytest"})
+    assert _subject_of(*focused) != _subject_of(*full)
+
+
+def test_a_failed_run_supersedes_as_readily_as_a_passing_one():
+    # Unlike a file read, where an error is not a view of the file, a failed
+    # test run *is* a description of the suite -- and stale the moment the
+    # suite is run again.
+    from wynxo.agent import _subject_of
+
+    call, result = call_and_result("run_tests", {}, ok=False,
+                                   metadata={"command": "pytest"})
+    assert _subject_of(call, result) == "run_tests:pytest"
+
+
+def test_a_run_with_no_recorded_command_supersedes_nothing():
+    from wynxo.agent import _subject_of
+
+    call, result = call_and_result("run_tests", {})
+    assert _subject_of(call, result) == ""
+
+
+def test_an_ordinary_shell_result_is_still_never_superseded():
+    # `git log` and `ls` are about a moment; running one twice does not make
+    # the first untrue.
+    from wynxo.agent import _subject_of
+
+    call, result = call_and_result("shell", {"command": "git log"},
+                                   metadata={"command": "git log"})
+    assert _subject_of(call, result) == ""
+
+
+def test_the_latest_run_is_kept_in_full():
+    session = Session(workspace=Path("."))
+    session.add_tool_result("run_tests", big("first run"), "c1",
+                            subject="run_tests:pytest")
+    session.add_tool_result("run_tests", big("second run"), "c2",
+                            subject="run_tests:pytest")
+    assert session.messages[0].get("superseded")
+    assert session.messages[1]["content"].startswith("second run:")
+    assert not session.messages[1].get("superseded")

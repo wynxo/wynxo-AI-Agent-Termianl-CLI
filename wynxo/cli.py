@@ -4411,7 +4411,7 @@ class Repl:
                 ("context", f"~{used} / {limit} ({100 * used / max(1, limit):.0f}%)"),
                 ("compactions", str(self.agent.session.compactions)),
                 ("reclaimed", f"~{self.agent.session.superseded_chars // 4} tokens"
-                              " of superseded file reads"),
+                              " of superseded reads and test runs"),
                 ("tool mode", "native" if self.agent.native_tools else "hermes (prompted)"),
                 ("session", self.agent.session.session_id),
             ],

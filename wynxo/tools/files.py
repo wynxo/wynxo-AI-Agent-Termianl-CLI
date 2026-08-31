@@ -209,7 +209,8 @@ class ReadFile(Tool):
         if path.stat().st_size > MAX_READ_BYTES:
             return ToolResult.failure(
                 f"{rel} is {path.stat().st_size} bytes, too large to read whole. "
-                "Use grep to find the part you need, then read with offset/limit."
+                "Use find_symbols to locate a definition in it, or grep to find "
+                "the part you need, then read with start_line/end_line."
             )
 
         lines = _read_text(path).splitlines()
