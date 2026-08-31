@@ -4410,6 +4410,8 @@ class Repl:
                 ("speed", f"{usage.tokens_per_second():.1f} tok/s"),
                 ("context", f"~{used} / {limit} ({100 * used / max(1, limit):.0f}%)"),
                 ("compactions", str(self.agent.session.compactions)),
+                ("reclaimed", f"~{self.agent.session.superseded_chars // 4} tokens"
+                              " of superseded file reads"),
                 ("tool mode", "native" if self.agent.native_tools else "hermes (prompted)"),
                 ("session", self.agent.session.session_id),
             ],

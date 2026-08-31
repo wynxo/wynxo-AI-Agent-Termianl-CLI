@@ -63,6 +63,13 @@ class Usage:
         self.requests += 1
 
 
+_SUPERSEDE_MIN = 400
+"""Below this a result is not worth collapsing. A one-line "ok" costs less
+than the note explaining that it was dropped, and a conversation littered
+with supersede notes is harder to read than one with a few short results
+in it."""
+
+
 @dataclass
 class Session:
     workspace: Path
@@ -72,6 +79,8 @@ class Session:
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     created_at: float = field(default_factory=time.time)
     compactions: int = 0
+    superseded_chars: int = 0
+    """How much stale tool output has been collapsed, for /stats."""
 
     # -- building the wire format -----------------------------------------
 
@@ -89,14 +98,54 @@ class Session:
             message["tool_calls"] = tool_calls
         self.messages.append(message)
 
-    def add_tool_result(self, name: str, content: str, call_id: str = "") -> None:
+    def add_tool_result(self, name: str, content: str, call_id: str = "",
+                        subject: str = "") -> None:
+        """Record what a tool returned.
+
+        ``subject`` is what the result is *about* -- a file path, for a tool
+        that returns a file's contents. Two results about the same subject
+        cannot both be true: the newer one is what the file says now, and
+        the older is a description of a file that has since changed or been
+        re-read for a reason. Keeping both in full is how a read-edit-verify
+        loop -- the ordinary shape of a coding turn -- paid for the same
+        file three times over, and on an 8k window that is the difference
+        between finishing a task and compacting in the middle of it.
+        """
         # Ollama's Message type names this field `tool_name` (api/types.go).
         # `name` is silently ignored, so the model cannot tell which tool a
         # result came from -- which matters as soon as a turn calls two.
         message: dict[str, Any] = {"role": "tool", "content": content, "tool_name": name}
         if call_id:
             message["tool_call_id"] = call_id
+        if subject:
+            message["subject"] = subject
+            self._supersede(subject, len(content))
         self.messages.append(message)
+
+    def _supersede(self, subject: str, incoming: int) -> None:
+        """Collapse older results about the same subject to a one-line note.
+
+        Replaced rather than deleted: the message has to stay where it is,
+        because a tool result answers a specific tool call and removing it
+        would leave that call unanswered -- which is a malformed
+        conversation, not a smaller one. What is left says plainly that the
+        content moved further down, so the model does not read the note as
+        "the file is empty".
+        """
+        for message in self.messages:
+            if message.get("role") != "tool" or message.get("subject") != subject:
+                continue
+            if message.get("superseded"):
+                continue
+            was = len(str(message.get("content") or ""))
+            if was <= _SUPERSEDE_MIN and incoming <= _SUPERSEDE_MIN:
+                continue        # nothing worth reclaiming
+            message["content"] = (
+                f"[superseded: {subject} was read again later in this "
+                f"conversation, and the current contents are further down. "
+                f"{was} characters dropped from here.]")
+            message["superseded"] = True
+            self.superseded_chars += was - len(message["content"])
 
     # -- size --------------------------------------------------------------
 
@@ -198,6 +247,7 @@ class Session:
                         "created_at": self.created_at,
                         "updated_at": time.time(),
                         "compactions": self.compactions,
+                        "superseded_chars": self.superseded_chars,
                         "messages": self.messages,
                         "usage": {
                             "prompt_tokens": self.usage.prompt_tokens,
@@ -231,6 +281,7 @@ class Session:
             session_id=as_text(data.get("session_id")) or session_id,
             created_at=as_float(data.get("created_at"), time.time()),
             compactions=as_int(data.get("compactions")),
+            superseded_chars=as_int(data.get("superseded_chars")),
         )
         session.messages = [m for m in as_list(data.get("messages"))
                             if isinstance(m, dict)]

@@ -57,6 +57,51 @@ from .task_state import TaskState, TaskStateMachine
 VERIFIED = "VERIFIED"
 
 
+_FILE_VIEW_TOOLS = frozenset({"read_file", "github_read"})
+"""Tools whose result *is* a file's contents.
+
+Only these. A grep result is about a pattern and stays true; a shell result
+is about a moment and is not repeatable; a listing is cheap. A file's
+contents, on the other hand, are superseded the instant the file is read
+again -- which the read-edit-verify loop does every single turn.
+"""
+
+
+def _subject_of(call, result) -> str:
+    """What a tool result is *about*, when two results about it cannot both
+    be current -- a file and the ref it was read from. Empty for everything
+    else, and empty is the safe answer: it only means nothing is collapsed.
+    """
+    if call.name not in _FILE_VIEW_TOOLS:
+        return ""
+    if not getattr(result, "ok", False):
+        return ""          # an error is not a view of the file
+    arguments = call.arguments or {}
+    if not isinstance(arguments, dict):
+        return ""
+    if call.name == "github_read" and str(arguments.get("operation") or "") != "read":
+        return ""          # a search, a listing and a stat are not the file
+    path = str(arguments.get("path") or "").strip()
+    if not path:
+        return ""
+    # A partial view of a file is not replaced by a partial view of a
+    # different part of it. Only whole-file reads supersede each other.
+    if any(_as_int(arguments.get(key)) for key in ("start_line", "end_line", "offset")):
+        return ""
+    # Same path on two branches is two different files.
+    where = "/".join(str(arguments.get(key) or "").strip()
+                     for key in ("repo", "branch"))
+    return f"{call.name}:{where}:{path}"
+
+
+def _as_int(value) -> int:
+    """A model sends "12" as often as 12, and sometimes sends nonsense."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _fingerprint(call) -> str:
     """A canonical identity for a tool call, stable under formatting noise.
 
@@ -953,7 +998,8 @@ class Agent:
                 "no new information, change strategy instead of doing it "
                 "again.\n\n" + model_output
             )
-        self.session.add_tool_result(call.name, model_output, call.call_id)
+        self.session.add_tool_result(call.name, model_output, call.call_id,
+                                     subject=_subject_of(call, result))
         if result.ok:
             self.task_state.record_success(f"{call.name}: {result.display or 'completed'}")
             if call.name == "read_file" and path:
