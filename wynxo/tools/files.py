@@ -52,8 +52,34 @@ class Decoded(NamedTuple):
     """A file's text, and what it takes to write it back unchanged."""
 
     text: str
+    """Always newline-normalised to \n. Every comparison in this module --
+    matching old_text, diffing, counting occurrences -- is then done in one
+    representation, and the file's own endings are restored on the way
+    out."""
+
     encoding: str
     bom: bytes
+    newline: str = "\n"
+    """What this file actually uses between lines."""
+
+    mixed: bool = False
+    """The file used both, so writing it back cannot be lossless."""
+
+
+def _line_ending(text: str) -> tuple[str, bool]:
+    """The file's newline style, and whether it was consistent.
+
+    A CRLF file whose text is handed to the model as LF -- which is what
+    read_file shows it, since it numbers lines -- can only be sent back as
+    LF. Without knowing the file used CRLF, a multi-line old_text never
+    matched and the agent simply could not edit the file, while write_file
+    happily rewrote every line ending in it.
+    """
+    crlf = text.count("\r\n")
+    lf = text.count("\n") - crlf
+    if crlf and lf:
+        return ("\r\n" if crlf >= lf else "\n"), True
+    return ("\r\n" if crlf else "\n"), False
 
 
 def _decode(path: Path) -> Decoded:
@@ -66,19 +92,25 @@ def _decode(path: Path) -> Decoded:
     An edit that changed one line but saved the whole file as UTF-8 rewrote
     every other byte in it: a UTF-16 PowerShell script became UTF-8 without
     its byte-order mark, a cp1252 file's accented characters were re-encoded
-    from end to end, and a BOM the file was relying on simply vanished.
+    from end to end, and a BOM the file was relying on simply vanished. The
+    line endings are remembered for exactly the same reason.
     """
     raw = path.read_bytes()
+    decoded, encoding, bom = _text_of(raw)
+    newline, mixed = _line_ending(decoded)
+    return Decoded(decoded.replace("\r\n", "\n"), encoding, bom, newline, mixed)
+
+
+def _text_of(raw: bytes) -> tuple[str, str, bytes]:
     for bom, encoding in _BOMS:
         if raw.startswith(bom):
-            return Decoded(raw[len(bom):].decode(encoding, "replace"),
-                           encoding, bom)
+            return raw[len(bom):].decode(encoding, "replace"), encoding, bom
     for encoding in ("utf-8", "cp1252"):
         try:
-            return Decoded(raw.decode(encoding), encoding, b"")
+            return raw.decode(encoding), encoding, b""
         except UnicodeDecodeError:
             continue
-    return Decoded(raw.decode("utf-8", "replace"), "utf-8", b"")
+    return raw.decode("utf-8", "replace"), "utf-8", b''
 
 
 def _read_text(path: Path) -> str:
@@ -98,15 +130,23 @@ def _write_back(path: Path, text: str, source: "Decoded | None" = None) -> str:
     """
     encoding = source.encoding if source else "utf-8"
     bom = source.bom if source else b""
+    note = ""
+    if source and source.newline != "\n":
+        # The text has been LF throughout this module. Put the file's own
+        # endings back, or one edited line costs a diff of the whole file.
+        text = text.replace("\n", source.newline)
+    if source and source.mixed:
+        note = (f" (line endings were mixed in this file and are now all "
+                f"{'CRLF' if source.newline == chr(13) + chr(10) else 'LF'})")
     try:
         path.write_bytes(bom + text.encode(encoding))
-        return ""
+        return note
     except UnicodeEncodeError:
         path.write_bytes(text.encode("utf-8"))
         if encoding == "utf-8":
-            return ""
-        return (f" (saved as UTF-8: the new text needs characters "
-                f"{encoding} cannot store)")
+            return note
+        return note + (f" (saved as UTF-8: the new text needs characters "
+                       f"{encoding} cannot store)")
 
 
 def make_diff(before: str, after: str, path: str) -> str:
