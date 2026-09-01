@@ -188,3 +188,62 @@ class TestTheMoodAlwaysHasAFace:
         pet.set_activity("something nobody has mapped")
         assert pet.mood is Mood.THINKING
         assert cell_len(pet.padded()) == BOX
+
+
+class TestTheCompanionDoesNotRepeatItself:
+    """Three or four lines per event and two or three uses per session: a
+    plain random choice repeats often enough to be noticed, and a companion
+    that greets you with the identical sentence every time you open it reads
+    as a string constant rather than as a character."""
+
+    def _pet(self, voice="mommy"):
+        pet = Pet()
+        pet.style_name = voice
+        return pet
+
+    def test_never_the_same_line_twice_running(self):
+        for voice in ("default", "kawaii", "mommy"):
+            pet = self._pet(voice)
+            for event in ("greet", "done", "error", "bye", "proud"):
+                seen = [pet.remark(event) for _ in range(20)]
+                pairs = list(zip(seen, seen[1:]))
+                assert all(a != b for a, b in pairs), (voice, event)
+
+    def test_it_still_uses_the_whole_set(self):
+        """Avoiding a repeat must not collapse to alternating two lines."""
+        pet = self._pet()
+        from wynxo.pet import REMARKS_MOMMY
+
+        seen = {pet.remark("greet") for _ in range(200)}
+        assert seen == set(REMARKS_MOMMY["greet"])
+
+    def test_a_single_option_is_survivable(self):
+        pet = self._pet()
+        pet.style_name = "default"
+        from wynxo import pet as pet_module
+
+        pet_module.REMARKS["solo"] = ["only one"]
+        try:
+            assert pet.remark("solo") == "only one"
+            assert pet.remark("solo") == "only one"
+        finally:
+            del pet_module.REMARKS["solo"]
+
+    def test_an_unknown_event_is_silent(self):
+        assert self._pet().remark("nothing-maps-to-this") == ""
+
+    def test_a_disabled_pet_says_nothing(self):
+        pet = self._pet()
+        pet.enabled = False
+        assert pet.remark("greet") == ""
+
+    def test_the_companion_is_not_chatty(self):
+        """It speaks at three moments in a whole session -- hello, goodbye,
+        and a commit worth being pleased about. Anything that comments on
+        every tool stops being charming after ten minutes."""
+        import inspect
+
+        from wynxo import cli
+
+        source = inspect.getsource(cli)
+        assert source.count(".remark(") <= 3, "the companion gained a voice"

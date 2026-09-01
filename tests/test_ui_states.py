@@ -166,14 +166,14 @@ class TestImpossibleCombinations:
     def test_a_completed_plan_does_not_read_as_half_done(self):
         bar = _bar("plan_complete")
         assert bar.plan_is_complete()
-        assert bar._plan_panel().title == "plan  2/2"
+        assert "plan  2/2" in bar._plan_panel().plain
 
     def test_the_plan_counts_steps_not_wrapped_lines(self):
         bar = _bar("idle")
         bar.plan = ("[x] one\n"
                     "    a continuation line that is not a step\n"
                     "[ ] two")
-        assert bar._plan_panel().title == "plan  1/2"
+        assert "plan  1/2" in bar._plan_panel().plain
 
     def test_typing_wins_over_the_tool_detail(self):
         """Your own keystrokes beat a description of what the agent is up

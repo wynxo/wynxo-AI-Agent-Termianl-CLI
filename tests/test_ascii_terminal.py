@@ -305,10 +305,30 @@ class TestPinnedPlan:
     def test_no_plan_means_no_panel(self):
         assert self.bar()._plan_panel() is None
 
-    def test_the_panel_counts_what_is_done(self):
+    def test_the_plan_counts_what_is_done(self):
         bar = self.bar()
         bar.set_plan(self.PLAN)
-        assert "1/3" in bar._plan_panel().title
+        assert "1/3" in bar._plan_panel().plain
+
+    def test_every_step_carries_a_mark(self):
+        """A step not started used to be bare indented text, which reads as
+        a wrapped continuation of the step above rather than as a step."""
+        for unicode_ok in (True, False):
+            bar = self.bar(unicode_ok=unicode_ok)
+            bar.set_plan(self.PLAN)
+            g = bar.ui.g
+            drawn = bar._plan_panel().plain
+            for mark in (g.step_done, g.step_now, g.step_todo):
+                assert mark in drawn, (unicode_ok, mark)
+
+    def test_it_is_a_list_and_not_a_box(self):
+        """A hundred-column box spent four cells of border and eighty of
+        trailing whitespace per row to say three short things."""
+        bar = self.bar()
+        bar.set_plan(self.PLAN)
+        plain = bar._plan_panel().plain
+        for border in ("╭", "╮", "╰", "╯", "│"):
+            assert border not in plain, border
 
     def test_completion_is_recognised_only_when_every_step_is_ticked(self):
         bar = self.bar()

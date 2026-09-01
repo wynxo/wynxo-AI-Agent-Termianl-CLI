@@ -220,6 +220,8 @@ class Pet:
     """Frames the counter must advance before the face changes. Lower is
     faster; set_pace() drives it from the effort level."""
     _frame: int = field(default=0, repr=False)
+    _last_remark: dict = field(default_factory=dict, repr=False)
+    """The line used last for each event, so the next one differs."""
 
     # -- appearance --------------------------------------------------------
 
@@ -300,7 +302,14 @@ class Pet:
     # -- voice -------------------------------------------------------------
 
     def remark(self, event: str) -> str:
-        """One short line for an event, or "" when the pet is off."""
+        """One short line for an event, or "" when the pet is off.
+
+        Never the same line twice running for the same event. There are only
+        three or four of each and a session uses two or three of them, so a
+        plain random choice repeats often enough to be noticed -- and a
+        companion that greets you with the identical sentence every time you
+        open it reads as a string constant rather than as a character.
+        """
         if not self.enabled:
             return ""
         table = REMARKS
@@ -309,7 +318,12 @@ class Pet:
         elif self.style_name == "mommy":
             table = REMARKS_MOMMY
         options = table.get(event)
-        return random.choice(options) if options else ""
+        if not options:
+            return ""
+        fresh = [line for line in options if line != self._last_remark.get(event)]
+        chosen = random.choice(fresh or options)
+        self._last_remark[event] = chosen
+        return chosen
 
     def greeting(self) -> str:
         if not self.enabled:

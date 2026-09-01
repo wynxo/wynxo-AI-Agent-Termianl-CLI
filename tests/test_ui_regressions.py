@@ -163,7 +163,7 @@ class TestThePlanCountsItsOwnSteps:
 
     def test_a_finished_plan_reads_as_finished(self):
         bar = self.bar("[x] one\n[x] two\n[x] three")
-        assert bar._plan_panel().title == "plan  3/3"
+        assert "plan  3/3" in bar._plan_panel().plain
         assert bar.plan_is_complete()
 
     def test_a_wrapped_task_does_not_inflate_the_total(self):
@@ -171,8 +171,9 @@ class TestThePlanCountsItsOwnSteps:
         newline made a finished plan read as unfinished."""
         bar = self.bar("[x] one\n    continued\n[x] two")
         assert bar.plan_is_complete(), "the fixture is not a finished plan"
-        title = bar._plan_panel().title
-        assert title == "plan  2/2", f"{title} disagrees with plan_is_complete"
+        drawn = bar._plan_panel().plain
+        assert "plan  2/2" in drawn, f"{drawn!r} disagrees with plan_is_complete"
+        assert "one continued" in drawn, "the wrapped half of the task was lost"
 
 
 class TestATruncatedDiffSaysSo:

@@ -1663,8 +1663,14 @@ class Repl:
         if not result.interrupted:
             report = self.agent.task_state.completion_report()
             if report:
+                # At the same margin as everything else in the conversation.
+                # It was the last block still starting hard against column
+                # zero, which reads as output that escaped the transcript
+                # rather than as the turn's own summing-up.
                 self.ui.console.print()
-                self.ui.console.print(Text(report, style="dim"))
+                self.ui.console.print(
+                    Text("\n".join(f"  {line}" for line in
+                                    report.splitlines()), style="dim"))
 
         # No stats line here: the pinned bar under the input already shows
         # tokens, rate and context, and printing them again above the next

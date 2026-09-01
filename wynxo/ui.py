@@ -310,6 +310,12 @@ class Glyphs:
             self.bullet, self.arrow, self.tick = "•", "→", "✓"
             self.cross, self.gear, self.dot = "✗", "●", "·"
             self.caret = "❯"
+            # A plan step, in its three states. U+25C9 and U+25E6 rather
+            # than the filled and hollow circles they resemble (U+25CF,
+            # U+25CB): those two are East Asian Width "Ambiguous" and draw
+            # two cells in a CJK locale, which breaks a list that is redrawn
+            # in place.
+            self.step_done, self.step_now, self.step_todo = "✓", "◉", "◦"
             # Rounded box corners, for the input field the prompt sits in.
             self.tl, self.tr, self.bl, self.br = "╭", "╮", "╰", "╯"
             self.hbar, self.vbar, self.ellipsis = "─", "│", "…"
@@ -317,6 +323,7 @@ class Glyphs:
             self.bullet, self.arrow, self.tick = "*", "->", "+"
             self.cross, self.gear, self.dot = "x", "o", "."
             self.caret = ">"
+            self.step_done, self.step_now, self.step_todo = "+", ">", "-"
             self.tl, self.tr, self.bl, self.br = "+", "+", "+", "+"
             self.hbar, self.vbar, self.ellipsis = "-", "|", "..."
 
@@ -450,10 +457,20 @@ class UI:
         self.console.file.write("\x1b[3J")   # erase saved lines
         self.console.file.flush()
 
+    WAKE = (("sleepy", 0.10), ("sleepy", 0.06), ("idle", 0.10),
+            ("happy", 0.14), ("idle", 0.0))
+    """Eyes shut, a blink, open, pleased, settle. Four tenths of a second.
+
+    It used to open on the SAD face -- the ✕✕ eyes -- so the first thing the
+    session showed was a distressed cat, which is not what waking up looks
+    like. An animation wants a start state, a transition and an end state,
+    and this one now has all three in the order a person would draw them.
+    """
+
     def wake(self, pet, name: str) -> None:
         """A short wake-up before the header.
 
-        Two thirds of a second, once per session, and skipped entirely when
+        Under half a second, once per session, and skipped entirely when
         animation is off or nothing is watching. Anything longer is a thing
         you wait through rather than enjoy.
         """
@@ -470,8 +487,7 @@ class UI:
             return
         from .pet import Mood
 
-        sequence = [(Mood.SAD, 0.09), (Mood.IDLE, 0.09), (Mood.THINKING, 0.09),
-                    (Mood.READING, 0.09), (Mood.HAPPY, 0.16), (Mood.IDLE, 0.0)]
+        sequence = [(Mood(name), pause) for name, pause in self.WAKE]
         self.console.print()
         with Live("", console=self.console, refresh_per_second=20,
                   transient=True) as live:
@@ -655,16 +671,7 @@ class UI:
     def todos(self, rendered: str) -> None:
         if not rendered.strip():
             return
-        body = Text()
-        for line in rendered.splitlines():
-            if line.startswith("[x]"):
-                body.append(line + "\n", style=f"{MUTED} strike")
-            elif line.startswith("[>]"):
-                body.append(line + "\n", style=f"bold {ACCENT}")
-            else:
-                body.append(line + "\n")
-        self.console.print(Panel(body, title="plan", title_align="left", border_style=MUTED,
-                  box=self.box, padding=(0, 1)))
+        self.console.print(plan_block(rendered, self.g))
 
     def code(self, text: str, language: str = "text") -> None:
         """A block of somebody else's code or output.
@@ -767,6 +774,64 @@ class UI:
         for row in rows:
             table.add_row(*row)
         self.console.print(table)
+
+def plan_steps(rendered: str) -> list[tuple[str, str]]:
+    """(state, text) for each step. State is "done", "now" or "todo".
+
+    The tool writes "[x] ", "[>] " and "[ ] "; anything else is a line the
+    model wrapped or a note it added, and belongs to the step above it.
+    """
+    out: list[tuple[str, str]] = []
+    for line in rendered.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        for marker, state in (("[x]", "done"), ("[>]", "now"), ("[ ]", "todo")):
+            if stripped.startswith(marker):
+                out.append((state, stripped[len(marker):].strip()))
+                break
+        else:
+            if out:
+                out[-1] = (out[-1][0], f"{out[-1][1]} {stripped}")
+    return out
+
+
+def plan_block(rendered: str, glyphs: "Glyphs", *, complete: bool = False) -> Text:
+    """The plan, as a short list.
+
+    A list rather than a framed panel, and one renderer rather than two.
+    There used to be a Panel here and a different Panel in the activity bar,
+    which drew the same plan two ways -- one showing raw "[x]" markers, the
+    other glyphs. On a hundred-column terminal the box spent four cells of
+    border and eighty of trailing whitespace per row to say four short
+    things, which is the definition of a widget dominating a UI.
+
+    Every step gets a mark, including the ones not started: without one they
+    were bare indented text and read as wrapped continuations of the step
+    above.
+    """
+    steps = plan_steps(rendered)
+    if not steps:
+        return Text()
+    done = sum(1 for state, _ in steps if state == "done")
+    if complete:
+        done = len(steps)
+    body = Text()
+    body.append(f"  plan  {done}/{len(steps)}\n",
+                style=GOOD if done == len(steps) else MUTED)
+    for state, text in steps:
+        if complete:
+            state = "done"
+        mark, style = {
+            "done": (glyphs.step_done, f"{MUTED} strike"),
+            "now": (glyphs.step_now, f"bold {ACCENT}"),
+            "todo": (glyphs.step_todo, MUTED),
+        }[state]
+        body.append(f"  {mark} ", style=GOOD if state == "done" else style)
+        body.append(text + "\n", style=style)
+    body.rstrip()
+    return body
+
 
 class CodeStreamer:
     """Renders streamed assistant text as it arrives.
@@ -1696,48 +1761,18 @@ class ActivityBar:
     def _plan_panel(self):
         """The plan, drawn inside the live region.
 
-        One place, redrawn in place. It used to have a second home pinned to
-        the top-right corner with a DECSTBM scrolling region -- a mechanism
-        that costs the terminal its scrollback for the rows below it, so the
-        panel was bought with the user's ability to scroll back through the
+        One place and one renderer -- the same ``plan_block`` the transcript
+        uses, so the plan cannot look like two different things depending on
+        which of them drew it. It used to have a second home pinned to the
+        top-right corner with a DECSTBM scrolling region, a mechanism that
+        costs the terminal its scrollback for the rows below it: the panel
+        was bought with the user's ability to scroll back through the
         conversation.
         """
         if not self.plan:
             return None
-        g = self.ui.g
-        body = Text()
-        lines = [ln for ln in self.plan.splitlines() if ln.strip()]
-        for line in lines:
-            stripped = line.lstrip()
-            if self.plan_done_frame or stripped.startswith("[x]"):
-                body.append(f" {g.tick} ", style=GOOD)
-                body.append(stripped[3:].strip() + "\n", style=f"{MUTED} strike")
-            elif stripped.startswith("[>]"):
-                body.append(f" {g.gear} ", style=f"bold {ACCENT}")
-                body.append(stripped[3:].strip() + "\n", style=f"bold {ACCENT}")
-            else:
-                body.append("   ")
-                body.append(stripped[3:].strip() + "\n" if stripped.startswith("[ ]")
-                            else stripped + "\n", style=MUTED)
-
-        body.rstrip()
-        # Steps, not lines. `total` counted every non-empty line, so a task
-        # that wrapped onto one of its own inflated the denominator and the
-        # panel read "3/5" for a three-step plan that was done.
-        # plan_is_complete() has always counted it this way.
-        steps = [ln for ln in lines
-                 if ln.lstrip().startswith(("[ ]", "[>]", "[x]"))]
-        done = sum(1 for ln in steps if ln.lstrip().startswith("[x]"))
-        total = len(steps)
-        if self.plan_done_frame:
-            done = total
-        title = f"plan  {done}/{total}"
-        # The completion frames pulse the border so the tick registers.
-        border = GOOD if self.plan_done_frame else ACCENT
-        if self.plan_done_frame and self.plan_done_frame % 2 == 0:
-            border = ACCENT
-        return Panel(body, title=title, title_align="left", border_style=border,
-                     box=self.ui.box, padding=(0, 1))
+        return plan_block(self.plan, self.ui.g,
+                          complete=bool(self.plan_done_frame))
 
     def set_lead(self, line: Text | None) -> None:
         """Show (or clear) the line of the answer currently being written."""

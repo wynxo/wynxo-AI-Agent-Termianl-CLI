@@ -163,8 +163,8 @@ async def play(ui, name: str = "wyn", animations: bool = True) -> bool:
 
     if not should_play(ui, animations) or not ui.live_ok:
         # Still coloured, just not moving. A static frame is the right
-        # fallback everywhere a repainting widget cannot go -- which
-        # includes the chat layout's transcript.
+        # fallback everywhere a repainting widget cannot go: reduced motion,
+        # a pipe, a terminal that cannot drive a live region.
         ui.console.print(frame(lines, phase=0))
         return True
 

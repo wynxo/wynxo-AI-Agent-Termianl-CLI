@@ -104,3 +104,32 @@ class TestVerboseToolOutputSaysWhetherItWorked:
         for ok in (True, False):
             for line in _lines(self._run(ok)):
                 assert line.startswith(" "), repr(line)
+
+
+class TestTheCompletionReportKeepsTheMargin:
+    """It was the last block still starting hard against column zero, which
+    reads as output that escaped the transcript rather than as the turn's
+    own summing-up."""
+
+    def test_the_report_is_indented(self):
+        import inspect
+
+        from wynxo.cli import Repl
+
+        source = inspect.getsource(Repl._turn_locked)
+        block = source.split("completion_report()", 1)[1].split("# No stats")[0]
+        assert 'f"  {line}"' in block, block[:400]
+
+    def test_every_line_of_a_real_report_is_indented(self):
+        from wynxo.task_state import TaskState, TaskStateMachine
+
+        machine = TaskStateMachine()
+        machine.begin("fix it")
+        machine.transition(TaskState.EXECUTING)
+        machine.add_file("demo.py", changed=True)
+        machine.record_failure("tests failed: 2 of 9")
+        report = machine.completion_report()
+        assert report
+        indented = "\n".join(f"  {line}" for line in report.splitlines())
+        for line in indented.splitlines():
+            assert line.startswith("  "), repr(line)
