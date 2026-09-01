@@ -25,6 +25,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .coerce import loads as loads_object
+
 THINK_BLOCK = re.compile(r"<(think|thinking|reasoning)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
 OPEN_THINK = re.compile(r"<(think|thinking|reasoning)>(.*)$", re.DOTALL | re.IGNORECASE)
 DANGLING_CLOSE = re.compile(r"^(.*?)</(think|thinking|reasoning)>", re.DOTALL | re.IGNORECASE)
@@ -489,32 +491,19 @@ def repair_json(raw: str) -> dict[str, Any] | None:
         attempts.append(text.replace("'", '"'))
 
     for candidate in attempts:
-        try:
-            parsed = json.loads(candidate)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(parsed, dict):
+        if (parsed := loads_object(candidate)) is not None:
             return parsed
 
     # Literal newlines inside a JSON string are the most common failure of all
     # (a model writing file contents). Escape them and retry.
     escaped = _escape_newlines_in_strings(text)
-    if escaped != text:
-        try:
-            parsed = json.loads(escaped)
-            if isinstance(parsed, dict):
-                return parsed
-        except (json.JSONDecodeError, TypeError):
-            pass
+    if escaped != text and (parsed := loads_object(escaped)) is not None:
+        return parsed
 
     # Truncated output: close whatever is still open and see if it parses.
-    if closed := _close_unbalanced(text):
-        try:
-            parsed = json.loads(closed)
-            if isinstance(parsed, dict):
-                return parsed
-        except (json.JSONDecodeError, TypeError):
-            pass
+    if (closed := _close_unbalanced(text)) and (
+            parsed := loads_object(closed)) is not None:
+        return parsed
 
     return None
 

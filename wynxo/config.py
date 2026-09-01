@@ -81,7 +81,13 @@ class Config(Schema):
                        default="30m")
     request_timeout = Field(float, "Seconds to wait for a response. Local generation "
                                    "on CPU is genuinely slow; do not be stingy.",
-                            default=600.0)
+                            default=600.0, ge=1.0, le=86400.0)
+    """Bounded like every other number here, which this one was not: 0, a
+    negative, and NaN all loaded and went straight to httpx, where a zero
+    timeout fails every request the instant it is made and the user is told
+    to raise a `request_timeout` they had just set. A day is past any real
+    wait and still finite, and the bounds reject NaN for free -- every
+    comparison against it is false."""
     auto_approve = Field(list, "Tool names that never prompt for permission.",
                          item_type=str, default_factory=list)
     allow_shell = Field(bool, "Whether the shell tool is available.", default=True)
@@ -99,7 +105,12 @@ class Config(Schema):
                    choices=("purple", "sakura", "kawaii", "midnight", "ember", "catboy", "plain", "minimal"))
     clear_on_start = Field(bool, "Clear the terminal when wynxo opens.", default=True)
     logo = Field(str, "Which start-up logo to show, or 'off' for none.",
-                 default="wyn")
+                 default="wordmark")
+    """`wyn` is a photograph converted to ASCII: sixty-nine rows of @ and #
+    that fill more than half a 30-row terminal, scroll with the conversation
+    rather than away from it, and read as corrupted output rather than as a
+    logo. The wordmark says the same thing in eleven rows and is legible.
+    `wyn` is still there for anyone who wants it."""
     log = Field(bool, "Write a session transcript for debugging.", default=True)
     voice = Field(str, "How the agent talks: plain, warm, mentor, blunt, "
                        "kawaii or mommy.",
@@ -132,7 +143,13 @@ class Config(Schema):
                               "female default where the engine has one.",
                          default="")
     speech_rate = Field(int, "Speaking rate. 0 leaves the engine's default; "
-                             "the scale differs per engine.", default=0)
+                             "the scale differs per engine.", default=0,
+                        ge=0, le=1000)
+    """The other number that carried no bounds. It is passed to a
+    synthesiser's own command line, and the scales differ per engine, so
+    the range is wide -- wide enough to hold every engine's, narrow enough
+    that a value that is plainly not a rate is refused here rather than by
+    the synthesiser."""
     speech_model = Field(str, "Path to a piper .onnx voice model.", default="")
     stt_enabled = Field(bool, "Enable microphone speech recognition (Ctrl-R).", default=True)
     stt_backend = Field(str, "Speech recognition backend: auto, offline (faster-whisper) "

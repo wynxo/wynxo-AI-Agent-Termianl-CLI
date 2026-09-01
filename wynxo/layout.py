@@ -305,6 +305,15 @@ class ChatLayout:
         """A one-line question borrowing the composer. Its future takes the
         next submission, so the main loop cannot swallow the answer."""
 
+        self.opening = True
+        """Whether the transcript still holds only the welcome.
+
+        It decides where short content sits. A conversation belongs at the
+        bottom, against the composer, growing upward -- but the opening
+        screen is not a conversation, and the same rule left the logo and
+        the greeting pinned to the bottom under ten rows of nothing. Cleared
+        by the first thing the user sends."""
+
         self.mouse_on = True
         """Mouse reporting. On, the wheel scrolls the transcript; off, the
         terminal does its own drag-select and copy. Toggled with F2."""
@@ -368,7 +377,7 @@ class ChatLayout:
         box whenever the conversation was short.
         """
         width, height = self.size()
-        room = max(1, width - 4)          # border, gutter, caret
+        room = max(1, width - 5)          # border, gutter, caret
         rows = 0
         for line in (self.buffer.text or "").split("\n"):
             rows += max(1, math.ceil(len(line) / room))
@@ -431,8 +440,12 @@ class ChatLayout:
         lines = self.transcript.visible(rows, self.scroll)
         # Top-padded, so a short conversation sits at the bottom of its
         # region against the composer rather than floating under the header.
-        pad = ["" for _ in range(max(0, rows - len(lines)))]
-        return ANSI("\n".join(pad + lines))
+        # The welcome is the exception: it is a title card, not the tail of
+        # a conversation, and bottom-aligning it put the logo in the last
+        # few rows under a screen of empty space.
+        spare = max(0, rows - len(lines))
+        above = spare // 2 if self.opening else spare
+        return ANSI("\n".join([""] * above + lines + [""] * (spare - above)))
 
     def _header_fragments(self):
         return ANSI(self._header())
@@ -451,7 +464,14 @@ class ChatLayout:
 
     def _footer_fragments(self):
         text = self._footer()
-        note = " F2 select" if self.mouse_on else " F2 scroll  [select mode]"
+        # Shift-drag first, because it is the answer that needs no mode and
+        # no wynxo-specific knowledge: every mainstream terminal -- xterm,
+        # Windows Terminal, iTerm, GNOME Terminal, kitty -- bypasses mouse
+        # reporting while shift is held and does its own selection. The hint
+        # used to name only F2, so it taught a toggle nobody would guess at
+        # for something the terminal already does.
+        note = (" shift+drag to select  ·  F2 mouse off" if self.mouse_on
+                else " drag to select  ·  F2 mouse on")
         width, _ = self.size()
 
         plain = _visible_width(text)
@@ -490,12 +510,14 @@ class ChatLayout:
                 # The question replaces the caret, so it is obvious what the
                 # composer is asking for rather than what it usually accepts.
                 return [("class:caret", f"{self._ask['question']} ")]
-            return [("class:caret", "❯ " if self.unicode else "> ")]
-        return [("class:caret", "  ")]
+            return [("class:caret", " ❯ " if self.unicode else " > ")]
+        return [("class:caret", "   ")]
 
     # -- input -------------------------------------------------------------
 
     def _accept(self, buffer: Buffer) -> bool:
+        # Whatever else this is, the welcome is over.
+        self.opening = False
         if self._ask is not None and not self._ask["future"].done():
             # A question is borrowing the composer. Its answer belongs to
             # whoever asked, not to the main loop -- both await the same

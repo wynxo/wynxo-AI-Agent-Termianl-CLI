@@ -147,6 +147,60 @@ class Session:
             message["superseded"] = True
             self.superseded_chars += was - len(message["content"])
 
+    INTERRUPTED_RESULT = ("[not run: the turn was interrupted before this "
+                          "tool call was executed]")
+    """What stands in for a call that never got an answer. Says plainly that
+    nothing happened, so the model does not read an empty result as a tool
+    that ran and returned nothing."""
+
+    def close_open_tool_calls(self, note: str = "") -> int:
+        """Give every announced tool call an answer. Returns how many it added.
+
+        A tool call is a question the conversation has to answer: the
+        assistant message announces N calls and the next N ``tool`` messages
+        answer them, one each, in order -- which is the same positional
+        convention `_openai_messages` uses to rebuild the ids the Ollama
+        shape does not carry. _supersede() is careful never to break that
+        pairing. Unwinding was not: a turn cancelled between announcing its
+        calls and running them left them unanswered for good, because the
+        announcement is written first. The user was told the conversation was
+        intact while it was malformed, and an OpenAI-compatible server
+        rejects that shape outright -- so one Ctrl-C at the wrong moment made
+        every later request in the session fail.
+
+        Called on the way out of a turn, however it ends. Idempotent: a
+        conversation that is already well-formed is left alone.
+        """
+        added = 0
+        index = 0
+        while index < len(self.messages):
+            message = self.messages[index]
+            index += 1
+            calls = (message.get("tool_calls")
+                     if message.get("role") == "assistant" else None)
+            if not isinstance(calls, list) or not calls:
+                continue
+            answered = 0
+            while (index < len(self.messages)
+                   and self.messages[index].get("role") == "tool"):
+                answered += 1
+                index += 1
+            for position in range(answered, len(calls)):
+                call = calls[position]
+                name = str((call.get("function") or {}).get("name")
+                           or call.get("name") or "tool")
+                self.messages.insert(index, {
+                    "role": "tool",
+                    "tool_name": name,
+                    # The same id the translation would invent for the call
+                    # at this position, so the pair lines up on the wire.
+                    "tool_call_id": str(call.get("id") or f"call_{position}"),
+                    "content": note or self.INTERRUPTED_RESULT,
+                })
+                index += 1
+                added += 1
+        return added
+
     # -- size --------------------------------------------------------------
 
     def token_estimate(self) -> int:

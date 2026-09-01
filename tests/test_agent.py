@@ -992,7 +992,7 @@ class TestAnswerNeverGoesMissing:
         result = await agent.run("capital of france")
         assert result.content == ""
         assert "Paris" not in "".join(cb.content)
-        assert any("empty answer" in warning for warning in cb.warnings)
+        assert _diagnosed(cb.warnings), cb.warnings
         await agent.client.aclose()
 
     async def test_a_thought_only_response_recovers_when_the_retry_answers(self, tmp_path):
@@ -1183,6 +1183,22 @@ class TestGreetingsAreNotTasks:
         assert is_small_talk(text) is False, f"{text!r} would be brushed off"
 
 
+def _diagnosed(warnings) -> bool:
+    """Whether the user was told the answer came back empty.
+
+    The wording is deliberately not fixed: the diagnosis is built from what
+    the provider reported -- a stop reason, a token count, a prompt measured
+    against the window -- so a truncated stream, a zero reply budget and a
+    genuinely full context now read differently. What has to hold is that
+    something was said, and that it says what happened.
+    """
+    return any(
+        any(mark in w.lower() for mark in
+            ("empty", "nothing", "none of them", "stopped sending",
+             "cut off", "sent nothing"))
+        for w in warnings)
+
+
 class TestAnEmptyAnswerIsNotSilence:
     """A model that sends back nothing must not look like a model still working.
 
@@ -1198,27 +1214,27 @@ class TestAnEmptyAnswerIsNotSilence:
         agent, _, cb = make_agent(
             tmp_path, [{"content": ""}, {"content": ""}])
         await agent.run("add retries to the fetch helper")
-        assert any("empty answer" in w for w in cb.warnings), cb.warnings
+        assert _diagnosed(cb.warnings), cb.warnings
 
     @pytest.mark.asyncio
     async def test_it_says_so_for_whitespace_too(self, tmp_path):
         agent, _, cb = make_agent(
             tmp_path, [{"content": "   \n\t  \n"}, {"content": "   \n\t  \n"}])
         await agent.run("add retries to the fetch helper")
-        assert any("empty answer" in w for w in cb.warnings), cb.warnings
+        assert _diagnosed(cb.warnings), cb.warnings
 
     @pytest.mark.asyncio
     async def test_small_talk_gets_the_same_warning(self, tmp_path):
         # Greetings never reach the tool loop, so they need their own guard.
         agent, _, cb = make_agent(tmp_path, [{"content": ""}, {"content": ""}])
         await agent.run("hello")
-        assert any("empty answer" in w for w in cb.warnings), cb.warnings
+        assert _diagnosed(cb.warnings), cb.warnings
 
     @pytest.mark.asyncio
     async def test_an_ordinary_answer_is_not_warned_about(self, tmp_path):
         agent, _, cb = make_agent(tmp_path, [{"content": "Added a retry loop."}])
         await agent.run("add retries to the fetch helper")
-        assert not any("empty answer" in w for w in cb.warnings), cb.warnings
+        assert not _diagnosed(cb.warnings), cb.warnings
 
     @pytest.mark.asyncio
     async def test_a_thought_only_response_warns_about_the_missing_answer(self, tmp_path):
@@ -1226,7 +1242,7 @@ class TestAnEmptyAnswerIsNotSilence:
             tmp_path, [{"content": "", "thinking": "The file already retries."},
                        {"content": "", "thinking": "It already retries."}])
         await agent.run("does the fetch helper retry?")
-        assert any("empty answer" in w for w in cb.warnings), cb.warnings
+        assert _diagnosed(cb.warnings), cb.warnings
 
     @pytest.mark.asyncio
     async def test_the_warning_says_what_to_do_about_it(self, tmp_path):
@@ -1234,7 +1250,14 @@ class TestAnEmptyAnswerIsNotSilence:
             tmp_path, [{"content": ""}, {"content": ""}])
         await agent.run("add retries to the fetch helper")
         said = " ".join(cb.warnings)
-        assert "/doctor" in said and "/compact" in said
+        # One actionable fix for the cause that was actually observed,
+        # rather than a list of every cause an empty answer might have had.
+        # Naming /compact for a conversation that fits, or /doctor for a
+        # model that hit its token limit, sends the user a long way in the
+        # wrong direction.
+        assert any(hint in said for hint in
+                   ("/doctor", "/compact", "num_predict", "num_ctx",
+                    "ollama ps", "different model")), said
 
 
 class TestAnEmptyAnswerRecovers:
@@ -1246,7 +1269,7 @@ class TestAnEmptyAnswerRecovers:
         agent, fake, cb = make_agent(tmp_path, [{"content": ""}])
         result = await agent.run("add retries to the fetch helper")
         assert result.content == "Done."          # the retry answered
-        assert not any("empty answer" in w for w in cb.warnings), cb.warnings
+        assert not _diagnosed(cb.warnings), cb.warnings
         assert len(fake.requests) == 2            # the nudge cost one retry
         await agent.client.aclose()
 
@@ -1264,7 +1287,7 @@ class TestAnEmptyAnswerRecovers:
         agent, fake, cb = make_agent(
             tmp_path, [{"content": ""}, {"content": ""}, {"content": ""}])
         await agent.run("add retries to the fetch helper")
-        assert any("empty answer" in w for w in cb.warnings), cb.warnings
+        assert _diagnosed(cb.warnings), cb.warnings
         assert len(fake.requests) == 2            # one retry, then warn
         await agent.client.aclose()
 
