@@ -15,7 +15,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from .coerce import as_int, as_list, as_text
+from .coerce import as_int, as_list, as_text, loads as json_object
 from .config import Config, MIN_USABLE_CONTEXT
 
 LARGE_CONTEXT = 131_072
@@ -281,9 +281,7 @@ class OllamaClient:
             async for line in response.aiter_lines():
                 if not line.strip():
                     continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
+                if (data := json_object(line)) is None:
                     continue
                 if err := data.get("error"):
                     raise ProviderError(f"Pull failed: {err}")
@@ -391,9 +389,7 @@ class OllamaClient:
                 async for line in response.aiter_lines():
                     if not line.strip():
                         continue
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
+                    if (data := json_object(line)) is None:
                         continue
                     if err := data.get("error"):
                         # Mid-stream errors used to be re-raised verbatim,
@@ -426,9 +422,7 @@ class OllamaClient:
             async for line in response.aiter_lines():
                 if not line.strip():
                     continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
+                if (data := json_object(line)) is None:
                     continue
                 if err := data.get("error"):
                     raise ProviderError(
@@ -490,10 +484,13 @@ class OllamaClient:
 
     def _explain_error(self, status: int, body: str, payload: dict) -> str:
         text = body.strip()
-        try:
-            text = json.loads(body).get("error", text)
-        except json.JSONDecodeError:
-            pass
+        # A server is free to answer an error with a bare JSON string, a
+        # list, a number, or nothing that parses at all. Reaching straight
+        # for .get raised AttributeError out of the one function whose job
+        # is to explain a failure, replacing the server's own diagnosis
+        # with a traceback about explaining it.
+        if reported := as_text((json_object(body) or {}).get("error")).strip():
+            text = reported
         low = text.lower()
         model = payload.get("model", "?")
         if status == 404 or "not found" in low:
@@ -668,9 +665,7 @@ class OpenAIClient:
                     if data == "[DONE]":
                         finished = True
                         break
-                    try:
-                        obj = json.loads(data)
-                    except json.JSONDecodeError:
+                    if (obj := json_object(data)) is None:
                         continue
                     usage = obj.get("usage")
                     if isinstance(usage, dict):
@@ -747,10 +742,13 @@ class OpenAIClient:
 
     def _explain_error(self, status: int, body: str, payload: dict) -> str:
         text = body.strip()
-        try:
-            text = json.loads(body).get("error", text)
-        except json.JSONDecodeError:
-            pass
+        # A server is free to answer an error with a bare JSON string, a
+        # list, a number, or nothing that parses at all. Reaching straight
+        # for .get raised AttributeError out of the one function whose job
+        # is to explain a failure, replacing the server's own diagnosis
+        # with a traceback about explaining it.
+        if reported := as_text((json_object(body) or {}).get("error")).strip():
+            text = reported
         if status == 404 or "model not found" in text.lower():
             return (
                 f"The server does not have {payload.get('model', '?')!r}.\n"

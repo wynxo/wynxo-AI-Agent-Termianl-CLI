@@ -16,6 +16,40 @@ still 128. Losing it would be its own bug.
 
 from __future__ import annotations
 
+import json
+
+
+def loads(text: object) -> dict | None:
+    """Decode JSON that came off a wire or out of a model.
+
+    Returns the object, or None when the text is not one. The decode is the
+    boundary the rest of this module sits behind, and it was the part left
+    on trust: every caller caught ``json.JSONDecodeError`` and nothing else,
+    which leaves two decoder failures live.
+
+    An integer literal of more than 4300 digits raises ``ValueError`` on
+    Python 3.11 and later -- the interpreter's own guard against quadratic
+    int parsing -- and deep nesting raises ``RecursionError``, because the
+    decoder recurses per level. Neither is a JSONDecodeError, so both went
+    straight past the handler: a model emitting a long number inside a tool
+    call killed the turn, and a server sending either in an error body
+    crashed the code trying to explain the error.
+
+    Anything that is not a JSON object is None as well. A body that decodes
+    to a bare string or a list is not the mapping the caller is about to
+    call ``.get`` on, and letting it through produced ``'str' object has no
+    attribute 'get'`` at the call site rather than here.
+    """
+    if not isinstance(text, (str, bytes, bytearray)):
+        return None
+    try:
+        value = json.loads(text)
+    except (ValueError, TypeError, RecursionError):
+        # ValueError covers JSONDecodeError and the digit limit; the others
+        # are the decoder giving up on shape rather than on syntax.
+        return None
+    return value if isinstance(value, dict) else None
+
 
 def as_text(value: object) -> str:
     """A wire field as a string, whatever the server actually sent.

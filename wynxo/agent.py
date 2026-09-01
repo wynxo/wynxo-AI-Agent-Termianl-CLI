@@ -1745,6 +1745,9 @@ class Agent:
                         result.content = final
         except ProviderError as exc:
             self.task_state.transition(TaskState.FAILED)
+            # Same reason: the provider can fail between the calls being
+            # announced and their results being recorded.
+            self.session.close_open_tool_calls()
             partial = self._last_substantive()
             return TurnResult(
                 content=partial,
@@ -1753,10 +1756,20 @@ class Agent:
             )
         except asyncio.CancelledError:
             self.task_state.transition(TaskState.CANCELLED)
+            # The turn is over, but the conversation has to survive it. A
+            # cancellation between announcing tool calls and running them
+            # leaves those calls unanswered, and the session is kept for the
+            # next request -- so the malformed shape would be replayed on
+            # every one of them.
+            self.session.close_open_tool_calls()
             raise Interrupted from None
 
         self.task_state.transition(TaskState.COMPLETED)
         result.elapsed = time.monotonic() - started
+        # Cheap and idempotent on a well-formed conversation, and it covers
+        # the ways a turn can end early without raising -- the iteration
+        # ceiling, a Stuck stop, an aborted permission prompt.
+        self.session.close_open_tool_calls()
         self.session.save()
         return result
 

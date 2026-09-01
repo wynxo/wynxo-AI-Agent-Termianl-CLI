@@ -227,6 +227,23 @@ class Field:
         return value
 
     def _bounded(self, value, loc: str, errors: list):
+        if self.ge is self.le is self.gt is self.lt is None:
+            return value
+        # NaN and the infinities, before the comparisons that cannot catch
+        # them: every comparison against NaN is false, so `value < self.ge`
+        # waved it straight through every bounded field. Python's json
+        # decoder accepts the literals NaN, Infinity and -Infinity as
+        # extensions, and a NaN reaching asyncio.wait_for is not a short
+        # timeout but no timeout at all -- the wait never expires. An int
+        # field is saved by its own coercion (int(nan) raises); a float
+        # field had nothing in the way.
+        #
+        # Declaring a range is what asks for this check: a field with no
+        # bounds is left exactly as forgiving as it was.
+        if isinstance(value, float) and (value != value or value in (
+                float("inf"), float("-inf"))):
+            errors.append((loc, "must be a finite number"))
+            return value
         if self.ge is not None and value < self.ge:
             errors.append((loc, f"must be >= {self.ge}"))
         if self.le is not None and value > self.le:
