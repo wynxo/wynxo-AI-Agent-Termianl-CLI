@@ -560,8 +560,15 @@ Runs that immediately, then drops you into the REPL.
 
 - **Ctrl-C** interrupts the current turn. The conversation survives; ask
   something else.
+- **Keep typing.** What you write while it works is queued and runs when the
+  turn ends — the status line shows it as you type, then as a count.
 - **Alt-Enter** inserts a newline instead of submitting.
 - **Up arrow** walks your history.
+
+An interrupt holds the queue rather than launching the next thing: pressing
+stop and having something else start immediately is the opposite of what the
+key means. `/queue` shows what is waiting, `/queue run` sends it, `/queue
+clear` drops it. The count stays in the status line until you decide.
 
 ### Teaching it about your project
 
@@ -656,6 +663,7 @@ Ctrl-O mid-reply and the thinking appears or disappears immediately.
 | `Ctrl-T` | full tool output, or a one-line summary |
 | `Ctrl-E` | step effort up |
 | `Ctrl-B` | step effort down |
+| `Ctrl-D` | expand or collapse the edit diff — and, on an empty prompt, leave |
 | `Ctrl-C` | interrupt this turn, keep the conversation |
 | `Alt-Enter` | newline instead of submitting |
 | `↑` `↓` | history |
@@ -663,8 +671,11 @@ Ctrl-O mid-reply and the thinking appears or disappears immediately.
 
 Because wynxo runs the ordinary scrolling prompt, the terminal's own
 scrolling, selection and copy work exactly as they do in any other CLI — no
-mouse capture, no special keys. `/copy` puts the conversation (or `/copy
-last` for just the last answer) on your clipboard when you want it as text.
+alternate screen, no mouse capture, no special keys, no mode to switch into.
+The wheel scrolls your scrollback while the agent is working, and you can
+drag over an answer from ten minutes ago and copy it mid-turn. `/copy` puts
+the conversation (or `/copy last` for just the last answer) on your
+clipboard when you want it as text instead.
 
 While a turn runs there is a live status line showing what is happening right
 now:
@@ -1125,8 +1136,21 @@ effort-level setting.
 /theme [name]            purple | midnight | ember | plain
 /log [tail|list|off]     where this session is being recorded
 /tools                   what the agent can call
+/apps [refresh]          applications this machine has, for "open ..."
+/map [rebuild]           the project layout the model is given
 /thinking                show or hide the model's reasoning
-/plan                    the current todo list
+/plan  ·  /todo          the current todo list
+/queue [run|clear]       what you typed while it was working
+/diff [staged]           uncommitted changes
+/review [path]           ask the model to review the working tree
+/test [args]             run the project's detected test command
+/commit                  write a commit message from the staged diff
+/new                     a new chat: fresh history, screen and log
+/resume [id]             pick up an earlier conversation
+/secrets ...             credential protection: on | off | allow <path>
+/animate [name|on|off]   the companion's animations
+/logo [name|off]         the start-up logo
+/pull <model>            pull a model onto the server
 /clear                   fresh conversation
 /compact                 summarise now, reclaim context
 /stats                   tokens, speed, context use, tool mode
@@ -1293,9 +1317,10 @@ Use Windows Terminal rather than the legacy console host.
 ### I can't scroll, or select and copy with the mouse
 
 This used to be a real limitation of the old full-screen chat layout, which
-captured the mouse for the wheel. It is gone: wynxo now always runs the
-scrolling prompt, so scrolling, selecting and copying are your terminal's
-own — the wheel and drag-select behave exactly as they do in any other
+lived on the alternate screen and captured the mouse for the wheel. It is
+gone, along with the F2 toggle that used to hand the mouse back: wynxo runs
+the scrolling prompt and nothing else, so scrolling, selecting and copying
+are your terminal's own and behave exactly as they do in any other
 command-line program. `/copy` still exists if you want the conversation (or
 `/copy last` for the last answer) on the clipboard.
 
