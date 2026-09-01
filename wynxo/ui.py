@@ -1331,10 +1331,11 @@ SURGE_FRAMES = (
 def celebrate(ui: "UI", label: str, level: int, steps: int) -> None:
     """A band of colour for stepping up, drawn once.
 
-    The animated surge needs a repainting widget, which the chat layout does
-    not have -- its transcript is a list of finished lines. This is the same
-    idea in one line: the band is longer and brighter the further up you
-    went, so the top of the scale still reads as an event.
+    The alternative -- ``surge`` below -- animates, which needs a place to
+    repaint. This is the same idea committed in one line, for the case where
+    there is nowhere to repaint (output going to a pipe, or a terminal that
+    cannot drive a live region): the band is longer and brighter the further
+    up you went, so the top of the scale still reads as an event.
     """
     from rich.text import Text as _T
 

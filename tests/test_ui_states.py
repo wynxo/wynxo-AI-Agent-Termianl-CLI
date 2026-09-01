@@ -216,3 +216,46 @@ class TestTheRegionIsALayerNotARecord:
         bar.ui.live_ok = False
         bar.start()
         assert bar._live is None
+
+
+class TestOnlyOneLiveDisplayAtATime:
+    """rich refuses a second live display on the same console, and the
+    refusal would land in the middle of a turn.
+
+    Two things in wynxo drive one: the activity bar, for the length of a
+    turn, and the effort surge, which sweeps a band across a line. They must
+    never overlap. The surge is reached only from /effort, which runs at the
+    prompt or from the queue drain -- both after the turn's bar has stopped
+    in its finally. The mid-turn path, Ctrl-E and Ctrl-B, deliberately does
+    not animate.
+    """
+
+    def test_the_mid_turn_effort_keys_do_not_animate(self):
+        import inspect
+
+        from wynxo.cli import Repl
+
+        source = inspect.getsource(Repl._shift_effort)
+        for animation in ("surge", "celebrate", "Live("):
+            assert animation not in source, (
+                f"{animation} would be a second live display mid-turn")
+
+    def test_the_surge_is_only_reached_from_the_command(self):
+        import inspect
+
+        from wynxo.cli import Repl
+
+        source = inspect.getsource(Repl)
+        callers = [line.strip() for line in source.splitlines()
+                   if "_effort_surge(" in line and "def " not in line]
+        assert callers, "the surge is unreachable"
+        for call in callers:
+            assert call.startswith("await self._effort_surge("), call
+        assert "_effort_surge" in inspect.getsource(Repl.cmd_effort)
+
+    def test_the_bar_is_the_only_live_display_cli_can_start(self):
+        import inspect
+
+        from wynxo import cli
+
+        assert "Live(" not in inspect.getsource(cli)
