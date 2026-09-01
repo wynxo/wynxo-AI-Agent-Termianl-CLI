@@ -1302,7 +1302,7 @@ class Repl:
         if self.config.logo and self.config.logo != "off":
             await logo.play(self.ui, self.config.logo, self.config.animations)
         else:
-            self.ui.wake(self.pet, self.pet.name)
+            await self.ui.wake(self.pet, self.pet.name)
         self.ui.banner(
             self.config.model,
             f"{self.client.base_url} (ollama {version})",

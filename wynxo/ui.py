@@ -479,12 +479,20 @@ class UI:
     and this one now has all three in the order a person would draw them.
     """
 
-    def wake(self, pet, name: str) -> None:
+    async def wake(self, pet, name: str) -> None:
         """A short wake-up before the header.
 
         Under half a second, once per session, and skipped entirely when
         animation is off or nothing is watching. Anything longer is a thing
         you wait through rather than enjoy.
+
+        Async, and awaiting rather than sleeping. It is called from the
+        start-up coroutine, so a ``time.sleep`` here stopped the event loop
+        for the length of the animation -- harmless in practice, since
+        nothing else is pending four tenths of a second into a session, and
+        exactly the habit that is not harmless anywhere else. The logo
+        beside it has always awaited; these two are the same kind of thing
+        and should not be written two different ways.
         """
         if not (pet and pet.enabled and pet.animate and self.console.is_terminal):
             return
@@ -510,7 +518,7 @@ class UI:
                 line.append(f"  {name}", style=MUTED)
                 live.update(line)
                 if pause:
-                    time.sleep(pause)
+                    await asyncio.sleep(pause)
         pet.rest()
 
     def shorten_path(self, path: str) -> str:

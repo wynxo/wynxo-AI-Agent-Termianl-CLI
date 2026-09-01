@@ -14,6 +14,7 @@ region drawing over the prompt.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import threading
 
@@ -114,6 +115,25 @@ class TestStartupAnimationsAreBounded:
         assert moods[-1] == "idle"
         assert "sad" not in moods
 
+    def test_nothing_at_start_up_blocks_the_event_loop(self):
+        """Both start-up animations run from the start-up coroutine. A
+        blocking sleep there stops the loop for the length of the
+        animation -- harmless four tenths of a second into a session, and
+        exactly the habit that is not harmless anywhere else."""
+        import ast
+        import textwrap
+
+        assert inspect.iscoroutinefunction(UI.wake)
+        assert inspect.iscoroutinefunction(logo.play)
+        for func in (UI.wake, logo.play):
+            tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+            # The calls themselves, not a docstring that mentions one.
+            called = {ast.unparse(node.func) for node in ast.walk(tree)
+                      if isinstance(node, ast.Call)}
+            blocking = [name for name in called
+                        if name.endswith("sleep") and "asyncio" not in name]
+            assert blocking == [], f"{func.__name__}: {blocking}"
+
     def test_the_logo_is_under_a_second(self):
         assert logo.FRAMES * logo.FRAME_TIME < 1.0
 
@@ -126,7 +146,7 @@ class TestStartupAnimationsAreBounded:
         output as literal text."""
         ui = _ui()
         pet = Pet()
-        ui.wake(pet, "wyn")          # live_ok is False: the still path
+        asyncio.run(ui.wake(pet, "wyn"))   # live_ok is False: the still path
         bar = ActivityBar(ui, "medium")
         bar.start()
         assert bar._live is None
