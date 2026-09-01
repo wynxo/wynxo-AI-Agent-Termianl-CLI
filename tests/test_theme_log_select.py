@@ -258,17 +258,69 @@ class TestThemeAppliesLive:
         finally:
             ui.apply_palette(resolve("purple"))
 
-    def test_every_listed_consumer_really_imports_those_names(self):
-        """The map is hand-maintained, so it has to be checked against the
-        imports it claims to mirror."""
+    def test_every_module_that_imports_a_colour_is_swept(self):
+        """The old map named, per module, which colours it had imported --
+        and it had drifted. cli.py imports GOOD, BAD and BAR_ACCENT too, and
+        none of the three was listed, so after /theme the edit card's done
+        and failed marks and the effort surge kept the palette before last.
+
+        Read from the imports themselves rather than from a list beside
+        them: a module that starts importing a colour must not have to
+        remember to add itself.
+        """
+        import ast
+        import pathlib
+
+        from wynxo.ui import _COLOUR_CONSUMERS, _COLOUR_NAMES
+
+        root = pathlib.Path(__file__).resolve().parent.parent / "wynxo"
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            imported = {
+                alias.name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom)
+                and (node.module or "").endswith("ui")
+                for alias in node.names
+            }
+            colours = imported & set(_COLOUR_NAMES)
+            if not colours:
+                continue
+            module = "wynxo." + str(
+                path.relative_to(root).with_suffix("")).replace("/", ".")
+            if module == "wynxo.ui":
+                continue
+            assert module in _COLOUR_CONSUMERS, (
+                f"{module} imports {sorted(colours)} and is never swept, so "
+                f"they keep the old palette after /theme")
+
+    def test_every_imported_colour_actually_follows_the_theme(self):
+        """The end of the story the map was there to tell."""
         import importlib
 
-        from wynxo.ui import _COLOUR_CONSUMERS
+        from wynxo import ui
+        from wynxo.theme import resolve
+        from wynxo.ui import _COLOUR_CONSUMERS, _COLOUR_NAMES
 
-        for module_name, names in _COLOUR_CONSUMERS.items():
-            module = importlib.import_module(module_name)
-            for name in names:
-                assert hasattr(module, name), f"{module_name} has no {name}"
+        sakura = resolve("sakura")
+        wanted = {"ACCENT": sakura.accent, "MUTED": sakura.muted,
+                  "FAINT": sakura.faint, "GOOD": sakura.good,
+                  "WARN": sakura.warn, "BAD": sakura.bad,
+                  "BAR_STYLE": f"on {sakura.bar_bg}",
+                  "BAR_ACCENT": sakura.bar_accent, "BAR_DIM": sakura.bar_dim}
+        try:
+            ui.apply_palette(sakura)
+            for module_name in _COLOUR_CONSUMERS:
+                module = importlib.import_module(module_name)
+                for name in _COLOUR_NAMES:
+                    if name == "WARN" and module_name == "wynxo.cli":
+                        continue          # the status tag, not a colour
+                    if not hasattr(module, name):
+                        continue          # not imported there
+                    assert getattr(module, name) == wanted[name], (
+                        f"{module_name}.{name} kept the old palette")
+        finally:
+            ui.apply_palette(resolve("purple"))
 
 
 class TestCommandCompleter:

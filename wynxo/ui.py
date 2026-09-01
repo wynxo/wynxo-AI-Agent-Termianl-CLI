@@ -10,10 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import math
 import re
 import sys
-import textwrap
 import time
 from typing import Iterable
 
@@ -68,21 +66,49 @@ MIN_ACTIVITY_WIDTH = 16
 # never reached them -- which is why changing the theme used to require a
 # restart. Pushing the new values into them is blunt, but it is one place and
 # the alternative is threading a palette object through seventy call sites.
-# Per module, exactly the names it does `from .ui import ...` for. Listed
-# rather than discovered, because a name can mean something else elsewhere:
-# cli.py also imports WARN from .status, where it is a status tag and not a
-# colour, and blindly overwriting it printed a raw "[#f0c674]" on screen
-# instead of "[ WARN ]". Keep these in step with the imports.
-_COLOUR_CONSUMERS = {
-    "wynxo.cli": ("ACCENT", "FAINT", "MUTED"),
-    "wynxo.wizard": ("ACCENT", "MUTED"),
-    "wynxo.doctor": ("ACCENT", "BAD", "GOOD", "MUTED", "WARN"),
-}
+_COLOUR_NAMES = ("ACCENT", "MUTED", "FAINT", "GOOD", "WARN", "BAD",
+                 "BAR_STYLE", "BAR_ACCENT", "BAR_DIM")
+
+_COLOUR_CONSUMERS = ("wynxo.cli", "wynxo.wizard", "wynxo.doctor",
+                     "wynxo.corner", "wynxo.select", "wynxo.layout")
+"""Modules to look in. Being on this list is not enough to be rewritten --
+see below -- so a module that stops importing colours costs nothing."""
+
+
+class _Missing:
+    """A sentinel that equals nothing, so an absent name never matches."""
+
+    def __eq__(self, other) -> bool:
+        return False
+
+    __hash__ = None
+
+
+_MISSING = _Missing()
 
 
 def apply_palette(palette: Palette) -> None:
-    """Rebind the module colours, everywhere they were imported to."""
+    """Rebind the module colours, everywhere they were imported to.
+
+    A name is rewritten only where it still holds the value this module had
+    before the change. That is what makes it safe to sweep whole modules
+    rather than keep a list of which names each one imported: cli.py imports
+    WARN from .status, where it is the status tag "WARN" and not a colour,
+    and blindly overwriting it printed a raw "[#f0c674]" on screen instead
+    of "[ WARN ]". It no longer matches, so it is left alone.
+
+    The per-module list this replaces had drifted, which is the failure a
+    hand-kept list invites: cli.py imports GOOD, BAD and BAR_ACCENT too, and
+    none of the three was named -- so after /theme the edit card's done and
+    failed marks, and the effort surge, went on using the palette before
+    last.
+    """
     global PALETTE, ACCENT, MUTED, FAINT, GOOD, WARN, BAD, BAR_STYLE, BAR_ACCENT, BAR_DIM
+    here = globals()
+    # Captured before the rebind: it is the *old* value that identifies a
+    # name in another module as one of ours.
+    was = {name: here[name] for name in _COLOUR_NAMES}
+
     PALETTE = palette
     ACCENT = palette.accent
     MUTED = palette.muted
@@ -96,13 +122,12 @@ def apply_palette(palette: Palette) -> None:
 
     import sys as _sys
 
-    here = globals()
-    for module_name, names in _COLOUR_CONSUMERS.items():
+    for module_name in _COLOUR_CONSUMERS:
         module = _sys.modules.get(module_name)
         if module is None:
             continue          # not imported in this run; nothing to update
-        for name in names:
-            if hasattr(module, name):
+        for name in _COLOUR_NAMES:
+            if getattr(module, name, _MISSING) == was[name]:
                 setattr(module, name, here[name])
 
 
@@ -117,6 +142,56 @@ Stripping ESC while letting its one-character twin through left the shorter
 road open. Nothing in the range is text: they are control codes by
 definition, in every encoding, so there is no legitimate output to lose.
 U+00A0, the non-breaking space, is just past the end and is left alone."""
+
+
+def _chunks(word: str, room: int):
+    """A word too wide for any line, cut into pieces that fit."""
+    piece, width = "", 0
+    for char in word:
+        size = cell_len(char)
+        if piece and width + size > room:
+            yield piece
+            piece, width = "", 0
+        piece += char
+        width += size
+    if piece:
+        yield piece
+
+
+def wrap_cells(text: str, room: int) -> list[str]:
+    """Wrap to a width in display cells rather than in characters.
+
+    textwrap measures with len(). A Japanese or Chinese character is two
+    cells wide, so a message in either came out twice as wide as it asked
+    for and the console wrapped it a second time -- at column zero, which
+    threw away the hanging indent the caller had wrapped it to get. The
+    warnings and errors that go through here are the lines a person reads
+    most carefully, and they were the ones that fell apart.
+
+    Words are kept whole where they fit and cut by cells where they cannot,
+    which is also how a script with no spaces in it wants to break.
+    """
+    room = max(1, room)
+    lines: list[str] = []
+    line, width = "", 0
+    for word in text.split():
+        size = cell_len(word)
+        if size > room:
+            if line:
+                lines.append(line)
+                line, width = "", 0
+            *whole, last = list(_chunks(word, room))
+            lines.extend(whole)
+            line, width = last, cell_len(last)
+            continue
+        if width and width + 1 + size > room:
+            lines.append(line)
+            line, width = "", 0
+        line = f"{line} {word}" if line else word
+        width = cell_len(line)
+    if line:
+        lines.append(line)
+    return lines or [""]
 
 
 def sanitise(text: str) -> str:
@@ -302,25 +377,6 @@ class UI:
         self.width = terminal_width()
         self.live_ok = True
         """Whether a rich Live may drive the screen."""
-        # Lines printed since the prompt last opened, so the next prompt can
-        # pad itself to the bottom of the screen. Counted at the console so
-        # every print path is covered, wrapping included.
-        self._lines_since_prompt = 0
-        _print = self.console.print
-
-        def _counting_print(renderable=None, *args, **kwargs):
-            if renderable is None:
-                # A bare console.print() is a blank line. Rich renders a
-                # literal None object as the text "None", so it must never
-                # be handed one -- and the blank line does occupy a row.
-                _print(*args, **kwargs)
-                self._lines_since_prompt += 1
-                return
-            _print(renderable, *args, **kwargs)
-            text = renderable.plain if isinstance(renderable, Text) else str(renderable)
-            self._lines_since_prompt += self._wrap_count(text)
-
-        self.console.print = _counting_print  # type: ignore[method-assign]
 
     def attach(self, transcript) -> None:
         """Send everything this UI draws into the chat transcript instead of
@@ -338,7 +394,14 @@ class UI:
         """
         self.transcript = transcript
         self.live_ok = False
-        self.width = transcript.width
+        self._resized(transcript.width)
+        # A resize reaches this UI through the transcript rather than
+        # through SIGWINCH. prompt_toolkit's application installs its own
+        # SIGWINCH handler for as long as it runs, and there is only one
+        # handler per signal -- so with the layout up for the whole session,
+        # refresh_size() was never called again and every width this module
+        # reasons about stayed frozen at whatever it was on the first draw.
+        transcript.on_resize = self._resized
         # No print wrapper: the transcript's sink drains on every write, so
         # Console.print and the streamers' direct console.file.write both
         # arrive by the same door. Wrapping print alone was the bug -- the
@@ -347,33 +410,23 @@ class UI:
         # arrived in lumps instead of as it was written.
         self.console = transcript.console
 
-    def _wrap_count(self, text: str) -> int:
-        """How many terminal lines ``text`` occupies at the current width,
-        wrapping included -- the count the prompt uses to pin itself."""
-        width = max(1, self.width)
-        total = 0
-        for line in text.splitlines():
-            total += max(1, math.ceil(cell_len(line) / width))
-        return total
-
-    def prompt_lines(self) -> int:
-        """Lines printed since the prompt last opened."""
-        return self._lines_since_prompt
-
-    def reset_prompt_lines(self) -> None:
-        """Start counting a fresh turn's output."""
-        self._lines_since_prompt = 0
-
     def refresh_size(self) -> None:
-        """Re-read the terminal width after the window changed size.
+        """Re-read the width after the window changed size.
 
-        The width is captured at construction and by anything that wraps to
-        it (the transcript, the activity bar). prompt_toolkit re-renders the
-        prompt on resize itself; this keeps wynxo's own measure honest so
-        the next draw from either picks up the new width.
+        The classic prompt hears resizes through SIGWINCH, which is what
+        calls this. Under the layout the transcript is the only thing told,
+        so its width is the honest one -- and the signal is not ours to
+        listen to there anyway.
         """
-        self.width = terminal_width()
-        self.narrow = self.width < 60
+        if self.transcript is not None:
+            self._resized(self.transcript.width)
+            return
+        self._resized(terminal_width())
+
+    def _resized(self, width: int) -> None:
+        """Adopt a new width, from either source."""
+        self.width = width
+        self.narrow = width < 60
 
     # -- chrome ------------------------------------------------------------
 
@@ -398,14 +451,19 @@ class UI:
         separator = f"  {self.g.dot}  "
         prefix = "  wynxo"
         budget = self.width - 1
-        shown: list[str] = []
-        for part in parts:
-            candidate = shown + [part]
-            room = cell_len(prefix) + sum(
+
+        def room(candidate: list[str]) -> int:
+            return cell_len(prefix) + sum(
                 cell_len(separator) + cell_len(p) for p in candidate)
-            if room > budget:
-                continue
-            shown = candidate
+
+        # Drop from the least important end, rather than skipping whichever
+        # single part happens not to fit. The old loop kept going after a
+        # part it could not place, so a long project path was dropped and
+        # the shorter server address that follows it was kept -- exactly
+        # backwards, and on a wide terminal with room for the path.
+        shown = list(parts)
+        while shown and room(shown) > budget:
+            shown.pop()
 
         head = Text()
         head.append(prefix, style=f"bold {ACCENT}")
@@ -436,7 +494,6 @@ class UI:
         self.console.clear()
         self.console.file.write("\x1b[3J")   # erase saved lines
         self.console.file.flush()
-        self._lines_since_prompt = 0
 
     def wake(self, pet, name: str) -> None:
         """A short wake-up before the header.
@@ -482,10 +539,23 @@ class UI:
         if path.startswith(home):
             path = "~" + path[len(home):]
         budget = max(18, self.width // 3)
-        if len(path) <= budget:
+        if cell_len(path) <= budget:
             return path
-        parts = path.replace("\\", "/").split("/")
-        return ".../" + "/".join(parts[-2:]) if len(parts) > 2 else path[-budget:]
+        parts = [p for p in path.replace("\\", "/").split("/") if p]
+        # Successively shorter forms, first that fits. The old fallback
+        # returned ".../" plus the last two components whatever their
+        # length, so a long project directory came back well over budget --
+        # and the banner then dropped the path entirely rather than showing
+        # a shortened one, which is the opposite of what shortening is for.
+        for keep in (2, 1):
+            if len(parts) > keep:
+                candidate = ".../" + "/".join(parts[-keep:])
+                if cell_len(candidate) <= budget:
+                    return candidate
+        tail = parts[-1] if parts else path
+        if cell_len(tail) <= budget:
+            return tail
+        return self.g.ellipsis + tail[-(budget - cell_len(self.g.ellipsis)):]
 
     def rule(self, label: str = "") -> None:
         self.console.print(Rule(label, style=MUTED, characters=self.g.hbar))
@@ -516,7 +586,7 @@ class UI:
         # Wrap each of the message's own lines separately: a message that
         # already has structure keeps it.
         for line in sanitise(message).split("\n"):
-            pieces = textwrap.wrap(line, room) or [""]
+            pieces = wrap_cells(line, room)
             for piece in pieces:
                 if not first:
                     out.append("\n")
@@ -595,13 +665,19 @@ class UI:
         limit = max(24, self.width - 8)
         self.console.print(Text("      " + text[:limit], style=MUTED))
 
+    MAX_DIFF_LINES = 120
+    """Past this a diff stops being something you read and starts being
+    something you scroll past. The rest is counted, never dropped silently."""
+
     def diff(self, text: str) -> None:
         if not text.strip():
             return
         text = sanitise(text)
         limit = max(24, self.width - 6) if self.narrow else 10_000
         body = Text()
-        for line in (l[:limit] for l in text.splitlines()[:120]):
+        all_lines = text.splitlines()
+        dropped = max(0, len(all_lines) - self.MAX_DIFF_LINES)
+        for line in (l[:limit] for l in all_lines[:self.MAX_DIFF_LINES]):
             if line.startswith("+++") or line.startswith("---"):
                 body.append(line + "\n", style=MUTED)
             elif line.startswith("+"):
@@ -612,6 +688,11 @@ class UI:
                 body.append(line + "\n", style=ACCENT)
             else:
                 body.append(line + "\n", style=MUTED)
+        if dropped:
+            # Say so. A diff cut off at exactly 120 lines with no mark reads
+            # as a diff that ended there, which is a different claim.
+            body.append(f"{self.g.ellipsis} {dropped} more line"
+                        f"{'' if dropped == 1 else 's'}\n", style=f"{MUTED} italic")
         self.console.print(Panel(body, border_style=MUTED, box=self.box, padding=(0, 1)))
 
     def todos(self, rendered: str) -> None:
@@ -750,7 +831,6 @@ class CodeStreamer:
         self.in_code = False
         self.language = "text"
         self.started = False
-        self.width = max(30, ui.width - len(indent) - 1)
         self.partial = ""
         """The half-written code line, while inside a fence."""
         self.word = ""
@@ -774,6 +854,17 @@ class CodeStreamer:
         """The line being written. While the activity bar is up this is the
         bar's lead line rather than terminal output, so a partial line and a
         repainting bar can share the screen."""
+
+    @property
+    def width(self) -> int:
+        """The wrap column, read fresh every time.
+
+        Captured once in the constructor it could not follow a resize: a
+        streamer lives for a whole turn, so widening the window mid-answer
+        left the rest of the reply wrapped to the old, narrower column and
+        narrowing it ran every line off the edge.
+        """
+        return max(30, self.ui.width - cell_len(self.indent) - 1)
 
     # -- entry point -------------------------------------------------------
 
@@ -910,7 +1001,7 @@ class CodeStreamer:
         than rearranged into something that no longer parses.
         """
         for char in text:
-            if self.column >= self.width:
+            if self.column + cell_len(char) > self.width:
                 self._newline()
             if not self.column and self.indent:
                 self._write(self.indent)
@@ -942,9 +1033,8 @@ class CodeStreamer:
                     self._write(char)
                 continue
 
-            if self.column + 1 > self.width:
-                if (self.word and self._rewritable
-                        and len(self.word) + len(self.indent) < self.width):
+            if self.column + cell_len(char) > self.width:
+                if self._can_carry():
                     self._carry_word_down()
                 else:
                     # Either the word is longer than the line, or the line has
@@ -1021,6 +1111,29 @@ class CodeStreamer:
                 self._write(self.indent)
             self._write(char)
             self.word += char
+
+    def _can_carry(self) -> bool:
+        """Whether lifting the half-written word onto the next line helps.
+
+        Measured in cells rather than characters. A Japanese or Chinese
+        character is two cells wide and a run of them has no spaces to break
+        at, so a len()-based guard passed every time: the word never looked
+        too long for a line it had already overflowed, so it was lifted onto
+        a new line, overflowed that one, and was lifted again. A paragraph
+        came out as a column of bare indents with one enormous line at the
+        end of it.
+
+        It does not help either when the word is all the line holds. Moving
+        it to a fresh line leaves the indent behind and puts the word back
+        where it started, no closer to fitting. Breaking at the edge is the
+        honest answer there.
+        """
+        if not (self.word and self._rewritable):
+            return False
+        if cell_len(self.word) + cell_len(self.indent) >= self.width:
+            return False
+        kept = self.line.plain[: len(self.line.plain) - len(self.word)]
+        return bool(kept.strip())
 
     @property
     def _rewritable(self) -> bool:
@@ -1575,8 +1688,14 @@ class ActivityBar:
                             else stripped + "\n", style=MUTED)
 
         body.rstrip()
-        done = sum(1 for ln in lines if ln.lstrip().startswith("[x]"))
-        total = len(lines)
+        # Steps, not lines. `total` counted every non-empty line, so a task
+        # that wrapped onto one of its own inflated the denominator and the
+        # panel read "3/5" for a three-step plan that was done.
+        # plan_is_complete() has always counted it this way.
+        steps = [ln for ln in lines
+                 if ln.lstrip().startswith(("[ ]", "[>]", "[x]"))]
+        done = sum(1 for ln in steps if ln.lstrip().startswith("[x]"))
+        total = len(steps)
         if self.plan_done_frame:
             done = total
         title = f"plan  {done}/{total}"

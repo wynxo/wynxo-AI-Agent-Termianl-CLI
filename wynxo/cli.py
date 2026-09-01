@@ -1514,7 +1514,6 @@ class Repl:
             except EOFError:
                 break
 
-            self.ui.reset_prompt_lines()
             # A line got typed, so the earlier Ctrl-C was not the start of a
             # quit. Disarming here rather than on a timer keeps "twice in a
             # row" literal.

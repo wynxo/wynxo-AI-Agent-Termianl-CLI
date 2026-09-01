@@ -137,6 +137,11 @@ class Transcript:
         self.width = max(MIN_WIDTH, width)
         self.console = self._make_console()
         self.on_change: Callable[[int], None] | None = None
+        self.on_resize: Callable[[int], None] | None = None
+        """Told the new width when the pane changes size. The UI drawing in
+        here follows it: prompt_toolkit's application takes SIGWINCH for as
+        long as it runs and never gives it back, so nothing else can hear a
+        resize while the layout is up."""
 
     def _make_console(self):
         from .ui import SafeConsole
@@ -163,6 +168,8 @@ class Transcript:
         # source, which rich does not keep around -- and a terminal does no
         # better with its own scrollback.
         self.console.width = width
+        if self.on_resize is not None:
+            self.on_resize(width)
 
     def _sink_wrote(self) -> None:
         """Rich wrote something. Turn whole lines into rows straight away.
