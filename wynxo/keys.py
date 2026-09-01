@@ -381,12 +381,3 @@ class KeyWatcher:
             # under the *old* settings first, so a half-written line is not
             # left behind by the mode change.
             termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-
-
-def describe_bindings(bindings: dict[str, str]) -> str:
-    """A compact hint line: '^O thinking  ^T detail'."""
-    parts = []
-    for key, label in bindings.items():
-        pretty = key.replace("ctrl+", "^").upper() if key.startswith("ctrl+") else key
-        parts.append(f"{pretty} {label}")
-    return "  ".join(parts)

@@ -1450,6 +1450,10 @@ class ActivityBar:
         self.started = time.monotonic()
         self._live: Live | None = None
         self._frame = 0
+        self._essential_width = MIN_ACTIVITY_WIDTH
+        """Cells the sign of life and the activity word need. Measured while
+        the left half is built, and read by the right half to decide what it
+        can afford."""
 
     # -- content -----------------------------------------------------------
 
@@ -1485,18 +1489,40 @@ class ActivityBar:
             out.append(self.activity, style="bold")
         return out
 
+    BUSY_CONTEXT = 60.0
+    """Context use worth interrupting the line for. Below this it is a number
+    nobody is waiting on; above it, a compaction is coming."""
+
     def _segments(self) -> list[tuple[str, str]]:
-        """(text, style) pairs, most important first, for a fit-aware build."""
+        """(text, style) pairs, most important first, for a fit-aware build.
+
+        What a person actually wants from this line while they wait, in
+        order: how long has it been, is anything still arriving, and how
+        fast. Everything else is a setting rather than news.
+
+        The model name, the effort meter and the context percentage used to
+        live here too, and claimed their space *before* the activity did --
+        so on an eighty-column terminal the answer to "what is it doing"
+        was one word adrift at the left while four facts that had not
+        changed since start-up filled the rest. They are all on the idle
+        strip under the prompt, which is where a setting belongs.
+        """
         out: list[tuple[str, str]] = []
-        if self.tokens:
-            out.append((f"{self.tokens} tok", "bold"))
         if rate := self.rate():
             out.append((f"{rate:.0f} tok/s", ""))
-        out.append((f"{self.elapsed():.0f}s", ""))
-        out.append((f"{self.effort_meter()} {self.effort}", ""))
-        if self.context_pct:
+        if self.context_pct >= self.BUSY_CONTEXT:
             out.append((f"ctx {self.context_pct:.0f}%", ""))
         return out
+
+    def _clock(self) -> str:
+        """Elapsed time, with a decimal while a decimal still means something.
+
+        Whole seconds alone read as stopped for the first second of every
+        turn -- and the first second is exactly when somebody is watching to
+        see whether anything happened at all.
+        """
+        seconds = self.elapsed()
+        return f"{seconds:.1f}s" if seconds < 10 else f"{seconds:.0f}s"
 
     def _render(self) -> Text:
         self._frame += 1
@@ -1521,52 +1547,79 @@ class ActivityBar:
             mark = self.STILL_MARK if self.ui.g.unicode else self.STILL_MARK_ASCII
             left.append(f" {mark}  ", style=f"bold {BAR_ACCENT}")
         left.append_text(self._activity_text())
+        # Everything up to here has to survive: the sign of life, and the
+        # word saying what is happening.
+        self._essential_width = left.cell_len + 2
         if self.queued:
-            # What you are typing beats what the agent is doing: you need to
-            # see your own keystrokes, and the detail is still one line up.
+            # And what you are typing, which beats what the agent is doing:
+            # you cannot see your own keystrokes anywhere else, and the
+            # detail is still one line up. So it counts as essential too.
             left.append("  ")
             left.append(f"\u203a {self.queued}", style=f"bold {BAR_ACCENT}")
+            self._essential_width = left.cell_len + 2
         elif self.detail:
+            # The detail is the flexible part: a long path may lose its tail.
             left.append("  ")
             left.append(self.detail, style=BAR_DIM)
 
-        # The stats claim their space before the activity text does. The token
-        # counter is the point of this bar, so a long file path must lose its
-        # tail rather than push the numbers off the end.
-        candidates = self._segments()
-        if self.model:
-            candidates.append((self.model, BAR_DIM))
-        if self.hint:
-            candidates.append((self.hint, BAR_DIM))
-        # While the user is typing, their own keystrokes are the most
-        # important thing on the line, so the left side claims more of it and
-        # the stats give way rather than the other way round.
-        floor = min(width - 20, MIN_ACTIVITY_WIDTH + len(self.queued) + 6) \
-            if self.queued else MIN_ACTIVITY_WIDTH
-        stats_budget = max(0, width - max(MIN_ACTIVITY_WIDTH, floor))
+        # What is happening claims its space first, and the numbers take
+        # what is left. It used to be the other way round, with a comment
+        # saying the token counter was the point of the bar -- it is not.
+        # The point is the answer to "what is it doing", and a long file
+        # path losing its tail to make room for a model name nobody was
+        # reading is the wrong trade.
+        # The right-hand group gives way, one item at a time, until what
+        # is on the left fits beside it.
+        #
+        # Order matters and is the whole design of this line. Least
+        # important first, because that is the order things are dropped in:
+        # the key hint, the rate, the context percentage, the token counter.
+        # The clock is never dropped -- it is the one number somebody is
+        # actually watching while they wait.
+        #
+        # What it yields *to* is the sign of life, the word saying what is
+        # happening, and whatever the user is typing. Those three used to
+        # lose: the metrics claimed their space first, so at thirty columns
+        # the answer to "what is it doing" came out as "editin…" while a
+        # token counter sat beside it with room to spare, and a message
+        # being typed mid-turn was trimmed in favour of a rate nobody had
+        # asked for.
+        #
+        # The clock sits second from the right, behind a hint of constant
+        # width, so it holds still instead of sliding left every time a
+        # token count appears next to it.
+        def _joined(parts: list[tuple[str, str]]) -> Text:
+            out = Text(style=BAR_STYLE)
+            for text, style in parts:
+                if out.cell_len:
+                    out.append(f"  {self.ui.g.dot}  ", style=BAR_DIM)
+                out.append(text, style=style)
+            return out
 
-        stats = Text(style=BAR_STYLE)
-        for text, style in candidates:
-            piece = Text(style=BAR_STYLE)
-            if stats.cell_len:
-                piece.append(f"  {self.ui.g.dot}  ", style=BAR_DIM)
-            piece.append(text, style=style)
-            if stats.cell_len + piece.cell_len + 1 > stats_budget:
+        clock = (self._clock(), "")
+        tokens = [(f"{self.tokens} tok", "bold")] if self.tokens else []
+        ladder = [[*self._segments(), *tokens, clock],
+                  [*tokens, clock],
+                  [clock]]
+
+        essential = min(width, self._essential_width)
+        for parts in ladder:
+            stats = _joined(parts)
+            hint = Text(style=BAR_STYLE)
+            if self.hint and parts is ladder[0]:
+                hint.append("   ")
+                hint.append(self.hint, style=BAR_DIM)
+            if essential + stats.cell_len + hint.cell_len + 2 <= width:
+                stats.append_text(hint)
                 break
-            stats.append_text(piece)
         stats.append(" ")
 
-        # The strip is drawn on the bottom row, so it has to be the width of
-        # the terminal exactly: a cell over and it wraps, and the whole
-        # display scrolls by a line on every repaint.
-        #
-        # ``max(1, ...)`` on the gap was the bug -- it guarantees a space
-        # even when there is no room for one, so a left half that filled its
-        # share produced a strip one cell too wide. The gap may be zero; what
-        # may not is the total.
+        # One cell of gutter, always: a left half trimmed to exactly the room
+        # available put its ellipsis hard against the first character of the
+        # stats, and "reading  ca…^C stop" reads as one broken word.
         room = max(0, width - stats.cell_len)
         if left.cell_len > room:
-            left.truncate(room, overflow="ellipsis")
+            left.truncate(max(0, room - 1), overflow="ellipsis")
         left.append(" " * max(0, room - left.cell_len))
         left.append_text(stats)
         if left.cell_len > width:

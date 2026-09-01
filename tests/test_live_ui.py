@@ -46,13 +46,14 @@ class TestCodeStreamer:
 
 class TestActivityBar:
     def test_renders_the_essentials(self):
+        """What it is doing, what it is doing it to, and whether anything is
+        still arriving."""
         bar = ActivityBar(UI(), "high", "^O thinking")
         bar.update(activity="editing", detail="src/auth.py", tokens=120)
         text = bar._render().plain
         assert "editing" in text
         assert "src/auth.py" in text
         assert "120 tok" in text
-        assert "high" in text
 
     def test_hint_is_dropped_on_a_narrow_screen(self):
         ui = UI()
@@ -86,7 +87,7 @@ class TestActivityBar:
                    tokens=999)
         rendered = bar._render().plain
         assert "999 tok" in rendered
-        assert rendered.rstrip().endswith(("tok", "s", "%", "medium", "tok/s"))
+        assert rendered.rstrip().endswith(("tok", "s", "%", "tok/s"))
 
     def test_rate_is_not_reported_before_it_is_meaningful(self):
         bar = ActivityBar(UI(), "low")
@@ -114,21 +115,42 @@ class TestActivityBar:
         bar.update(detail="x" * 300)
         assert len(bar._render().plain) < 200
 
-    def test_model_shows_when_there_is_room(self):
-        """The model is part of the bar's identity: who is doing the work,
-        not just how fast."""
+    def test_settings_are_not_repeated_during_a_turn(self):
+        """The model, the effort level and the context percentage do not
+        change while a turn runs, and all three are on the idle strip under
+        the prompt. Claiming space for them here -- which they did, *before*
+        the activity did -- left "what is it doing" as one word adrift at
+        the left of an eighty-column line."""
         bar = ActivityBar(UI(), "medium", model="qwen3-coder:30b")
-        bar.update(activity="thinking", tokens=10)
-        assert "qwen3-coder:30b" in bar._render().plain
+        bar.update(activity="thinking", tokens=10, context_pct=12.0)
+        text = bar._render().plain
+        assert "qwen3-coder:30b" not in text
+        assert "medium" not in text
+        assert "ctx" not in text
 
-    def test_model_gives_way_on_a_narrow_screen(self):
-        """The counter is the point of the bar; the model name is the first
-        thing dropped when the strip runs out of room."""
-        ui = UI()
-        ui.width = 46
-        bar = ActivityBar(ui, "low", "^O thinking  ^T detail",
-                          model="qwen3-coder:30b")
-        bar.update(tokens=812)
-        rendered = bar._render().plain
-        assert "qwen3-coder:30b" not in rendered
-        assert "812 tok" in rendered
+    def test_a_context_window_filling_up_is_news(self):
+        """The one setting that becomes news: past the threshold a
+        compaction is coming, and that is worth the space."""
+        bar = ActivityBar(UI(), "medium")
+        bar.update(activity="thinking", context_pct=88.0)
+        assert "ctx 88%" in bar._render().plain
+
+    def test_the_clock_moves_in_the_first_second(self):
+        """Whole seconds alone read as stopped for the first second of every
+        turn, which is exactly when somebody is watching to see whether
+        anything happened at all."""
+        bar = ActivityBar(UI(), "medium")
+        bar.started -= 0.4
+        assert bar._clock() == "0.4s"
+        bar.started -= 30
+        assert bar._clock() == "30s", "a long turn does not need a decimal"
+
+    def test_the_activity_survives_a_narrow_screen(self):
+        """The one thing that may never be dropped."""
+        for width in (40, 46, 60):
+            ui = UI()
+            ui.width = width
+            bar = ActivityBar(ui, "low", "^O thinking  ^T detail",
+                              model="qwen3-coder:30b")
+            bar.update(activity="editing", detail="src/a.py", tokens=812)
+            assert "editing" in bar._render().plain, width

@@ -41,7 +41,7 @@ from .permissions import Decision
 from .provider import ProviderError, check_context, make_client
 from .queue import Pending
 from .session import Session
-from .keys import KeyWatcher, describe_bindings
+from .keys import KeyWatcher
 from .journal import Journal, recent as recent_logs
 from .memory import Memory
 from .pet import Mood, Pet
@@ -1548,7 +1548,12 @@ class Repl:
         # Cleared per turn: opening the panel should show this answer's
         # reasoning, not everything the model has thought this session.
 
-        bar = ActivityBar(self.ui, self.policy.name, describe_bindings(LIVE_KEYS),
+        # One hint, not four. The whole set -- ^O thinking, ^T detail, ^D
+        # diff, ^C stop -- is forty-four cells of key names competing with
+        # the answer to "what is it doing" on every frame, and it is already
+        # spelled out on the prompt's own border where there is room for it.
+        # Mid-turn there is one binding somebody actually reaches for.
+        bar = ActivityBar(self.ui, self.policy.name, "^C stop",
                           model=self.config.model, pet=self.pet)
         review_mark = self.agent.checkpoints.mark()
         bar.animate = self.config.animations
@@ -1888,7 +1893,7 @@ class Repl:
 
         # The hints that fit, most useful first. ^C stop must survive the
         # longest, so it is trimmed last rather than with the rest.
-        base = ["^O think", "^T detail", "^E effort", "^R talk"]
+        base = ["^O think", "^T detail", "^D diff", "^E effort", "^R talk"]
         if note:
             base = [note]
         hint = ""

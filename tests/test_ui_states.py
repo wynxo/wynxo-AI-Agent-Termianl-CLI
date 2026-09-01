@@ -185,11 +185,16 @@ class TestImpossibleCombinations:
         assert "and then fix the tests" in plain
         assert "some/file.py" not in plain
 
-    def test_the_token_count_is_never_the_thing_dropped(self):
-        """It is the reason the strip exists."""
+    def test_the_token_count_outlasts_every_other_number(self):
+        """Whether anything is still arriving is the "is it stuck?"
+        question. It gives way to only two things: the word saying what is
+        happening, and what the user is typing -- neither of which can be
+        read anywhere else while a turn runs."""
         for width in WIDTHS:
             bar = _bar("narrow_everything", width)
-            assert "4096 tok" in bar._render().plain, width
+            bar.queued = ""
+            rendered = bar._render().plain
+            assert "4096 tok" in rendered, width
 
     def test_an_idle_bar_claims_no_work(self):
         plain = _bar("idle")._render().plain
@@ -259,3 +264,100 @@ class TestOnlyOneLiveDisplayAtATime:
         from wynxo import cli
 
         assert "Live(" not in inspect.getsource(cli)
+
+
+class TestTheStripsHierarchy:
+    """What survives when the line runs out of room, and in what order.
+
+    The metrics used to claim their space *before* the activity did, with a
+    comment saying the token counter was the point of the bar. It is not:
+    the point is the answer to "what is it doing", and on an eighty-column
+    terminal that answer was one word adrift at the left while a model name,
+    an effort meter and a context percentage -- none of which change during a
+    turn, all of which are on the idle strip under the prompt -- filled the
+    rest.
+
+    Kept, in order: the activity word, what the user is typing, the token
+    counter and the clock. Dropped, in order: the key hint, the context
+    percentage, the rate.
+    """
+
+    def _bar(self, width, **kwargs):
+        ui = _ui(width)
+        bar = ActivityBar(ui, "medium", kwargs.pop("hint", "^C stop"),
+                          model="qwen3-coder:30b")
+        bar.animate = False
+        bar.activity = kwargs.pop("activity", "editing")
+        for key, value in kwargs.items():
+            setattr(bar, key, value)
+        return bar
+
+    @pytest.mark.parametrize("width", [30, 40, 50, 60, 80, 100, 140])
+    def test_the_activity_is_never_dropped(self, width):
+        bar = self._bar(width, detail="a/very/long/path/to/some/file.py",
+                        tokens=4096)
+        assert "editing" in bar._render().plain, width
+
+    @pytest.mark.parametrize("width", [40, 50, 60, 80, 100, 140])
+    def test_the_clock_is_never_dropped(self, width):
+        bar = self._bar(width, detail="a/very/long/path/to/some/file.py",
+                        tokens=4096)
+        assert bar._clock() in bar._render().plain, width
+
+    @pytest.mark.parametrize("width", [40, 50, 60, 80, 100, 140])
+    def test_the_token_counter_is_never_dropped(self, width):
+        """Whether anything is still arriving is the "is it stuck?"
+        question, and it is why the counter is there."""
+        bar = self._bar(width, detail="a/very/long/path/to/a/file.py",
+                        tokens=812)
+        assert "812 tok" in bar._render().plain, width
+
+    @pytest.mark.parametrize("width", [40, 50, 60, 80, 100, 140])
+    def test_what_the_user_is_typing_is_never_dropped(self, width):
+        """You cannot see your own keystrokes anywhere else while a turn
+        runs."""
+        bar = self._bar(width, queued="fix the tests after", tokens=999)
+        assert "fix the tests after" in bar._render().plain, width
+
+    def test_the_hint_goes_before_the_numbers_do(self):
+        """Ctrl-C works whether or not there is room to say so."""
+        bar = self._bar(40, detail="a/long/path/file.py", tokens=812)
+        rendered = bar._render().plain
+        assert "812 tok" in rendered
+        assert "^C stop" not in rendered
+
+    def test_the_numbers_go_before_the_activity_does(self):
+        """At the width where they cannot both fit, the answer to "what is
+        it doing" is the one that stays."""
+        bar = self._bar(30, detail="a/long/path/file.py", tokens=4096)
+        rendered = bar._render().plain
+        assert "editing" in rendered
+        assert "4096 tok" not in rendered
+
+    def test_the_clock_outlives_the_counter(self):
+        bar = self._bar(30, detail="a/long/path/file.py", tokens=4096)
+        assert bar._clock() in bar._render().plain
+
+    def test_settings_stay_off_the_turn_strip(self):
+        bar = self._bar(140, tokens=10, context_pct=20.0)
+        rendered = bar._render().plain
+        for setting in ("qwen3-coder:30b", "medium", "ctx"):
+            assert setting not in rendered, setting
+
+    def test_a_full_context_window_is_worth_saying(self):
+        bar = self._bar(140, tokens=10, context_pct=91.0)
+        assert "ctx 91%" in bar._render().plain
+
+    @pytest.mark.parametrize("width", [30, 40, 50, 60, 80, 100])
+    def test_a_trimmed_detail_never_touches_the_numbers(self, width):
+        """"reading  ca…812 tok" reads as one broken word."""
+        bar = self._bar(width, activity="reading",
+                        detail="a/very/long/path/to/some/file.py", tokens=812)
+        rendered = bar._render().plain
+        assert "… " in rendered or "…" not in rendered, rendered
+
+    @pytest.mark.parametrize("width", [30, 40, 50, 60, 80, 100, 140])
+    def test_it_is_still_exactly_the_terminal_width(self, width):
+        bar = self._bar(width, detail="x" * 200, tokens=99999,
+                        queued="y" * 80, context_pct=99.0)
+        assert cell_len(bar._render().plain) == width, width

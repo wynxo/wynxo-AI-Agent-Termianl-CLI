@@ -17,7 +17,7 @@ import pytest
 pty = pytest.importorskip("pty", reason="POSIX terminals only")
 termios = pytest.importorskip("termios", reason="POSIX terminals only")
 
-from wynxo.keys import CTRL, KeyWatcher, describe_bindings, key_name
+from wynxo.keys import CTRL, KeyWatcher, key_name
 
 
 class TestKeyNames:
@@ -35,10 +35,6 @@ class TestKeyNames:
         assert len(CTRL) == 26
         assert CTRL["\x01"] == "ctrl+a"
         assert CTRL["\x1a"] == "ctrl+z"
-
-    def test_hint_rendering(self):
-        assert describe_bindings({"ctrl+o": "thinking"}) == "^O thinking"
-        assert "^T detail" in describe_bindings({"ctrl+o": "a", "ctrl+t": "detail"})
 
 
 class TestSafety:
