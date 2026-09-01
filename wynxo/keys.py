@@ -5,20 +5,88 @@ and nothing is reading the terminal -- so a binding registered there cannot
 fire mid-generation. This reads raw keypresses in a background thread for
 exactly as long as a turn is running, then puts the terminal back.
 
-Restoring the terminal is the part that has to be right. A crash that leaves
-a shell in cbreak mode with echo off is a genuinely bad outcome, so the
-restore runs from a ``finally`` and is safe to call twice.
+Restoring the terminal is the part that has to be right. A shell left in
+cbreak mode with echo off is a genuinely bad outcome -- you type and see
+nothing -- so the restore runs from a ``finally``, is safe to call twice,
+and, because a ``finally`` only runs for exits Python gets to see, is also
+wired to ``atexit`` and to the fatal signals below.
 """
 
 from __future__ import annotations
 
 import asyncio
+import atexit
 import codecs
 import contextlib
 import os
+import signal
 import sys
 import threading
 from typing import Callable
+
+# -- getting the terminal back, whatever happens ---------------------------
+#
+# A ``finally`` covers a return, an exception and a cancellation. It does not
+# cover SIGTERM or SIGHUP: those terminate the process with their default
+# disposition, so no Python code runs at all and the terminal keeps whatever
+# mode it was left in. `kill`, a session manager, `timeout`, and closing the
+# window while a turn is running are all ordinary ways to end a session, and
+# every one of them handed back a shell with echo off.
+#
+# So the restore is also armed as a signal handler and an atexit hook, while
+# any watcher holds the terminal. The handler puts the terminal back and then
+# dies of the original signal with the default disposition, so the exit
+# status a caller sees is unchanged.
+
+_HOLDERS: "set[KeyWatcher]" = set()
+"""Watchers currently holding a terminal in cbreak mode. Usually one."""
+
+_FATAL = ("SIGTERM", "SIGHUP", "SIGQUIT")
+_previous_handlers: dict = {}
+_guard_armed = False
+
+
+def _restore_everything() -> None:
+    for watcher in list(_HOLDERS):
+        watcher._restore()
+
+
+def _die_after_restoring(signum, _frame) -> None:
+    _restore_everything()
+    previous = _previous_handlers.get(signum)
+    with contextlib.suppress(Exception):
+        signal.signal(signum, previous if callable(previous) else signal.SIG_DFL)
+    # Re-raise rather than exit: the caller's `$?` should say the process died
+    # of this signal, which is what it would have done without the handler.
+    with contextlib.suppress(Exception):
+        os.kill(os.getpid(), signum)
+
+
+def _arm_guard() -> None:
+    """Install the hooks, once, the first time a terminal is held."""
+    global _guard_armed
+    if _guard_armed:
+        return
+    _guard_armed = True
+    atexit.register(_restore_everything)
+    for name in _FATAL:
+        number = getattr(signal, name, None)
+        if number is None:
+            continue
+        try:
+            # Only from the main thread, and never over a handler somebody
+            # else installed deliberately -- SIG_IGN means "this process has
+            # decided to ignore it" and is not ours to override.
+            existing = signal.getsignal(number)
+            if existing is signal.SIG_IGN:
+                continue
+            _previous_handlers[number] = existing
+            signal.signal(number, _die_after_restoring)
+        except (ValueError, OSError, RuntimeError):
+            # Not the main thread, or a platform without the signal. The
+            # finally-based restore still covers every ordinary exit.
+            continue
+
 
 # Control characters, by the letter people actually press.
 CTRL = {chr(i + 1): f"ctrl+{chr(ord('a') + i)}" for i in range(26)}
@@ -140,6 +208,8 @@ class KeyWatcher:
             # SIGINT and the existing interrupt path keeps working.
             tty.setcbreak(self._fd)
             self._free_the_bound_keys(termios)
+            _HOLDERS.add(self)
+            _arm_guard()
             return True
         except Exception:
             self._saved = None
@@ -299,6 +369,7 @@ class KeyWatcher:
 
     def _restore(self) -> None:
         with self._restoring:
+            _HOLDERS.discard(self)
             if self._saved is None or self._fd is None:
                 return
             saved, fd = self._saved, self._fd
@@ -306,6 +377,9 @@ class KeyWatcher:
         with contextlib.suppress(Exception):
             import termios
 
+            # TCSADRAIN, not TCSANOW: pending output is flushed to the screen
+            # under the *old* settings first, so a half-written line is not
+            # left behind by the mode change.
             termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
 

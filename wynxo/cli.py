@@ -15,11 +15,13 @@ from pathlib import Path
 from typing import Callable
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application.current import get_app
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.formatted_text import ANSI, HTML
 from prompt_toolkit.formatted_text.html import html_escape as escape
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 
@@ -337,6 +339,16 @@ class TerminalCallbacks(Callbacks):
         """Set while a turn runs. It holds the terminal in cbreak mode, so it
         must be stopped before prompt_toolkit is asked to read a line --
         otherwise both read stdin and keystrokes go to whichever wins."""
+        self.thinking_asked_for: "Callable[[], bool] | None" = None
+        """Whether the effort level actually asks the model to think. Set by
+        Repl.
+
+        Showing reasoning and *having* reasoning are two settings, and only
+        one of them is on this keypress. Below "high" the policy sends no
+        ``think`` at all, so turning the display on produced a session that
+        said "thinking shown" and then never showed a word -- indefinitely,
+        with nothing on screen to say why. The toggle has to be able to say
+        there is nothing to reveal."""
         self.rearm_interrupt: "Callable[[], None] | None" = None
         """Put the session's SIGINT handler back. Set by Repl.
 
@@ -417,6 +429,15 @@ class TerminalCallbacks(Callbacks):
 
     # -- live toggles, called from the key watcher thread -------------------
 
+    def thinking_is_off_at_this_effort(self) -> bool:
+        """Whether the model is being asked to think at all right now."""
+        if self.thinking_asked_for is None:
+            return False
+        try:
+            return not self.thinking_asked_for()
+        except Exception:
+            return False
+
     def toggle_thinking(self) -> None:
         self.ui.show_thinking = not self.ui.show_thinking
         # Announced before the panel opens, not after: the note is a line of
@@ -429,6 +450,12 @@ class TerminalCallbacks(Callbacks):
             self.bar.update(detail=self._status_message)
         else:
             self.ui.info("thinking shown" if self.ui.show_thinking else "thinking hidden")
+        if self.ui.show_thinking and self.thinking_is_off_at_this_effort():
+            # Said once, where it is asked for. Without it the display is on
+            # and nothing ever appears, which reads as a broken feature
+            # rather than as a level that does not think.
+            self.ui.info("this effort level does not ask the model to think "
+                         "-- /effort high or above to give it reasoning to show")
         if self.ui.show_thinking:
             self._open_thinking()
         else:
@@ -1051,13 +1078,27 @@ class Repl:
             """Ctrl-T toggles full tool output."""
             self.callbacks.toggle_verbose()
 
-        @bindings.add("c-d")
+        @bindings.add("c-d", filter=Condition(
+            lambda: bool(get_app().current_buffer.text)))
         def _(event):
-            """Ctrl-D expands or collapses the edit detail.
+            """Ctrl-D expands or collapses the edit detail -- but only with
+            something typed.
 
-            Bound explicitly so it can never fall through to prompt_toolkit's
-            default, which treats Ctrl-D on an empty buffer as end-of-file
-            and would quit the session mid-edit.
+            On an empty composer it is left alone, so prompt_toolkit's own
+            end-of-file binding runs and Ctrl-D leaves the session, the way
+            it does in bash, python and psql. This used to be bound
+            unconditionally, which took that away: the one universal way out
+            of a terminal program silently toggled a diff instead, and the
+            ``except EOFError`` in the prompt loop was unreachable from the
+            keyboard.
+
+            It was unconditional for a reason that has since gone. These
+            bindings were also handed to the old full-screen layout, whose
+            application ran for the whole *turn* -- so there an unfiltered
+            Ctrl-D really would have quit mid-edit. The prompt only runs
+            when nothing else does, and mid-turn the key watcher binds
+            Ctrl-D to the same toggle, so both cases are covered without
+            spending the convention.
             """
             self.callbacks.toggle_diff_detail()
 
@@ -1090,6 +1131,7 @@ class Repl:
         self.callbacks = TerminalCallbacks(ui, self.prompt_session)
         self.callbacks.workspace = workspace
         self.callbacks.rearm_interrupt = self._arm_interrupt
+        self.callbacks.thinking_asked_for = lambda: bool(self.policy.thinking)
         self.callbacks.boundary = self.boundary
         self.callbacks.journal = self.journal
         self.callbacks.pet = self.pet
@@ -3883,6 +3925,10 @@ class Repl:
         self.config.show_thinking = self.ui.show_thinking
         self.config.save()
         self.ui.info(f"thinking display {'on' if self.ui.show_thinking else 'off'}")
+        if self.ui.show_thinking and not self.policy.thinking:
+            self.ui.warn(f"{self.policy.name} effort does not ask the model to "
+                         "think, so there will be nothing to show. "
+                         "/effort high or above turns reasoning on.")
         return True
 
     async def cmd_logo(self, args: list[str]) -> bool:
