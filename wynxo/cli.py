@@ -201,6 +201,7 @@ COMMANDS = {
     "/mommy": "mommy-style talking: on | off (no argument toggles)",
     "/animate": "preview the animations: list, or <name> for a scene",
     "/todo": "show the current plan",
+    "/queue": "what you typed while it was working: show | run | clear",
     "/dictate": "record one spoken message onto the prompt (Ctrl-R)",
     "/theme": "colour palette: purple | sakura | midnight | ember | plain | minimal",
     "/secrets": "credential protection: on | off | allow <path>",
@@ -1427,7 +1428,15 @@ class Repl:
                     break
                 continue
 
-            await self._guarded(self.turn(text))
+            # Only a turn that finished lets the queue run. An interrupt or
+            # an error returns anything but True, and then whatever was
+            # typed during the turn stays queued rather than starting the
+            # moment you pressed stop -- the status strip says how much is
+            # waiting, and Enter or /queue decides what happens to it.
+            finished = await self._guarded(self.turn(text)) is True
+            if not finished:
+                self._report_held_queue()
+                continue
             if await self._guarded(self._drain_queue()) is False:
                 break
 
@@ -1486,8 +1495,12 @@ class Repl:
                 self.ui.info(f"details in {self.journal.path}")
             return None
 
-    async def turn(self, text: str) -> None:
-        """Run one request, with a live status bar and mid-flight keybinds."""
+    async def turn(self, text: str) -> bool:
+        """Run one request, with a live status bar and mid-flight keybinds.
+
+        Returns False if it was interrupted, so a queue drain can stop
+        rather than launching the next thing the moment you press Ctrl-C.
+        """
         async with self.callbacks._turn_lock:
             cb = self.callbacks
             # The previous turn's reasoning is retired into the history
@@ -1501,9 +1514,9 @@ class Repl:
             cb._thinking_unsent.clear()
             cb._thinking_total = 0
             cb._thinking_words = 0
-            await self._turn_locked(text)
+            return await self._turn_locked(text)
 
-    async def _turn_locked(self, text: str) -> None:
+    async def _turn_locked(self, text: str) -> bool:
         self.journal.user(text)
         text = self._expand_mentions(text)
         self.callbacks.tokens = 0
@@ -1596,14 +1609,14 @@ class Repl:
             self.ui.console.print()
             self.ui.warn("Interrupted. The conversation is intact; "
                          "ask me something else.")
-            return
+            return False
 
         if result.errors:
             self.pet.react(Mood.SAD)
             for message in result.errors:
                 self.journal.error(message)
             self.ui.error("\n".join(result.errors))
-            return
+            return False
         self.journal.assistant(result.content, tokens=self.callbacks.tokens,
                                seconds=result.elapsed)
         self.pet.react(Mood.HAPPY if not result.interrupted else Mood.IDLE)
@@ -1633,6 +1646,7 @@ class Repl:
 
         await self._review_changes(review_mark)
         await self._narrate(text, result)
+        return not result.interrupted
 
     async def _review_changes(self, mark: int) -> None:
         """In review mode, put the whole turn's changes up as one diff.
@@ -1897,6 +1911,11 @@ class Repl:
             if detail := getattr(bar, "detail", ""):
                 phase += f" {detail}"
             pieces.append(phase)
+        # Before the numbers: something you typed and have not seen run
+        # outranks a token count. Without this a queue held by an interrupt
+        # was invisible at the prompt and fired on the next thing typed.
+        if waiting := len(self.pending):
+            pieces.append(f"\u203a {waiting} queued")
         if self.pet.enabled:
             pieces.append(f"{self.pet.face()} {self.pet.name}")
         pieces += [self.config.model,
@@ -1919,6 +1938,13 @@ class Repl:
 
         Shown before each one runs: a message typed a minute ago and then
         silently executed is startling.
+
+        A Ctrl-C stops the drain and leaves the rest queued. Pressing stop
+        and having the next thing start immediately is the opposite of what
+        the key means -- you interrupt because you want to look at
+        something, and the queue firing on regardless takes that away. What
+        is left is reported, and stays visible in the status strip until it
+        runs or is dropped.
         """
         while (queued := self.pending.take()) is not None:
             self.ui.console.print()
@@ -1928,8 +1954,19 @@ class Repl:
                 if await self.command(queued) is False:
                     return False
                 continue
-            await self.turn(queued)
+            if await self.turn(queued) is False:
+                self._report_held_queue()
+                return True
         return True
+
+    def _report_held_queue(self) -> None:
+        """Say what an interrupt left waiting, and how to deal with it."""
+        waiting = len(self.pending)
+        if not waiting:
+            return
+        what = "message" if waiting == 1 else "messages"
+        self.ui.info(f"{waiting} queued {what} still waiting "
+                     f"{self.ui.g.dot} /queue run, or /queue clear")
 
     def _shift_effort(self, delta: int) -> None:
         """Step the effort level without typing a command.
@@ -2148,6 +2185,9 @@ class Repl:
 
         if name == "/todo":
             return await self.cmd_todo(args)
+
+        if name == "/queue":
+            return await self.cmd_queue(args)
 
         if name == "/dictate":
             self.start_dictation()
@@ -3804,6 +3844,39 @@ class Repl:
         todo = self.agent.tools.get("todo_write")
         rendered = todo.render() if todo and hasattr(todo, "render") else ""
         self.ui.todos(rendered) if rendered else self.ui.info("no plan yet")
+        return True
+
+    async def cmd_queue(self, args: list[str]) -> bool:
+        """Show what is waiting, run it, or drop it.
+
+        Type-ahead is collected while a turn runs and normally drains the
+        moment it ends, so this is for the case where it did not: a Ctrl-C
+        holds the rest of the queue rather than launching it, and then there
+        has to be a way to see what is held and decide about it.
+        """
+        want = args[0].lower() if args else ""
+        if want in ("clear", "drop", "empty"):
+            dropped = self.pending.clear()
+            self.ui.success(dropped or "nothing was queued")
+            return True
+        if want in ("run", "go", "resume"):
+            if not self.pending.summary():
+                self.ui.info("nothing queued")
+                return True
+            return await self._drain_queue()
+        if args:
+            self.ui.warn("/queue shows what is waiting; run or clear decides")
+            return True
+        waiting = self.pending.summary()
+        if not waiting:
+            self.ui.info("nothing queued")
+            return True
+        self.ui.console.print()
+        for index, message in enumerate(waiting, start=1):
+            self.ui.console.print(
+                Text(f"  {index}. ", style=MUTED) + Text(message))
+        self.ui.console.print()
+        self.ui.info("/queue run to send them, /queue clear to drop them")
         return True
 
     async def _question(self, question: str, answers: dict[str, str],

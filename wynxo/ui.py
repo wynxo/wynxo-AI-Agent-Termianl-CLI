@@ -1145,7 +1145,18 @@ class CodeStreamer:
         self.line.stylize(style, start, end)
 
     def _pen_change(self) -> str:
-        """The escape needed to bring the terminal to the current pen."""
+        """The escape needed to bring the terminal to the current pen.
+
+        Nothing at all when there is no terminal to bring. This is the one
+        place in the streamer that writes escapes to ``console.file``
+        directly -- a path rich never sees -- so rich's own rule, that
+        colour is for terminals and not for redirected output, has to be
+        applied here by hand. Without it `wynxo > notes.md` collected a
+        truecolor escape pair around every inline-code span in the answer,
+        while every other line in the same file came out clean.
+        """
+        if not self.ui.console.is_terminal:
+            return ""
         wanted = self._pen
         if wanted == self._pen_shown:
             return ""
