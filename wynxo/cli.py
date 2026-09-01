@@ -439,24 +439,39 @@ class TerminalCallbacks(Callbacks):
         except Exception:
             return False
 
+    NOTHING_TO_THINK = ("no reasoning at this effort "
+                        "\u00b7 /effort high to turn it on")
+    """Shown when the display is switched on at a level that sends no
+    ``think``. Without it the display is on, nothing ever appears, and that
+    reads as a broken feature rather than as a level that does not think."""
+
     def toggle_thinking(self) -> None:
         self.ui.show_thinking = not self.ui.show_thinking
+        nothing_to_show = (self.ui.show_thinking
+                           and self.thinking_is_off_at_this_effort())
         # Announced before the panel opens, not after: the note is a line of
         # its own, and printing it once the backlog is streaming drops it
         # into the middle of a sentence.
-        # The status bar already reflects this state; do not print a second
-        # transition line into the transcript.
-        self._status_message = "Thinking..." if self.ui.show_thinking else ""
+        #
+        # And mid-turn it is not printed at all. This runs from the key
+        # watcher while an answer is streaming a word at a time, so anything
+        # written to the terminal here lands between two words of a
+        # sentence. The live region is where a transient note belongs: the
+        # status bar already reflects the state, so the note rides in its
+        # detail slot and disappears with it.
+        if nothing_to_show:
+            self._status_message = self.NOTHING_TO_THINK
+        else:
+            self._status_message = "Thinking..." if self.ui.show_thinking else ""
         if self.bar is not None:
             self.bar.update(detail=self._status_message)
         else:
-            self.ui.info("thinking shown" if self.ui.show_thinking else "thinking hidden")
-        if self.ui.show_thinking and self.thinking_is_off_at_this_effort():
-            # Said once, where it is asked for. Without it the display is on
-            # and nothing ever appears, which reads as a broken feature
-            # rather than as a level that does not think.
-            self.ui.info("this effort level does not ask the model to think "
-                         "-- /effort high or above to give it reasoning to show")
+            self.ui.info("thinking shown" if self.ui.show_thinking
+                         else "thinking hidden")
+            if nothing_to_show:
+                self.ui.info("this effort level does not ask the model to "
+                             "think -- /effort high or above to give it "
+                             "reasoning to show")
         if self.ui.show_thinking:
             self._open_thinking()
         else:
@@ -766,8 +781,18 @@ class TerminalCallbacks(Callbacks):
                 self.ui.tool_output(held)
         self._held_output.clear()
         if self.verbose_tools and output.strip():
-            self.ui.tool_result(name, ok, "", "")
-            self.ui.code(output[:4000], _LANGUAGE.get(name, "text"))
+            # The marker line first, then the whole output under it. It used
+            # to be asked for with empty arguments, and tool_result returns
+            # early on empty text -- so verbose mode printed the output and
+            # no tick or cross at all, and whether the tool had succeeded was
+            # something you had to work out from the text.
+            self.ui.tool_result(name, ok, display, output)
+            # And only when the block says more than the marker already did.
+            # A one-line result printed as a line and then again as a
+            # syntax-highlighted block is the same sentence twice, which is
+            # not what asking for detail meant.
+            if len(output.strip().splitlines()) > 1:
+                self.ui.code(output[:4000], _LANGUAGE.get(name, "text"))
         else:
             self.ui.tool_result(name, ok, display, output)
 

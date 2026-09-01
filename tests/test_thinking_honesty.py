@@ -39,11 +39,12 @@ def _written(ui) -> str:
 
 
 class TestCtrlO:
-    def _callbacks(self, effort: str):
+    def _callbacks(self, effort: str, bar=None):
         ui = _ui()
         callbacks = TerminalCallbacks(ui, prompt_session=None)
         policy = resolve(effort)
         callbacks.thinking_asked_for = lambda: bool(policy.thinking)
+        callbacks.bar = bar
         return callbacks, ui
 
     @pytest.mark.parametrize("effort", ["low", "medium"])
@@ -117,3 +118,59 @@ class TestTheCommand:
         repl = self._repl("medium")
         asyncio.run(Repl.cmd_thinking(repl, ["off"]))
         assert "nothing to show" not in _written(repl.ui)
+
+
+class TestTheNoteNeverLandsMidSentence:
+    """Ctrl-O runs from the key watcher while an answer is streaming a word
+    at a time. Anything printed to the terminal from there arrives between
+    two words: the note split a sentence in half, with the rest of the
+    answer continuing underneath it.
+
+    A transient note belongs in the live region, which is the one place
+    wynxo may redraw. The status strip already carries the thinking state,
+    so the note rides in its detail slot and leaves with it.
+    """
+
+    class _Bar:
+        def __init__(self):
+            self.detail = None
+
+        def update(self, **kwargs):
+            self.detail = kwargs.get("detail", self.detail)
+
+    def _callbacks(self, effort: str):
+        ui = _ui()
+        callbacks = TerminalCallbacks(ui, prompt_session=None)
+        policy = resolve(effort)
+        callbacks.thinking_asked_for = lambda: bool(policy.thinking)
+        callbacks.bar = self._Bar()
+        return callbacks, ui
+
+    def test_nothing_is_printed_while_a_turn_is_running(self):
+        callbacks, ui = self._callbacks("medium")
+        callbacks.toggle_thinking()
+        assert _written(ui).strip() == "", _written(ui)
+
+    def test_the_strip_says_it_instead(self):
+        callbacks, _ = self._callbacks("medium")
+        callbacks.toggle_thinking()
+        assert callbacks.bar.detail == TerminalCallbacks.NOTHING_TO_THINK
+
+    def test_a_thinking_level_still_gets_the_ordinary_detail(self):
+        callbacks, _ = self._callbacks("high")
+        callbacks.toggle_thinking()
+        assert callbacks.bar.detail == "Thinking..."
+
+    def test_turning_it_off_clears_the_detail(self):
+        callbacks, _ = self._callbacks("high")
+        callbacks.toggle_thinking()
+        callbacks.toggle_thinking()
+        assert callbacks.bar.detail == ""
+
+    def test_at_the_prompt_it_is_printed(self):
+        """With no turn running there is no live region to put it in, and
+        nothing is streaming for it to interrupt."""
+        callbacks, ui = self._callbacks("medium")
+        callbacks.bar = None
+        callbacks.toggle_thinking()
+        assert "does not ask the model to think" in _written(ui)

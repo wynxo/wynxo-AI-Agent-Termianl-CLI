@@ -20,6 +20,7 @@ from rich.cells import cell_len
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.syntax import Syntax
@@ -567,8 +568,6 @@ class UI:
         if not text.strip():
             return
         text = sanitise(text)
-        from rich.padding import Padding
-
         self.console.print()
         # Same left margin as every other kind of line in the transcript.
         self.console.print(Padding(Markdown(text, code_theme=self.code_theme),
@@ -661,8 +660,18 @@ class UI:
                   box=self.box, padding=(0, 1)))
 
     def code(self, text: str, language: str = "text") -> None:
-        self.console.print(Syntax(sanitise(text), language,
-                                  theme=self.code_theme, word_wrap=True))
+        """A block of somebody else's code or output.
+
+        Indented to the same column the tool lines, the answer and the
+        user's own line all sit at. Syntax() draws a filled background band,
+        so a block started hard against column zero reads as a panel that
+        has escaped the conversation rather than as part of it -- it was the
+        one kind of content in the whole transcript with no left margin.
+        """
+        self.console.print(
+            Padding(Syntax(sanitise(text), language, theme=self.code_theme,
+                           word_wrap=True),
+                    (0, 0, 0, 4)))
 
     def highlight(self, line: str, language: str = "text") -> Text:
         """One line, syntax-highlighted, with no block chrome.
