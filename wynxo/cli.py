@@ -75,6 +75,22 @@ from .platforms import (
     suspicious_workspace, terminal_width)
 from .wizard import probe, run_wizard
 
+
+def live_note(note):
+    """(text to show, note to keep) for a transient prompt note.
+
+    A function rather than a method because both strips that can show one --
+    the classic prompt's bottom border and the chat layout's footer -- need
+    identical expiry, and the second one grew its own copy that never ran.
+    """
+    if note is None:
+        return "", None
+    message, until = note
+    if time.monotonic() < until:
+        return message, note
+    return "", None
+
+
 # Short forms for the prefixes that are genuinely ambiguous. An exact command
 # is matched before any of these, so /mode still means /mode.
 ALIASES = {
@@ -1081,6 +1097,8 @@ class Repl:
         self.agent.refresh_system_prompt()
         self._task: asyncio.Task | None = None
         self._dictation_task: asyncio.Task | None = None
+        self._interrupt_armed = 0.0
+        """When a first Ctrl-C on an idle prompt stops meaning "quit"."""
         self._dictation_draft = ""
         """A transcription waiting on the next prompt line, for review."""
         self.gh = None
@@ -1309,6 +1327,7 @@ class Repl:
                 footer=self._chat_footer,
                 overlay=self._chat_overlay,
                 key_bindings=self._prompt_bindings,
+                on_interrupt=self._on_interrupt_key,
                 # The real width now, not the 80-column default: the banner
                 # and the first panels are drawn before the application has
                 # rendered once, and rich keeps whatever width it wrapped
@@ -1358,6 +1377,16 @@ class Repl:
                 f"{self.policy.name}{dot}{where}{dot}\x1b[2m{server}\x1b[0m")
 
     def _chat_footer(self) -> str:
+        """The status strip, with a transient note in front of it.
+
+        The classic prompt shows notes in its bottom border; the layout had
+        nowhere to put one, so "press Ctrl-C again to quit" and the Ctrl-E
+        effort change were both written to a footer that never displayed
+        them.
+        """
+        note, self._prompt_note = live_note(self._prompt_note)
+        if note:
+            return f" \x1b[1m{note}\x1b[0m  \x1b[2m{self._status_line()}\x1b[0m"
         return " " + self._status_line()
 
     def _chat_overlay(self) -> list[str]:
@@ -1471,11 +1500,24 @@ class Repl:
                     self._prompt_message, bottom_toolbar=self._bottom_toolbar,
                     default=draft)
             except KeyboardInterrupt:
+                # prompt_toolkit throws away the line and raises. One press
+                # is "forget what I typed" and always was; a second within
+                # the window is how every other terminal program is left,
+                # and until now there was none -- only /quit or Ctrl-D.
+                if self._quit_is_armed():
+                    self.ui.console.print()
+                    break
+                self._interrupt_armed = time.monotonic() + self.QUIT_WINDOW
+                self._prompt_note = ("press Ctrl-C again to quit",
+                                     self._interrupt_armed)
                 continue
             except EOFError:
                 break
 
-            self.ui.reset_prompt_lines()
+            # A line got typed, so the earlier Ctrl-C was not the start of a
+            # quit. Disarming here rather than on a timer keeps "twice in a
+            # row" literal.
+            self._interrupt_armed = 0.0
             text = text.strip()
             if not text:
                 continue
@@ -1484,6 +1526,13 @@ class Repl:
             # of a stranded box. See _echo_prompt.
             self._echo_prompt(text)
 
+            # Commands and the queue drain run with the same Ctrl-C handler
+            # a turn gets. Without it, prompt_toolkit's own teardown had
+            # already put SIGINT back to Python's default, so Ctrl-C during
+            # a slow command (/model probing a server, /gh reaching the API)
+            # raised KeyboardInterrupt straight out of the loop and ended
+            # the session, conversation and all.
+            self._arm_interrupt()
             if text.startswith("/"):
                 if await self._guarded(self.command(text)) is False:
                     break
@@ -1517,7 +1566,9 @@ class Repl:
 
         Interrupted and CancelledError pass through: those are Ctrl-C, which
         the caller already handles, and swallowing them would make Ctrl-C
-        look broken again.
+        look broken again. A bare KeyboardInterrupt is Ctrl-C too, but with
+        nothing holding it -- it is reported here rather than re-raised,
+        because the alternative was the process exiting.
         """
         import traceback
 
@@ -1525,6 +1576,16 @@ class Repl:
             return await coro
         except (Interrupted, asyncio.CancelledError):
             raise
+        except KeyboardInterrupt:
+            # A SIGINT that landed somewhere with no task to cancel -- most
+            # often during a command. It means "stop this", never "throw the
+            # session away", and as a BaseException it walked straight past
+            # the handler below on its way out of the process.
+            self.callbacks._end_stream()
+            self.ui.console.print()
+            self.ui.warn("Interrupted. The conversation is intact; "
+                         "ask me something else.")
+            return None
         except ProviderError as exc:
             self.callbacks._end_stream()
             self.ui.error(str(exc))
@@ -1592,6 +1653,11 @@ class Repl:
                 "ctrl+t": self.callbacks.toggle_verbose,
                 "ctrl+u": lambda: (self.pending.clear(),
                                    setattr(bar, "queued", ""), bar.refresh()),
+                # Advertised in LIVE_KEYS and drawn into the activity bar as
+                # "^D diff", but never bound: mid-turn it fell through to
+                # type-ahead, which drops it for not being printable. The
+                # prompt has had the same binding all along.
+                "ctrl+d": self.callbacks.toggle_diff_detail,
                 # The watcher holds the terminal in cbreak mode for the whole
                 # turn, so it sees Ctrl-C as a keypress. Handling it here
                 # works even where the tty driver does not raise SIGINT --
@@ -1897,13 +1963,7 @@ class Repl:
 
         # A transient note (Ctrl-E effort changes) replaces the hints for a
         # moment; the hints return once it expires.
-        note = ""
-        if self._prompt_note is not None:
-            message, until = self._prompt_note
-            if time.monotonic() < until:
-                note = message
-            else:
-                self._prompt_note = None
+        note, self._prompt_note = live_note(self._prompt_note)
 
         # The hints that fit, most useful first. ^C stop must survive the
         # longest, so it is trimmed last rather than with the rest.
@@ -2045,6 +2105,45 @@ class Repl:
         self.speaker.stop()
         if self._task and not self._task.done():
             self._task.cancel()
+
+    QUIT_WINDOW = 2.0
+    """How long a first Ctrl-C on an idle prompt stays armed. Long enough to
+    be a deliberate second press, short enough that a Ctrl-C now and another
+    a minute later is not a quit."""
+
+    def _on_interrupt_key(self) -> None:
+        """Ctrl-C, from the chat layout's keyboard rather than from SIGINT.
+
+        Three things, in the order a terminal program is expected to do
+        them: stop the work if there is any, otherwise clear what has been
+        typed, otherwise quit -- and quitting takes two presses, because a
+        session is too expensive to lose to one stray keystroke.
+        """
+        if self._task is not None and not self._task.done():
+            self._interrupt_armed = 0.0
+            self.interrupt()
+            return
+        chat = self.chat
+        if chat is not None and chat.buffer.text:
+            chat.buffer.reset()
+            self._interrupt_armed = 0.0
+            chat.invalidate()
+            return
+        if self._quit_is_armed():
+            # Through the composer, so the shutdown is the one /quit runs.
+            if chat is not None:
+                chat.submit("/quit")
+            return
+        self._interrupt_armed = time.monotonic() + self.QUIT_WINDOW
+        self._prompt_note = ("press Ctrl-C again to quit",
+                             self._interrupt_armed)
+        if chat is not None:
+            chat.invalidate()
+
+    def _quit_is_armed(self) -> bool:
+        """Whether a previous Ctrl-C is still close enough to mean quit."""
+        armed = getattr(self, "_interrupt_armed", 0.0)
+        return bool(armed) and time.monotonic() < armed
 
     # -- speech to text ------------------------------------------------------
 
