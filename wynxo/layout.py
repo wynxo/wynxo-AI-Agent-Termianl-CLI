@@ -258,6 +258,7 @@ class ChatLayout:
                  footer: Callable[[], str] | None = None,
                  overlay: Callable[[], list[str]] | None = None,
                  key_bindings: KeyBindings | None = None,
+                 on_interrupt: Callable[[], None] | None = None,
                  width: int | None = None, height: int | None = None):
         self.unicode = unicode
         self.accent = accent
@@ -265,6 +266,9 @@ class ChatLayout:
         self._footer = footer or (lambda: "")
         self._overlay = overlay or (lambda: [])
         self._extra_keys = key_bindings
+        self.on_interrupt = on_interrupt
+        """What Ctrl-C does when no modal owns it. See the binding below --
+        without one, Ctrl-C is inert for the whole session."""
 
         self._forced_size = (width, height)
         self.transcript = Transcript(width or 80)
@@ -601,6 +605,15 @@ class ChatLayout:
         self.focus_composer()
         return await self._submitted.get()
 
+    def submit(self, text: str) -> None:
+        """Hand the main loop a line nobody typed.
+
+        Ctrl-C twice on an empty composer leaves through here as "/quit",
+        so quitting runs the same shutdown an explicit /quit does rather
+        than a second teardown path that has to be kept in step with it.
+        """
+        self._submitted.put_nowait(text)
+
     def focus_composer(self) -> None:
         """Put focus (and therefore the cursor) back in the input.
 
@@ -655,6 +668,27 @@ class ChatLayout:
         @keys.add("escape", filter=asking)
         def _(event):
             self.cancel_ask()
+
+        # Ctrl-C everywhere else. This application holds the terminal in
+        # prompt_toolkit's raw mode, which clears ISIG -- so the driver never
+        # raises SIGINT here and the handler the session installs before
+        # every turn could not fire. With the two modal bindings above
+        # filtered off, nothing claimed the key at all: Ctrl-C did nothing
+        # while the agent worked, and nothing at the composer either, in the
+        # layout the app starts by default and under a status bar that says
+        # "^C stop". The owner decides what it means; the layout only has to
+        # deliver it.
+        #
+        # Its own condition rather than `typing`: prompt_toolkit runs the
+        # last binding whose filter passes, so a filter that is merely "no
+        # picker" would win over the `asking` one above and steal Ctrl-C
+        # from an open question.
+        unclaimed = Condition(lambda: self._picker is None and self._ask is None)
+
+        @keys.add("c-c", filter=unclaimed)
+        def _(event):
+            if self.on_interrupt is not None:
+                self.on_interrupt()
 
         @keys.add("f2")
         def _(event):

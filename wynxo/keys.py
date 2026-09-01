@@ -13,6 +13,7 @@ restore runs from a ``finally`` and is safe to call twice.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import os
 import sys
@@ -21,6 +22,18 @@ from typing import Callable
 
 # Control characters, by the letter people actually press.
 CTRL = {chr(i + 1): f"ctrl+{chr(ord('a') + i)}" for i in range(26)}
+
+ESC = "\x1b"
+
+# The last byte of a CSI sequence ("ESC [ ... final"), by the range the
+# standard reserves for it. Everything before it is a parameter or an
+# intermediate byte and belongs to the same keypress.
+CSI_FINAL = tuple(chr(i) for i in range(0x40, 0x7F))
+
+MAX_ESCAPE = 64
+"""A cap on how much a half-read escape sequence may swallow. Nothing a
+keyboard or a mouse report sends comes close; a terminal that starts a
+sequence and never finishes it would otherwise eat every later keystroke."""
 
 
 def key_name(char: str) -> str:
@@ -51,6 +64,19 @@ class KeyWatcher:
         self._stop = threading.Event()
         self._saved = None
         self._fd: int | None = None
+        self._restoring = threading.Lock()
+        """The reader thread restores from its ``finally`` and ``stop()``
+        restores after joining it; when the join times out both run. The
+        lock is what makes "safe to call twice" true across threads rather
+        than only in sequence."""
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        """Bytes arrive in whatever sizes the terminal hands over, and a
+        keypress is not a byte: reading and decoding one at a time turned
+        every non-ASCII character into as many replacement characters as it
+        had bytes, and typing "e" with an accent mid-turn queued garbage."""
+        self._escape: str | None = None
+        """The escape sequence being read, without its leading ESC. None
+        when we are not inside one."""
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -158,14 +184,21 @@ class KeyWatcher:
                 except (OSError, ValueError):
                     return
                 if not ready:
+                    # Nothing for 150ms. Any escape sequence still open was
+                    # a bare Esc keypress, not the start of an arrow key --
+                    # release it rather than let it swallow the next key.
+                    self._flush_escape()
                     continue
                 try:
-                    data = os.read(self._fd, 1)
+                    # A chunk, not a byte: a paste, a mouse report and a
+                    # multi-byte character all arrive as several bytes, and
+                    # a read per byte costs a select syscall each.
+                    data = os.read(self._fd, 1024)
                 except (OSError, ValueError):
                     return
                 if not data:
                     return
-                self._dispatch(data.decode("utf-8", "replace"))
+                self.feed(self._decoder.decode(data))
         finally:
             self._restore()
 
@@ -178,15 +211,68 @@ class KeyWatcher:
             return
         while not self._stop.is_set():
             if not msvcrt.kbhit():
+                # Same as the posix loop: an escape sequence that stopped
+                # arriving was a bare Esc, and must not swallow the next key.
+                self._flush_escape()
                 self._stop.wait(0.05)
                 continue
             try:
                 char = msvcrt.getwch()
             except Exception:
                 return
-            self._dispatch(char)
+            # The console reports arrow keys, function keys and the numeric
+            # keypad as a two-character sequence led by NUL or 0xE0. Read
+            # the scan code and drop the pair: without this, pressing Up
+            # mid-turn typed "a" with a grave accent into the queued line.
+            if char in ("\x00", "\xe0"):
+                with contextlib.suppress(Exception):
+                    msvcrt.getwch()
+                continue
+            self.feed(char)
 
     # -- shared ------------------------------------------------------------
+
+    def feed(self, text: str) -> None:
+        """Push decoded input through the escape filter, then dispatch.
+
+        Arrow keys, Home/End, function keys and mouse reports all arrive as
+        "ESC [ ...". Dispatching those characters one by one meant no
+        binding claimed them and the tail fell through to type-ahead, so
+        pressing Up while the agent worked appended "[A" to the message
+        waiting to be sent. They are keypresses nothing here binds, so they
+        are read to their end and dropped.
+        """
+        for char in text:
+            if self._escape is not None:
+                self._escape += char
+                if self._escape_ended() or len(self._escape) >= MAX_ESCAPE:
+                    self._escape = None
+                continue
+            if char == ESC:
+                self._escape = ""
+                continue
+            self._dispatch(char)
+
+    def _escape_ended(self) -> bool:
+        """Whether the sequence read so far is complete."""
+        seq = self._escape or ""
+        if not seq:
+            return False
+        if seq.startswith("[M"):
+            # X10 mouse reporting: "M" is a valid CSI final, but three raw
+            # coordinate bytes follow it and any of them can be printable.
+            # Ending at the "M" would type the coordinates into the queue.
+            return len(seq) >= 5
+        if seq[0] == "[":                     # CSI: parameters, then a final
+            return len(seq) > 1 and seq[-1] in CSI_FINAL
+        if seq[0] == "O":                     # SS3: exactly one more
+            return len(seq) > 1
+        # Alt-<key> and anything else: one character and done.
+        return True
+
+    def _flush_escape(self) -> None:
+        """Give up on a sequence that stopped arriving -- a bare Esc."""
+        self._escape = None
 
     def _dispatch(self, char: str) -> None:
         handler = self.handlers.get(key_name(char))
@@ -212,10 +298,11 @@ class KeyWatcher:
             loop.call_soon_threadsafe(call)
 
     def _restore(self) -> None:
-        if self._saved is None or self._fd is None:
-            return
-        saved, fd = self._saved, self._fd
-        self._saved, self._fd = None, None
+        with self._restoring:
+            if self._saved is None or self._fd is None:
+                return
+            saved, fd = self._saved, self._fd
+            self._saved, self._fd = None, None
         with contextlib.suppress(Exception):
             import termios
 

@@ -163,3 +163,109 @@ class TestTerminalRestore:
         finally:
             reader.close()          # takes the slave fd with it
             os.close(master)
+
+
+class TestEscapeSequences:
+    """Arrow keys, function keys and mouse reports arrive as "ESC [ ...".
+
+    Nothing here binds them, and the watcher hands whatever no binding
+    claimed to type-ahead -- so dispatching them character by character
+    appended their tail to the message waiting to be sent. Pressing Up
+    while the agent worked queued "[A".
+    """
+
+    def watcher(self):
+        typed = []
+        hit = []
+        return KeyWatcher({"ctrl+o": lambda: hit.append("o")},
+                          on_key=typed.append), typed, hit
+
+    def test_an_arrow_key_types_nothing(self):
+        watcher, typed, _ = self.watcher()
+        watcher.feed("\x1b[A")
+        assert typed == []
+
+    def test_a_modified_arrow_types_nothing(self):
+        """Ctrl-Left is "ESC [ 1 ; 5 D" -- parameters before the final."""
+        watcher, typed, _ = self.watcher()
+        watcher.feed("\x1b[1;5D")
+        assert typed == []
+
+    def test_a_function_key_types_nothing(self):
+        """F1 is SS3: "ESC O P", two characters rather than a CSI."""
+        watcher, typed, _ = self.watcher()
+        watcher.feed("\x1bOP")
+        assert typed == []
+
+    def test_a_mouse_report_types_nothing(self):
+        watcher, typed, _ = self.watcher()
+        watcher.feed("\x1b[<0;12;4M")
+        assert typed == []
+
+    def test_an_x10_mouse_report_types_nothing(self):
+        """"M" is a valid CSI final, but three raw coordinate bytes follow
+        it -- and they are printable, so ending at the "M" queued them."""
+        watcher, typed, _ = self.watcher()
+        watcher.feed("\x1b[M !\"")
+        assert typed == []
+
+    def test_real_keys_around_a_sequence_still_land(self):
+        watcher, typed, hit = self.watcher()
+        watcher.feed("a\x1b[Ab\x0fc")
+        assert typed == ["a", "b", "c"]
+        assert hit == ["o"]
+
+    def test_a_sequence_split_across_reads_is_still_one_key(self):
+        """A 1024-byte read is not a keypress boundary: the terminal may
+        hand over "ESC [" and "A" separately."""
+        watcher, typed, _ = self.watcher()
+        watcher.feed("\x1b[")
+        watcher.feed("A")
+        watcher.feed("z")
+        assert typed == ["z"]
+
+    def test_a_bare_escape_is_released_rather_than_eating_the_next_key(self):
+        """Esc pressed alone opens a sequence that never finishes. The read
+        loop flushes it when nothing follows; without that, the next
+        keystroke -- and only that one -- would vanish."""
+        watcher, typed, _ = self.watcher()
+        watcher.feed("\x1b")
+        watcher._flush_escape()
+        watcher.feed("a")
+        assert typed == ["a"]
+
+    def test_a_runaway_sequence_cannot_eat_the_session(self):
+        """A terminal that opens a sequence and never closes it would
+        otherwise swallow every keystroke for the rest of the turn. The cap
+        gives up on it; what matters is that the state recovers."""
+        watcher, typed, hit = self.watcher()
+        watcher.feed("\x1b[" + "1;" * 60)
+        assert watcher._escape is None, "still inside the sequence"
+        watcher.feed("a\x0f")
+        assert typed[-1] == "a"
+        assert hit == ["o"], "bindings stopped firing"
+
+
+class TestMultiByteCharacters:
+    """One byte is not one keypress. Decoding per byte turned every
+    non-ASCII character into as many U+FFFD as it had bytes -- and U+FFFD
+    is printable, so the garbage went into the queued message."""
+
+    def test_a_two_byte_character_arrives_whole(self):
+        typed = []
+        watcher = KeyWatcher({}, on_key=typed.append)
+        for byte in "é".encode():
+            watcher.feed(watcher._decoder.decode(bytes([byte])))
+        assert typed == ["é"]
+
+    def test_an_emoji_arrives_whole(self):
+        typed = []
+        watcher = KeyWatcher({}, on_key=typed.append)
+        watcher.feed(watcher._decoder.decode("🙂".encode()))
+        assert typed == ["🙂"]
+
+    def test_a_chunk_read_dispatches_every_character(self):
+        typed = []
+        watcher = KeyWatcher({}, on_key=typed.append)
+        watcher.feed(watcher._decoder.decode(b"hello"))
+        assert typed == list("hello")
