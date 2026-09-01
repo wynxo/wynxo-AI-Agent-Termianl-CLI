@@ -591,7 +591,12 @@ class TerminalCallbacks(Callbacks):
             self.tokens += 1
             if not self._streaming:
                 self._end_stream()
-                self.streamer = CodeStreamer(self.ui)
+                # Indented to the same column the user's own line, the tool
+                # lines and the greeting all sit at. The answer -- the thing
+                # the screen exists for -- was the one kind of content
+                # starting hard against column zero, so it read as overflow
+                # rather than as the reply to the line above it.
+                self.streamer = CodeStreamer(self.ui, indent="  ")
                 self._streaming = True
             if self.bar is not None:
                 self.bar.update(activity="writing", detail="", tokens=self.tokens)
@@ -611,7 +616,22 @@ class TerminalCallbacks(Callbacks):
         if pet is not None:
             pet.set_activity(name)
         if self.bar is not None:
+            # The live strip owns this. A stage is a state, not an event: it
+            # is true for a while and then stops being true, which is what a
+            # status region shows and what a transcript line cannot. Printing
+            # it as well was tolerable while stages were rare, but there is
+            # one before every model request now -- so a five-step coding
+            # turn wrote "thinking" into the conversation five times, between
+            # the tool results the user actually wanted to read.
             self.bar.update(activity=name, detail=detail)
+            self._last_stage = name
+            return
+        # No live region -- a pipe, -p, a dumb terminal. A printed line is
+        # the only way to show it there, so it is printed, but never twice
+        # in a row for the same state.
+        if name == getattr(self, "_last_stage", ""):
+            return
+        self._last_stage = name
         suffix = f" [{MUTED}]{detail}[/]" if detail else ""
         self.ui.console.print(f"  [{ACCENT}]{self.ui.g.arrow}[/] [{MUTED}]{name}[/]{suffix}")
 
@@ -621,6 +641,7 @@ class TerminalCallbacks(Callbacks):
 
     async def _on_tool_start_locked(self, name: str, summary: str, event: ToolEvent | None = None) -> None:
         self.active_tool = name
+        self._last_stage = ""      # a tool ends the stage it followed
         self._tool_started = time.monotonic()
         self._held_output.clear()
         self._end_code()
@@ -1234,12 +1255,17 @@ class Repl:
             self.policy.name,
             str(self.workspace),
         )
-        if self.pet.enabled:
-            self.ui.console.print(
-                Text("  ") + Text(self.pet.face(advance=False),
-                                  style=f"bold {self.pet.style()}")
-                + Text(f"  {self.pet.name} {self.ui.g.dot} "
-                       f"{self.pet.remark('greet')}", style=MUTED))
+        if self.pet.enabled and (greeting := self.pet.remark("greet")):
+            # The face only where the overlay is not already showing one.
+            # Three renderings of the same character were on screen at once
+            # on launch: this line, the status strip, and the corner scene.
+            line = Text("  ")
+            if self.chat is None:
+                line.append(self.pet.face(advance=False),
+                            style=f"bold {self.pet.style()}")
+                line.append("  ")
+            line.append(f"{self.pet.name} {self.ui.g.dot} {greeting}", style=MUTED)
+            self.ui.console.print(line)
             self.ui.console.print()
         return True
 
@@ -2008,7 +2034,29 @@ class Repl:
         used = self.agent.session.token_estimate()
         limit = self.policy.context_budget or self.config.num_ctx
         pieces = []
-        if self.pet.enabled:
+        # What the agent is doing, first and in front of the numbers.
+        #
+        # Under the chat layout the activity bar's live region is switched
+        # off -- prompt_toolkit owns the screen -- so ActivityBar._render()
+        # never runs and the phase it tracks was drawn nowhere except the
+        # companion's panel title, up in the corner. The strip directly
+        # above the composer, which is where the eye already is, showed
+        # model, effort, context and token counts and not one word about
+        # whether anything was happening. Between a tool finishing and the
+        # next reply arriving that left the whole screen static.
+        bar = getattr(getattr(self, "callbacks", None), "bar", None)
+        if bar is not None and (activity := getattr(bar, "activity", "")):
+            phase = f"{self.ui.g.gear} {activity}"
+            if detail := getattr(bar, "detail", ""):
+                phase += f" {detail}"
+            pieces.append(phase)
+        # Only where nothing else is drawing the character. Under the chat
+        # layout the overlay draws it properly -- with a body, a pose and a
+        # scene -- and this line drew a kaomoji of the same character beside
+        # it, in a different art style, at the same time. Two faces for one
+        # companion reads as two companions; the scrolling prompt has no
+        # overlay, so there this is the only one and it stays.
+        if self.pet.enabled and self.chat is None:
             pieces.append(f"{self.pet.face()} {self.pet.name}")
         pieces += [self.config.model,
                    f"{effort_meter(self.policy.name, self.ui.g.unicode)} "

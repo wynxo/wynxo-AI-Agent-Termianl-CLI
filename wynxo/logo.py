@@ -30,6 +30,9 @@ FRAME_TIME = 0.045
 FRAMES = 16
 """Roughly two thirds of a second in total."""
 
+LOGO_ROWS = 6
+"""Tall enough for legible letterforms, short enough to stay a greeting."""
+
 BAND = 3
 """Columns per colour band. Per-character colour looks no better at this
 size and costs a few thousand style objects a frame."""
@@ -61,7 +64,8 @@ def read(name: str) -> str:
         return ""
 
 
-def fit(art: str, width: int, max_height: int) -> list[str]:
+def fit(art: str, width: int, max_height: int,
+        style: str = "simple") -> list[str]:
     """The art at the largest size that fits, as lines of text."""
     if not art.strip():
         return []
@@ -91,7 +95,7 @@ def fit(art: str, width: int, max_height: int) -> list[str]:
         return [r.rstrip() for r in rows]
 
     grid = asciiart.normalise(asciiart.from_text(art, width, height))
-    return asciiart.render(grid, style="simple").split("\n")
+    return asciiart.render(grid, style=style).split("\n")
 
 
 def colour_at(row: int, column: int, phase: int) -> str:
@@ -144,8 +148,16 @@ async def play(ui, name: str = "wyn", animations: bool = True) -> bool:
         return False
 
     width = max(20, min(getattr(ui, "width", 80) - 2, 110))
-    # Half the screen at most: the logo is a greeting, not the session.
-    lines = fit(art, width, max_height=max(6, _rows(ui) // 2))
+    # A greeting, not the session. Half the screen was the old ceiling and
+    # the wordmark took all of it: eleven rows of a thirty-row terminal,
+    # still on screen -- and still pushing the conversation up -- several
+    # turns later, because the transcript scrolls rather than clears. Six
+    # rows read as a logo; fifteen read as an obstacle.
+    lines = fit(art, width, max_height=max(4, min(LOGO_ROWS, _rows(ui) // 4)),
+                # Block characters where the terminal has them. The ink ramp
+                # renders every letter as a field of @, which is what made
+                # the wordmark look like corrupted output rather than type.
+                style="blocks" if getattr(ui.g, "unicode", False) else "simple")
     if not lines:
         return False
 

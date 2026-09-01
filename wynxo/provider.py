@@ -91,6 +91,15 @@ class Chunk:
     and the agent went on to act on it. Local models make this ordinary
     rather than exotic: an OOM during generation looks exactly like this.
     """
+    stop_reason: str = ""
+    """Why generation ended: Ollama's ``done_reason``, OpenAI's
+    ``finish_reason``. "stop", "length", "load", "tool_calls".
+
+    It was being dropped, which is why an empty answer had no evidence
+    behind it and every one of them got the same guess. "length" with no
+    tokens generated is a num_predict problem; "stop" with tokens generated
+    but no text is a template problem; neither is a context problem, and
+    the user was told it might be all three."""
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_duration_ns: int = 0
@@ -456,6 +465,7 @@ class OllamaClient:
             tool_calls=[c for c in as_list(message.get("tool_calls"))
                         if isinstance(c, dict)],
             done=bool(data.get("done")),
+            stop_reason=as_text(data.get("done_reason")),
             prompt_tokens=as_int(data.get("prompt_eval_count")),
             completion_tokens=as_int(data.get("eval_count")),
             total_duration_ns=as_int(data.get("total_duration")),
@@ -644,6 +654,7 @@ class OpenAIClient:
             calls: dict[int, dict] = {}
             prompt_tokens = 0
             completion_tokens = 0
+            stop_reason = ""
             finished = False
             """Whether the provider said it was done, rather than the socket
             simply stopping. Either [DONE] or a finish_reason counts; shims
@@ -674,8 +685,9 @@ class OpenAIClient:
                     choices = obj.get("choices")
                     if not isinstance(choices, list) or not choices:
                         continue
-                    if choices[0].get("finish_reason"):
+                    if reason := as_text(choices[0].get("finish_reason")):
                         finished = True
+                        stop_reason = reason
                     delta = choices[0].get("delta") or {}
                     if content := as_text(delta.get("content")):
                         produced = True
@@ -717,6 +729,7 @@ class OpenAIClient:
             yield Chunk(
                 tool_calls=tool_calls,
                 done=True,
+                stop_reason=stop_reason,
                 # Only when something was actually being generated. A stream
                 # that produced nothing at all is the empty-answer case, which
                 # already has its own handling and its own message.

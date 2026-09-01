@@ -324,9 +324,15 @@ class TestMouseAndSelection:
 
     async def test_the_footer_says_which_mode_the_mouse_is_in(self):
         ui, _ = measure(80, 24)
-        assert "F2" in str(ui._footer_fragments().value)
+        # Shift-drag leads, because it is the answer that needs no mode and
+        # no wynxo-specific knowledge -- every mainstream terminal does its
+        # own selection while shift is held. Naming only F2 taught a toggle
+        # nobody would guess at for something the terminal already does.
+        with_mouse = str(ui._footer_fragments().value)
+        assert "shift+drag" in with_mouse
+        assert "F2" in with_mouse
         ui.mouse_on = False
-        assert "select mode" in str(ui._footer_fragments().value)
+        assert "drag to select" in str(ui._footer_fragments().value)
 
     async def test_the_wheel_scrolls_the_transcript(self):
         ui, _ = measure(80, 24, lines=200)

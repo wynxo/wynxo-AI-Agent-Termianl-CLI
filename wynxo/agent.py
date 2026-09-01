@@ -141,6 +141,26 @@ def _fingerprint(call) -> str:
 # Shown to the model once when it answers with nothing at all -- no text, no
 # tool call. The single retry costs one model call, not a loop, and turns
 # what would otherwise be a dead turn into a second chance.
+@dataclass
+class ModelEvidence:
+    """What the last model call actually did, for diagnosing an empty answer.
+
+    An empty answer had exactly one explanation offered for it -- "the chat
+    template does not fit, or the conversation has outgrown the context
+    window" -- regardless of what happened. Both may be wrong, and telling
+    somebody to run /compact when the real cause is a num_predict of zero
+    sends them a long way in the wrong direction. These are the facts the
+    provider already reports; they were simply thrown away.
+    """
+
+    stop_reason: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    chunks: int = 0
+    truncated: bool = False
+    had_thinking: bool = False
+
+
 EMPTY_ANSWER_NUDGE = (
     "Your previous reply came back empty -- no text and no tool call. "
     "Answer the user's request directly, or call a tool if the task needs "
@@ -374,6 +394,15 @@ class TurnResult:
     terminal_action: bool = False
     """A system action (e.g. an application launch) succeeded and the turn
     ended there, by design, instead of continuing into coding work."""
+    answered: bool = True
+    """Whether the model actually produced an answer.
+
+    A turn that ends with nothing was reported as a clean success: empty
+    content, no errors, task state COMPLETED. The tools had run, so work had
+    genuinely happened -- but the run finished with the screen showing a
+    warning and no reply, and the state machine saying it went fine. An
+    empty answer is not a completed turn, and the difference has to survive
+    as far as the caller."""
     """The loop hit the no-progress repeat cap and gave the model a
     structured recovery prompt before it kept going."""
     errors: list[str] = field(default_factory=list)
@@ -562,6 +591,16 @@ class Agent:
         argument_buffer = ""
         argument_shown = 0
         truncated = False
+        evidence = ModelEvidence()
+        # The request is about to go out and nothing on screen says so. The
+        # activity bar keeps whatever it last had -- which, straight after a
+        # tool, is that tool's own label -- for the whole round trip. On a
+        # local model that is ten to sixty seconds of a screen that says
+        # "writing file" while nothing is writing anything, and it is the
+        # single reason a working agent looks frozen. on_stage already
+        # drives both the bar and the companion, so one call is the fix.
+        if not silent:
+            await self.cb.on_stage("thinking")
         stream = self.backend.chat(
             messages if messages is not None else self.session.wire(),
             model=self.config.model,
@@ -596,8 +635,15 @@ class Agent:
                     argument_shown = len(whole)
             if chunk.tool_calls:
                 native_calls.extend(chunk.tool_calls)
+            evidence.chunks += 1
+            if chunk.thinking:
+                evidence.had_thinking = True
             if chunk.done:
                 truncated = truncated or chunk.truncated
+                evidence.stop_reason = chunk.stop_reason or evidence.stop_reason
+                evidence.prompt_tokens = chunk.prompt_tokens or evidence.prompt_tokens
+                evidence.completion_tokens = (chunk.completion_tokens
+                                              or evidence.completion_tokens)
                 self.session.usage.add_chunk(
                     chunk.prompt_tokens, chunk.completion_tokens, chunk.total_duration_ns
                 )
@@ -615,6 +661,9 @@ class Agent:
                 "means it ran out of memory or was unloaded mid-answer.")
         if live_filter.saw_dangling_close:
             self._template_prefills_think = True
+
+        evidence.truncated = truncated
+        self._last_evidence = evidence
 
         turn = parse_turn("".join(content_parts), "".join(thinking_parts),
                           native_calls)
@@ -1396,10 +1445,28 @@ class Agent:
                     # one-off glitch -- and one explicit nudge fixes most
                     # of them. Guarded by the flag so it never loops.
                     result.empty_retried = True
+                    # Said out loud. This costs a whole extra round trip --
+                    # on a local model, tens of seconds -- and it used to
+                    # happen behind a screen that still showed the last
+                    # tool's label, so the one visible sign that anything
+                    # was happening was the reply eventually appearing, or
+                    # not.
+                    # The stage, not a warning. This costs a whole extra
+                    # round trip -- on a local model, tens of seconds -- and
+                    # it used to happen behind a screen still showing the
+                    # last tool's label, so the only sign anything was
+                    # happening was the reply eventually arriving. But it
+                    # usually works, and a self-healing retry that succeeded
+                    # is not something to leave an exclamation mark in the
+                    # transcript about. The status strip says it while it is
+                    # true and stops when it stops being true; the warning
+                    # is kept for the retry that also comes back empty.
+                    await self.cb.on_stage("retrying", "model sent nothing")
                     self.session.add_user(EMPTY_ANSWER_NUDGE)
                     continue
                 await self._warn_if_nothing_came_back(turn)
                 result.content = turn.content
+                result.answered = bool(turn.content.strip())
                 return result
 
             result.tool_calls += len(turn.tool_calls)
@@ -1470,12 +1537,71 @@ class Agent:
         """
         if turn.content.strip() or turn.tool_calls:
             return
-        await self.cb.on_warning(
-            "The model sent back an empty answer. Usually that means its "
-            "chat template does not fit the prompt wynxo builds, or the "
-            "conversation has outgrown the context window. /doctor checks "
-            "the first; /compact fixes the second."
-        )
+        await self.cb.on_warning(self.explain_empty_answer())
+
+    def explain_empty_answer(self) -> str:
+        """Why the last call came back with nothing, from what it reported.
+
+        One message used to cover every cause: "its chat template does not
+        fit, or the conversation has outgrown the context window". Both can
+        be wrong at once, and sending somebody to /compact when the model
+        actually hit a zero num_predict wastes their time on the wrong
+        thing. Each branch below is something the provider told us.
+        """
+        e = getattr(self, "_last_evidence", None) or ModelEvidence()
+        window = self.config.num_ctx
+
+        if e.truncated:
+            return ("The model stopped sending before it finished, so this "
+                    "answer is empty. With a local model that usually means "
+                    "it ran out of memory or was unloaded mid-answer -- "
+                    "check `ollama ps` and the server's log.")
+
+        if e.chunks == 0:
+            return ("The server accepted the request and then sent nothing "
+                    "at all -- no tokens, no end marker. That is the server "
+                    "or the model, not the conversation: /doctor checks the "
+                    "connection and whether the model is loadable.")
+
+        # Real evidence of a full window, rather than a guess about one.
+        if window > 0 and e.prompt_tokens >= window:
+            return (f"The prompt was {e.prompt_tokens} tokens against a "
+                    f"{window}-token window, so the model never saw all of "
+                    "it and answered with nothing. /compact shortens the "
+                    "conversation; raising num_ctx gives it more room.")
+
+        if e.stop_reason == "length":
+            if e.completion_tokens == 0:
+                return ("The model was cut off before its first token: it "
+                        "stopped for length with nothing generated, which "
+                        "means the reply budget is zero. Raise num_predict "
+                        "(or the effort level, which sets it).")
+            return (f"The model hit its reply limit after "
+                    f"{e.completion_tokens} tokens without producing an "
+                    "answer. Raise num_predict, or the effort level.")
+
+        if e.stop_reason == "load":
+            return ("The server was still loading the model when the "
+                    "request arrived, so it answered with nothing. Trying "
+                    "again usually works; `ollama ps` shows what is "
+                    "resident.")
+
+        if e.completion_tokens > 0 or e.had_thinking:
+            # It generated. Nothing reached us as an answer, so the text was
+            # lost between the model and here -- a template that labels the
+            # whole reply as thought is the usual culprit.
+            where = "as reasoning" if e.had_thinking else "somewhere"
+            return (f"The model generated {e.completion_tokens or 'some'} "
+                    f"tokens but none of them arrived as an answer -- they "
+                    f"went {where} instead. That is the model's chat "
+                    "template rather than your conversation; /doctor "
+                    "reports what the template supports.")
+
+        return ("The model returned an empty answer: it ended normally, "
+                "having generated nothing. That is usually a stop token "
+                "emitted immediately, which some models do when the prompt "
+                "shape does not match what they were tuned on. /doctor "
+                "checks the template; a different model is the other fix.")
 
     async def _warn_if_over_the_window(self) -> None:
         """Say so when the conversation no longer fits the model's window.
@@ -1753,6 +1879,9 @@ class Agent:
                 content=partial,
                 elapsed=time.monotonic() - started,
                 errors=[str(exc)],
+                # A turn that died on the provider did not produce an
+                # answer, whatever is left in the transcript from before it.
+                answered=False,
             )
         except asyncio.CancelledError:
             self.task_state.transition(TaskState.CANCELLED)
@@ -1764,7 +1893,11 @@ class Agent:
             self.session.close_open_tool_calls()
             raise Interrupted from None
 
-        self.task_state.transition(TaskState.COMPLETED)
+        # An empty answer is not a completed turn. Reporting it as one left
+        # the state machine, the companion and the status all saying the
+        # work had gone fine while the screen showed a warning and no reply.
+        self.task_state.transition(
+            TaskState.COMPLETED if result.answered else TaskState.FAILED)
         result.elapsed = time.monotonic() - started
         # Cheap and idempotent on a well-formed conversation, and it covers
         # the ways a turn can end early without raising -- the iteration

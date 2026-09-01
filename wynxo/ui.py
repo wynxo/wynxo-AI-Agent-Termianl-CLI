@@ -442,7 +442,11 @@ class UI:
             # updates when the model changes -- which a line printed once
             # into the transcript cannot. Printing both put two headers on
             # screen, one of them permanently stale.
-            self.rule()
+            #
+            # Not even a rule: the layout draws its own above the composer,
+            # so this one landed three rows from it and the greeting sat in
+            # a two-rule sandwich that read as a widget rather than as the
+            # first line of the conversation.
             return
         server = endpoint.split(" (")[0].replace("http://", "").replace("https://", "")
         parts = [model, f"{effort_meter(effort, self.g.unicode)} {effort}",
@@ -620,8 +624,12 @@ class UI:
         if not text.strip():
             return
         text = sanitise(text)
+        from rich.padding import Padding
+
         self.console.print()
-        self.console.print(Markdown(text, code_theme=self.code_theme))
+        # Same left margin as every other kind of line in the transcript.
+        self.console.print(Padding(Markdown(text, code_theme=self.code_theme),
+                                   (0, 0, 0, 2)))
         self.console.print()
 
     # -- tools -------------------------------------------------------------
