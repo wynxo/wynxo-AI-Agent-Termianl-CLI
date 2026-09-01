@@ -29,6 +29,7 @@ from rich.text import Text
 
 from .platforms import is_narrow, terminal_width
 
+from . import theme as _theme
 from .theme import Palette, resolve as resolve_theme
 
 # Module-level names kept for the many call sites that reference them. They are
@@ -108,6 +109,12 @@ def apply_palette(palette: Palette) -> None:
     # Captured before the rebind: it is the *old* value that identifies a
     # name in another module as one of ours.
     was = {name: here[name] for name in _COLOUR_NAMES}
+
+    # Anything that picks a colour per draw rather than at import -- the
+    # mascot, whose colour depends on its mood -- asks the theme module
+    # instead of holding a constant. Told here so there is one moment when
+    # the palette changes, not two.
+    _theme.use(palette)
 
     PALETTE = palette
     ACCENT = palette.accent
@@ -1392,6 +1399,14 @@ class ActivityBar:
     SPINNER = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
     SPINNER_ASCII = "|/-\\"
 
+    STILL_MARK = "\u25c9"
+    """The activity mark when nothing may move: reduced motion with the
+    mascot off. U+25C9 FISHEYE, which is one cell in every locale -- the
+    filled circles that read more obviously as a status dot (U+25CF, U+25CB)
+    are East Asian Width "Ambiguous" and draw two cells in a CJK terminal,
+    which would push the rest of the line sideways."""
+    STILL_MARK_ASCII = "*"
+
     def __init__(self, ui: "UI", effort: str, hint: str = "", model: str = "",
                  pet=None):
         self.ui = ui
@@ -1454,43 +1469,20 @@ class ActivityBar:
         """
         return effort_meter(self.effort, self.ui.g.unicode)
 
-    THINKING_DOTS = 4
-    """Cycle length for the trailing dots. Four reads as a rhythm; more
-    looks like the line is loading rather than the model is working."""
-
     def _activity_text(self) -> Text:
-        """The activity word, with a highlight travelling through it.
+        """The activity word. Held still, and read rather than watched.
 
-        A static word next to a spinner still reads as stalled -- the spinner
-        turns whether or not anything is happening. Moving the emphasis
-        through the word itself is a second, independent sign of life, and it
-        costs one Text per frame.
+        This used to run a highlight through it a character at a time, so
+        every letter changed style on every frame, with cycling dots after
+        it and -- on one theme -- a sparkle in front. Together with the
+        mascot that is four things moving at twelve frames a second in a
+        strip eighty cells wide, and the word itself was the hardest of them
+        to actually read. The mascot is the sign of life; the word is the
+        answer to what is happening, and answers should hold still.
         """
-        word = self.activity
         out = Text(style=BAR_STYLE)
-        if not word:
-            return out
-
-        if not self.ui.g.unicode or not self.animate:
-            out.append(word, style="bold")
-            return out
-
-        # One bright cell sweeping left to right, with a lit tail behind it.
-        span = len(word) + 6
-        head = self._frame % span
-        for index, char in enumerate(word):
-            distance = head - index
-            if distance == 0:
-                out.append(char, style=f"bold {BAR_ACCENT}")
-            elif 0 < distance <= 2:
-                out.append(char, style="bold")
-            else:
-                out.append(char, style=BAR_DIM if distance < 0 else "bold")
-
-        if word == "thinking":
-            dots = (self._frame // 3) % (self.THINKING_DOTS + 1)
-            out.append(self.ui.g.dot * dots, style=BAR_ACCENT)
-            out.append(" " * (self.THINKING_DOTS - dots))
+        if self.activity:
+            out.append(self.activity, style="bold")
         return out
 
     def _segments(self) -> list[tuple[str, str]]:
@@ -1510,18 +1502,24 @@ class ActivityBar:
         self._frame += 1
         width = max(20, self.ui.width)
 
+        # Exactly one thing on this line moves, and it is whichever of these
+        # is the sign of life. With the mascot on it is the mascot; with it
+        # off it is the spinner. Never both, and never a third.
         left = Text(style=BAR_STYLE)
         if self.pet is not None and self.pet.enabled:
             left.append(" ")
             left.append(self.pet.padded(), style=f"bold {self.pet.style()}")
-            left.append(" ")
-        else:
+            left.append("  ")
+        elif self.animate:
             frames = self.SPINNER if self.ui.g.unicode else self.SPINNER_ASCII
-            left.append(f" {frames[self._frame % len(frames)]} ",
+            left.append(f" {frames[self._frame % len(frames)]}  ",
                         style=f"bold {BAR_ACCENT}")
-        if self.ui.palette.name == "kawaii" and self.animate and self.ui.g.unicode:
-            sparkle = ("✦", "✧", "⋆", "·")[self._frame % 4]
-            left.append(sparkle + " ", style=f"bold {BAR_ACCENT}")
+        else:
+            # Reduced motion with no mascot: a still mark, in the same cells
+            # the moving one would have used, so turning animation off shifts
+            # nothing.
+            mark = self.STILL_MARK if self.ui.g.unicode else self.STILL_MARK_ASCII
+            left.append(f" {mark}  ", style=f"bold {BAR_ACCENT}")
         left.append_text(self._activity_text())
         if self.queued:
             # What you are typing beats what the agent is doing: you need to
@@ -1558,11 +1556,21 @@ class ActivityBar:
             stats.append_text(piece)
         stats.append(" ")
 
-        room = width - stats.cell_len
+        # The strip is drawn on the bottom row, so it has to be the width of
+        # the terminal exactly: a cell over and it wraps, and the whole
+        # display scrolls by a line on every repaint.
+        #
+        # ``max(1, ...)`` on the gap was the bug -- it guarantees a space
+        # even when there is no room for one, so a left half that filled its
+        # share produced a strip one cell too wide. The gap may be zero; what
+        # may not is the total.
+        room = max(0, width - stats.cell_len)
         if left.cell_len > room:
-            left.truncate(max(1, room - 1), overflow="ellipsis")
-        left.append(" " * max(1, room - left.cell_len))
+            left.truncate(room, overflow="ellipsis")
+        left.append(" " * max(0, room - left.cell_len))
         left.append_text(stats)
+        if left.cell_len > width:
+            left.truncate(width)
         return left
 
     # -- lifecycle ---------------------------------------------------------

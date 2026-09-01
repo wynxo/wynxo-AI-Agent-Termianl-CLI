@@ -36,6 +36,17 @@ class Palette:
     def as_dict(self) -> dict[str, str]:
         return {k: v for k, v in self.__dict__.items() if k != "name"}
 
+    def role(self, name: str) -> str:
+        """A colour by the job it does, falling back to the body text.
+
+        The mascot asks for "resting" or "busy" rather than for cyan, so a
+        theme can be a theme rather than a recolour of everything except the
+        cat. Before this, MOOD_STYLES named literal colours -- grey62,
+        bright_cyan, bright_magenta -- and the mascot was the one thing on
+        screen that /theme could not touch.
+        """
+        return getattr(self, name, self.text)
+
 
 # Default. A deep violet that stays legible on a black terminal and does not
 # collide with the green/yellow/red the status lines need to keep meaning.
@@ -149,22 +160,31 @@ PLAIN = Palette(
     code_theme="ansi_dark",
 )
 
-# Extra vibrant kawaii catboy heaven theme with more saturated colors
+# Catboy heaven: the premium personality theme. Violet and pink over a
+# near-black ground, with a pastel cyan holding the cooler end so the whole
+# thing is not one hue.
+#
+# Rebuilt rather than tuned. The first version made `bad` #ff69b4 against an
+# accent of #ff6ec7 -- two hot pinks four steps apart, so an error was the
+# same colour as a heading and stopped reading as an error at all. The body
+# text was lemon chiffon, a yellow, which belongs to no part of this palette
+# and made ordinary prose look like a warning. Errors are the one thing a
+# theme may never make pretty at the cost of legibility.
 CATBOY = Palette(
     name="catboy",
-    accent="#ff6ec7",        # Hot pink
-    accent_dim="#ff1493",    # Deep pink
-    text="#fffacd",          # Lemon chiffon
-    muted="#ffb6c1",         # Light pink
-    faint="#dda0dd",         # Plum
-    good="#00ff7f",          # Spring green
-    warn="#ffd700",          # Gold
-    bad="#ff69b4",           # Hot pink (warm bad)
-    bar_bg="#1a0a1f",        # Very dark magenta
-    bar_text="#fffacd",
-    bar_dim="#ffb6c1",
-    bar_accent="#ff6ec7",
-    code_theme="solarized-dark",
+    accent="#c77dff",        # violet, the identity colour
+    accent_dim="#8e5bc4",
+    text="#f2e9ff",          # near-white with a violet cast
+    muted="#b9a3d4",
+    faint="#7c6d94",
+    good="#8ff0c4",          # soft mint
+    warn="#ffcf7a",          # warm amber
+    bad="#ff7a9c",           # soft red, clearly not the accent
+    bar_bg="#1b1226",
+    bar_text="#f2e9ff",
+    bar_dim="#b9a3d4",
+    bar_accent="#ff9fd6",    # pink, against the violet accent
+    code_theme="material",
 )
 
 # Reduced-motion theme: the same plain grey palette with no animation
@@ -191,6 +211,25 @@ PALETTES: dict[str, Palette] = {
     p.name: p for p in (PURPLE, SAKURA, KAWAII, MIDNIGHT, EMBER, CATBOY, PLAIN, MINIMAL)
 }
 DEFAULT = "purple"
+
+
+_active: Palette | None = None
+
+
+def use(palette: Palette) -> None:
+    """Remember which palette is in force.
+
+    Colours are pushed into the modules that imported them, which works for
+    module-level constants and not for anything that has to choose a colour
+    per draw -- the mascot's, which depends on its mood. One place to ask
+    keeps that from becoming a second palette.
+    """
+    global _active
+    _active = palette
+
+
+def active() -> Palette:
+    return _active if _active is not None else PALETTES[DEFAULT]
 
 
 def resolve(name: str) -> Palette:

@@ -2,7 +2,7 @@
 
 import pytest
 
-from wynxo.pet import FACES_ASCII, FACES_KAWAII, Mood, Pet
+from wynxo.pet import FACES, FACES_ASCII, Mood, Pet
 from wynxo.prompts import VOICES, build_system_prompt
 from wynxo.repo import parse
 from wynxo.scope import Scope
@@ -148,22 +148,18 @@ class TestKawaii:
         for target in ("code", "file paths", "commit messages"):
             assert target in flat
 
-    def test_kawaii_faces_are_width_consistent(self):
-        from rich.cells import cell_len
-
-        for mood, frames in FACES_KAWAII.items():
-            assert len({cell_len(f) for f in frames}) == 1, mood.value
-
-    def test_every_mood_has_a_kawaii_face(self):
-        for mood in Mood:
-            assert FACES_KAWAII[mood]
-
-    def test_the_style_switches_the_face_set(self):
+    def test_the_voice_does_not_change_the_species(self):
+        """The kawaii voice used to get its own face set, so what the mascot
+        *was* depended on a personality setting -- a kawaii user and a
+        default user were looking at two different animals. The voice
+        changes what it says, not what it is."""
         pet = Pet()
         pet.react(Mood.HAPPY)
         default = pet.face(advance=False)
-        pet.style_name = "kawaii"
-        assert pet.face(advance=False) != default
+        for voice in ("kawaii", "mommy", "plain", "mentor"):
+            pet.style_name = voice
+            assert pet.face(advance=False) == default, voice
+        assert pet.faces() is FACES
 
     def test_ascii_terminals_still_get_ascii(self):
         pet = Pet(unicode=False)

@@ -423,65 +423,105 @@ class TestEffortSurge:
         assert stream.getvalue() == ""
 
 
-class TestActivityAnimation:
-    """A static word next to a spinner still reads as stalled -- the spinner
-    turns whether or not anything is happening."""
+class TestOnlyOneThingOnTheStripMoves:
+    """The activity word is an answer, and answers hold still.
 
-    def bar(self, activity="thinking", unicode_ok=True, animate=True):
+    It used to run a highlight through itself a character at a time, with
+    cycling dots after it and -- on the kawaii theme -- a sparkle in front,
+    all while the mascot animated beside them. Four moving things at twelve
+    frames a second in an eighty-cell strip, and the word saying what the
+    agent was doing was the hardest of the four to read.
+
+    So: the mascot is the sign of life, the word is the answer, and the
+    strip has exactly one animation at a time -- the mascot when it is on,
+    the spinner when it is off, a still mark when neither may move.
+    """
+
+    def bar(self, activity="thinking", unicode_ok=True, animate=True,
+            pet=None):
         from wynxo.ui import ActivityBar, Glyphs
 
         ui = UI()
         ui.g = Glyphs(unicode_ok)
         ui.width = 70
-        b = ActivityBar(ui, "medium")
+        b = ActivityBar(ui, "medium", pet=pet)
         b.activity = activity
         b.animate = animate
         return b
 
-    def test_the_label_changes_between_frames(self):
-        bar = self.bar()
-        seen = set()
-        for frame in range(12):
+    def _frames(self, bar, count=24):
+        out = []
+        for frame in range(count):
             bar._frame = frame
-            seen.add(bar._activity_text().plain)
-        assert len(seen) > 1, "the label never moves"
+            out.append(bar._render().plain)
+        return out
 
-    def test_the_word_itself_is_always_intact(self):
-        """Animating must not eat characters out of the word."""
+    def test_the_word_never_moves(self):
         bar = self.bar()
-        for frame in range(20):
-            bar._frame = frame
-            assert bar._activity_text().plain.startswith("thinking")
+        seen = {bar._activity_text().plain for bar._frame in range(24)}
+        assert seen == {"thinking"}
 
-    def test_the_label_is_a_fixed_width_so_the_bar_does_not_jitter(self):
+    def test_the_word_is_a_fixed_width(self):
         from rich.cells import cell_len
 
         bar = self.bar()
-        widths = set()
-        for frame in range(20):
-            bar._frame = frame
-            widths.add(cell_len(bar._activity_text().plain))
-        assert len(widths) == 1, f"width wobbles: {widths}"
+        widths = {cell_len(bar._activity_text().plain)
+                  for bar._frame in range(24)}
+        assert len(widths) == 1, widths
 
-    def test_only_thinking_gets_the_dots(self):
-        bar = self.bar(activity="writing")
-        bar._frame = 9
-        assert bar._activity_text().plain == "writing"
-
-    def test_animations_off_means_a_still_label(self):
-        bar = self.bar(animate=False)
-        frames = {bar._activity_text().plain for bar._frame in range(12)}
-        assert frames == {"thinking"}
-
-    def test_ascii_terminals_get_the_plain_word(self):
-        bar = self.bar(unicode_ok=False)
-        for frame in range(12):
-            bar._frame = frame
-            assert bar._activity_text().plain == "thinking"
+    def test_no_trailing_dots_are_appended(self):
+        for activity in ("thinking", "writing", "running"):
+            bar = self.bar(activity=activity)
+            assert bar._activity_text().plain == activity
 
     def test_an_empty_activity_is_survivable(self):
-        bar = self.bar(activity="")
-        assert bar._activity_text().plain == ""
+        assert self.bar(activity="")._activity_text().plain == ""
+
+    def test_the_spinner_is_the_one_animation_without_a_mascot(self):
+        """Something has to say the session is alive."""
+        assert len(set(self._frames(self.bar()))) > 1
+
+    def test_the_mascot_is_the_one_animation_with_a_mascot(self):
+        from wynxo.pet import Mood, Pet
+
+        pet = Pet()
+        pet.react(Mood.SEARCHING)
+        bar = self.bar(pet=pet)
+        assert len(set(self._frames(bar))) > 1
+
+    def test_no_second_animation_rides_along_on_any_theme(self):
+        """The kawaii theme used to add a cycling sparkle of its own, so on
+        that one theme the strip had two animations instead of one."""
+        from wynxo.theme import names, resolve
+
+        for name in names():
+            bar = self.bar()
+            bar.ui.palette = resolve(name)
+            # With the pet off and motion off, nothing at all may change.
+            bar.animate = False
+            assert len(set(self._frames(bar))) == 1, name
+
+    def test_reduced_motion_holds_everything_still(self):
+        from wynxo.pet import Mood, Pet
+
+        pet = Pet(animate=False)
+        pet.react(Mood.THINKING)
+        bar = self.bar(animate=False, pet=pet)
+        assert len(set(self._frames(bar))) == 1
+
+    def test_reduced_motion_still_says_what_is_happening(self):
+        """Nothing moving must not mean nothing shown."""
+        bar = self.bar(animate=False)
+        drawn = bar._render().plain
+        assert "thinking" in drawn
+        assert bar.STILL_MARK in drawn
+
+    def test_ascii_terminals_get_a_still_mark_they_can_draw(self):
+        bar = self.bar(unicode_ok=False, animate=False)
+        drawn = bar._render().plain
+        assert bar.STILL_MARK_ASCII in drawn
+        drawn.encode("ascii")
+
 
 
 class TestCodeStreamsLive:

@@ -38,72 +38,100 @@ class Mood(Enum):
     saying nothing is happening than a spinner that never stops."""
 
 
-# Frames per mood. The last frame of a cycle is usually a blink, which is what
-# makes a still face look alive without moving anything else.
+# One cat, in one size.
+#
+# Two rules hold the whole set together, and both were broken before.
+#
+# EVERY FRAME IS EXACTLY ``BOX`` CELLS. Frames used to be padded to the
+# widest frame *of the current mood*, which fixes jitter inside a mood and
+# not between them: idle was 7 cells and running 8, so every time the agent
+# picked up a tool the entire status line shifted sideways by one column.
+# The ASCII set was worse, moving between 5 and 7. The box is one width for
+# the whole session, so nothing after the mascot can ever move.
+#
+# EVERY GLYPH IS SAFE TO PUT IN A LINE OF TEXT -- unambiguous width, and
+# left-to-right. The old eyes were U+2022 BULLET,
+# whose East Asian Width is "Ambiguous" -- one cell in a Western locale and
+# two in a CJK one. So were the breve, the ≧≦ squint, the ╥ tears and the ×.
+# WORKING was built from combining accents, which terminals place however
+# they like. Those are all fine in prose and wrong in an animation, where a
+# glyph that measures 1 and draws 2 tears the line on the frame it appears.
+# Everything here is width "N" or "Na" and carries no combining marks.
+#
+# The muzzle is U+1D25 LATIN LETTER AIN, the one from ʕ•ᴥ•ʔ, and not the
+# Arabic presentation form that looks the same: that glyph's bidi class is
+# AL, so a terminal implementing the bidirectional algorithm is entitled to
+# reorder the neutrals either side of it -- the eyes -- and the face comes
+# apart. A mascot may not depend on the reading direction of the sentence it
+# lands in.
+#
+# The character is the same in every frame: the ears, the body and the mouth
+# never move. Only the eyes change, plus one optional cell to the right for
+# a paw, a question mark or a sleepy z. That is what makes a frame change
+# read as an expression rather than as a different animal.
+
+BOX = 8
+"""Cells every frame occupies: seven for the face, one for the accessory."""
+
 FACES: dict[Mood, list[str]] = {
-    # ^...^ with the outer brackets angled is read as ears, which is what
-    # makes these cats rather than faces with whiskers drawn on.
-    Mood.IDLE:     ["≽^•⩊•^≼", "≽^•⩊•^≼", "≽^•⩊•^≼", "≽^-⩊-^≼"],
-    Mood.THINKING: ["≽^˘⩊•^≼", "≽^•⩊˘^≼", "≽^˘⩊•^≼", "≽^•⩊•^≼"],
-    Mood.READING:  ["≽^◉⩊◉^≼", "≽^◉⩊◉^≼", "≽^◉⩊◉^≼", "≽^-⩊-^≼"],
-    Mood.SEARCHING: ["≽^◉⩊◉^≼", "≽^◉⩊◉^≼", "≽^•⩊•^≼"],
-    Mood.WORKING:  ["≽^•̀⩊•́^≼", "≽^•́⩊•̀^≼"],
-    Mood.TESTING:  ["≽^•⩊•^≼", "≽^•⩊•^≼", "≽^≧⩊≦^≼"],
-    Mood.RUNNING:  ["≽^•⩊•^≼ฅ", "≽^•⩊•^≼ﾉ", "≽^•⩊•^≼ฅ", "≽^•⩊•^≼ﾉ"],
-    Mood.ASKING:   ["≽^•⩊•^≼?", "≽^•⩊•^≼ ", "≽^•⩊•^≼?", "≽^•⩊•^≼ "],
-    Mood.HAPPY:    ["≽^≧⩊≦^≼", "≽^ᵕ⩊ᵕ^≼"],
-    Mood.SAD:      ["≽^╥⩊╥^≼", "≽^╥⩊╥^≼", "≽^×⩊×^≼"],
-    Mood.CELEBRATING: ["≽^≧⩊≦^≼", "≽^◕⩊◕^≼", "≽^≧⩊≦^≼", "≽^ᵕ⩊ᵕ^≼"],
-    Mood.SLEEPY:   ["≽^-⩊-^≼", "≽^-⩊-^≼", "≽^˘⩊˘^≼", "≽^-⩊-^≼"],
+    Mood.IDLE:        ["₍ᐢ∙ᴥ∙ᐢ₎ ", "₍ᐢ∙ᴥ∙ᐢ₎ ", "₍ᐢ∙ᴥ∙ᐢ₎ ", "₍ᐢ-ᴥ-ᐢ₎ "],
+    Mood.THINKING:    ["₍ᐢ∙ᴥ-ᐢ₎ ", "₍ᐢ-ᴥ∙ᐢ₎ ", "₍ᐢ∙ᴥ-ᐢ₎ ", "₍ᐢ∙ᴥ∙ᐢ₎ "],
+    Mood.READING:     ["₍ᐢ◉ᴥ◉ᐢ₎ ", "₍ᐢ◉ᴥ◉ᐢ₎ ", "₍ᐢ◉ᴥ◉ᐢ₎ ", "₍ᐢ-ᴥ-ᐢ₎ "],
+    # The eyes track left and right: a cat looking for something.
+    Mood.SEARCHING:   ["₍ᐢ◉ᴥ∙ᐢ₎ ", "₍ᐢ∙ᴥ◉ᐢ₎ ", "₍ᐢ◉ᴥ∙ᐢ₎ "],
+    Mood.WORKING:     ["₍ᐢ>ᴥ<ᐢ₎ ", "₍ᐢ>ᴥ<ᐢ₎ ", "₍ᐢ∙ᴥ∙ᐢ₎ "],
+    # Scrutiny: one eye narrowed, then the other. Reading is two wide eyes
+    # held still, and the two states have to be told apart at a glance.
+    Mood.TESTING:     ["₍ᐢ◉ᴥ-ᐢ₎ ", "₍ᐢ◉ᴥ-ᐢ₎ ", "₍ᐢ-ᴥ◉ᐢ₎ ", "₍ᐢ-ᴥ◉ᐢ₎ "],
+    Mood.RUNNING:     ["₍ᐢ∙ᴥ∙ᐢ₎ฅ", "₍ᐢ∙ᴥ∙ᐢ₎ﾉ", "₍ᐢ∙ᴥ∙ᐢ₎ฅ", "₍ᐢ∙ᴥ∙ᐢ₎ﾉ"],
+    Mood.ASKING:      ["₍ᐢ◉ᴥ∙ᐢ₎?", "₍ᐢ◉ᴥ∙ᐢ₎ ", "₍ᐢ◉ᴥ∙ᐢ₎?", "₍ᐢ◉ᴥ∙ᐢ₎ "],
+    Mood.HAPPY:       ["₍ᐢ‿ᴥ‿ᐢ₎ ", "₍ᐢ‿ᴥ‿ᐢ₎✧"],
+    Mood.SAD:         ["₍ᐢxᴥxᐢ₎ ", "₍ᐢxᴥxᐢ₎ ", "₍ᐢ-ᴥ-ᐢ₎ "],
+    Mood.CELEBRATING: ["₍ᐢ‿ᴥ‿ᐢ₎✧", "₍ᐢ◉ᴥ◉ᐢ₎ ", "₍ᐢ‿ᴥ‿ᐢ₎✦", "₍ᐢ◉ᴥ◉ᐢ₎ "],
+    Mood.SLEEPY:      ["₍ᐢ-ᴥ-ᐢ₎ ", "₍ᐢ-ᴥ-ᐢ₎z", "₍ᐢ-ᴥ-ᐢ₎z", "₍ᐢ-ᴥ-ᐢ₎ "],
 }
 
+# The same cat where the font cannot be trusted with anything but ASCII.
+# Same grammar, same box, same expressions -- ears, eyes, nose, accessory --
+# so it is recognisably the character rather than a different mascot for
+# people with a plainer terminal.
 FACES_ASCII: dict[Mood, list[str]] = {
-    # =^.^= is the oldest cat in the book and the only one every font has.
-    Mood.IDLE:     ["=^.^=", "=^.^=", "=^.^=", "=^-^="],
-    Mood.THINKING: ["=^o.^=", "=^.o^=", "=^o.^=", "=^.o^="],
-    Mood.READING:  ["=^O.O^=", "=^O.O^=", "=^O.O^=", "=^-.-^="],
-    Mood.SEARCHING: ["=^O.O^=", "=^O.O^=", "=^o.o^="],
-    Mood.WORKING:  ["=^>.<^=", "=^>.>^="],
-    Mood.TESTING:  ["=^.^=", "=^.^=", "=^_^="],
-    Mood.RUNNING:  ["=^.^=/", "=^.^=-", "=^.^=\\", "=^.^=-"],
-    Mood.ASKING:   ["=^.^=?", "=^.^= ", "=^.^=?", "=^.^= "],
-    Mood.HAPPY:    ["=^_^=", "=^v^="],
-    Mood.SAD:      ["=^x.x^=", "=^x.x^=", "=^@.@^="],
-    Mood.CELEBRATING: ["\\=^_^=/", "-=^o^=-", "/=^_^=\\", "-=^o^=-"],
-    Mood.SLEEPY:   ["=^-^= ", "=^-^=z", "=^-^=z", "=^-^= "],
+    Mood.IDLE:        ["=^o.o^= ", "=^o.o^= ", "=^o.o^= ", "=^-.-^= "],
+    Mood.THINKING:    ["=^o.-^= ", "=^-.o^= ", "=^o.-^= ", "=^o.o^= "],
+    Mood.READING:     ["=^O.O^= ", "=^O.O^= ", "=^O.O^= ", "=^-.-^= "],
+    Mood.SEARCHING:   ["=^O.o^= ", "=^o.O^= ", "=^O.o^= "],
+    Mood.WORKING:     ["=^>.<^= ", "=^>.<^= ", "=^o.o^= "],
+    Mood.TESTING:     ["=^O.-^= ", "=^O.-^= ", "=^-.O^= ", "=^-.O^= "],
+    Mood.RUNNING:     ["=^o.o^=/", "=^o.o^=-", "=^o.o^=\\", "=^o.o^=-"],
+    Mood.ASKING:      ["=^O.o^=?", "=^O.o^= ", "=^O.o^=?", "=^O.o^= "],
+    Mood.HAPPY:       ["=^u.u^= ", "=^u.u^=*"],
+    Mood.SAD:         ["=^x.x^= ", "=^x.x^= ", "=^-.-^= "],
+    Mood.CELEBRATING: ["=^u.u^=*", "=^O.O^= ", "=^u.u^=+", "=^O.O^= "],
+    Mood.SLEEPY:      ["=^-.-^= ", "=^-.-^=z", "=^-.-^=z", "=^-.-^= "],
 }
 
-# Rounder and fluffier, for the kawaii voice. Paws out.
-FACES_KAWAII: dict[Mood, list[str]] = {
-    Mood.IDLE:     ["₍ᐢ•ﻌ•ᐢ₎", "₍ᐢ•ﻌ•ᐢ₎", "₍ᐢ•ﻌ•ᐢ₎", "₍ᐢ-ﻌ-ᐢ₎"],
-    Mood.THINKING: ["₍ᐢ˘ﻌ•ᐢ₎", "₍ᐢ•ﻌ˘ᐢ₎", "₍ᐢ˘ﻌ•ᐢ₎", "₍ᐢ•ﻌ•ᐢ₎"],
-    Mood.READING:  ["₍ᐢ◉ﻌ◉ᐢ₎", "₍ᐢ◉ﻌ◉ᐢ₎", "₍ᐢ◉ﻌ◉ᐢ₎", "₍ᐢ-ﻌ-ᐢ₎"],
-    Mood.SEARCHING: ["₍ᐢ◉ﻌ◉ᐢ₎", "₍ᐢ◉ﻌ◉ᐢ₎", "₍ᐢ•ﻌ•ᐢ₎"],
-    Mood.WORKING:  ["₍ᐢ•̀ﻌ•́ᐢ₎", "₍ᐢ•́ﻌ•̀ᐢ₎"],
-    Mood.TESTING:  ["₍ᐢ•ﻌ•ᐢ₎", "₍ᐢ•ﻌ•ᐢ₎", "₍ᐢ≧ﻌ≦ᐢ₎"],
-    Mood.RUNNING:  ["ฅ₍ᐢ•ﻌ•ᐢ₎ฅ", "₍ᐢ•ﻌ•ᐢ₎ﾉ ", "ฅ₍ᐢ•ﻌ•ᐢ₎ฅ", "₍ᐢ•ﻌ•ᐢ₎ﾉ "],
-    Mood.ASKING:   ["₍ᐢ•ﻌ•ᐢ₎?", "₍ᐢ•ﻌ•ᐢ₎ ", "₍ᐢ•ﻌ•ᐢ₎?", "₍ᐢ•ﻌ•ᐢ₎ "],
-    Mood.HAPPY:    ["₍ᐢ≧ﻌ≦ᐢ₎", "₍ᐢᵕﻌᵕᐢ₎"],
-    Mood.SAD:      ["₍ᐢ╥ﻌ╥ᐢ₎", "₍ᐢ╥ﻌ╥ᐢ₎", "₍ᐢ×ﻌ×ᐢ₎"],
-    # The paws come up and the sparkle alternates sides, so the celebration
-    # reads as movement rather than as one loud frame held for a second.
-    Mood.CELEBRATING: ["₍ᐢ≧ﻌ≦ᐢ₎✧", "₍ᐢ◕ﻌ◕ᐢ₎ ", "₍ᐢ≧ﻌ≦ᐢ₎✧", "₍ᐢᵕﻌᵕᐢ₎ "],
-    Mood.SLEEPY:   ["₍ᐢ-ﻌ-ᐢ₎ ", "₍ᐢ-ﻌ-ᐢ₎z", "₍ᐢ˘ﻌ˘ᐢ₎z", "₍ᐢ-ﻌ-ᐢ₎ "],
-}
-
-MOOD_STYLES: dict[Mood, str] = {
-    Mood.IDLE: "grey62",
-    Mood.THINKING: "bright_cyan",
-    Mood.READING: "bright_blue",
-    Mood.SEARCHING: "bright_blue",
-    Mood.WORKING: "bright_cyan",
-    Mood.TESTING: "yellow",
-    Mood.RUNNING: "bright_magenta",
-    Mood.ASKING: "yellow",
-    Mood.HAPPY: "green",
-    Mood.SAD: "red",
-    Mood.CELEBRATING: "bright_green",
-    Mood.SLEEPY: "grey42",
+# The mascot's colour, by the job the colour does rather than by name. Four
+# roles, because four is what a glance can tell apart: resting, busy, went
+# well, went wrong. The face already says *which* kind of busy -- the eyes
+# differ per mood and the strip spells the activity out beside it -- so a
+# fifth and sixth hue would be the same fact a third time.
+#
+# Roles, not literals, is the point. These used to be grey62, bright_cyan,
+# bright_magenta and so on, which made the mascot the one thing on screen
+# that /theme could not reach: catboy's violet never touched the cat.
+MOOD_ROLES: dict[Mood, str] = {
+    Mood.IDLE: "muted",
+    Mood.SLEEPY: "faint",
+    Mood.THINKING: "bar_accent",
+    Mood.READING: "bar_accent",
+    Mood.SEARCHING: "bar_accent",
+    Mood.WORKING: "bar_accent",
+    Mood.TESTING: "bar_accent",
+    Mood.RUNNING: "bar_accent",
+    Mood.ASKING: "warn",
+    Mood.HAPPY: "good",
+    Mood.CELEBRATING: "good",
+    Mood.SAD: "bad",
 }
 
 # Which activity name maps to which mood. Anything unrecognised stays THINKING,
@@ -196,11 +224,15 @@ class Pet:
     # -- appearance --------------------------------------------------------
 
     def faces(self) -> dict[Mood, list[str]]:
-        if not self.unicode:
-            return FACES_ASCII
-        if self.style_name in ("kawaii", "mommy"):
-            return FACES_KAWAII
-        return FACES
+        """The frame set for this terminal.
+
+        One cat, in two tiers: the drawn one, and the ASCII one for a font
+        that cannot be trusted with the rest. There used to be a third --
+        the kawaii voice got a different animal from the default voice --
+        so what the mascot *was* depended on a personality setting. Voice
+        changes what it says; it does not change the species.
+        """
+        return FACES if self.unicode else FACES_ASCII
 
     def face(self, advance: bool = True) -> str:
         """The current frame. ``advance`` steps the animation.
@@ -228,11 +260,22 @@ class Pet:
         self.pace = max(1, 4 - (rank * 3) // max(1, len(ORDER) - 1))
 
     def style(self) -> str:
-        return MOOD_STYLES[self.mood]
+        """The mascot's colour right now, from the theme in force."""
+        from . import theme
+
+        return theme.active().role(MOOD_ROLES[self.mood])
 
     def width(self) -> int:
-        """Widest frame for this mood, in cells, so the bar does not jitter."""
-        return max(face_width(f) for f in self.faces()[self.mood])
+        """Cells the mascot occupies. One number, for the whole session.
+
+        It used to be the widest frame *of the current mood*, which stops
+        the jitter inside a mood and not between them -- idle was seven
+        cells and running eight, so the whole status line stepped sideways
+        every time the agent picked up a tool. The frames are all one width
+        by construction now; this stays as the guarantee, so a frame added
+        later cannot quietly reintroduce the shift.
+        """
+        return BOX
 
     def padded(self, advance: bool = True) -> str:
         face = self.face(advance)

@@ -245,10 +245,13 @@ class TestVoice:
         assert pet.remark("bye") == ""
         assert pet.remark("proud") == ""
 
-    def test_mommy_pet_uses_the_round_face_set(self):
+    def test_the_voice_does_not_change_the_face(self):
+        """There is one cat. Voices change the words, not the animal."""
         pet = Pet()
-        pet.style_name = "mommy"
-        assert pet.faces()[Mood.IDLE][0] == "₍ᐢ•ﻌ•ᐢ₎"
+        base = pet.faces()
+        for voice in ("mommy", "kawaii", "plain", "mentor", "blunt"):
+            pet.style_name = voice
+            assert pet.faces() is base, voice
 
 
 class TestConfig:
