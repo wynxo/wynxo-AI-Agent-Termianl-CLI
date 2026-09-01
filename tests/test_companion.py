@@ -213,24 +213,40 @@ class TestThereIsOnlyOneCharacter:
         assert motion.scene_for("idle").frames == \
             companion.frames_for(State.IDLE)
 
-    def test_the_overlay_uses_the_companion(self):
+    def test_the_running_session_draws_the_companion_exactly_once(self):
+        """Three renderings of the same character were on screen at once:
+        the greeting line, the status strip, and a panel in the corner. Two
+        faces for one companion reads as two companions.
+
+        The live rendering is the activity bar's face, and nothing else in
+        a running session draws one."""
         import inspect
 
-        from wynxo.cli import Repl
+        from wynxo import cli
 
-        source = inspect.getsource(Repl._chat_overlay)
-        assert "companion.panel" in source
-        assert "companion.state_for" in source
+        source = inspect.getsource(cli)
+        assert "companion.panel" not in source, (
+            "a second live rendering of the companion is back")
+        assert "companion.state_for" not in source
+
+    def test_the_bar_is_where_the_face_lives(self):
+        import inspect
+
+        from wynxo.ui import ActivityBar
+
+        source = inspect.getsource(ActivityBar._render)
+        assert "self.pet.padded()" in source
 
     def test_nothing_advances_the_frame_but_a_repaint(self):
         """A scheduler would keep animating through a stall, showing typing
-        while nothing is being written."""
+        while nothing is being written. The frame is stepped by the draw
+        itself -- ``face(advance=True)`` -- so it moves exactly while the
+        bar repaints and stops the instant it stops."""
         import inspect
 
-        from wynxo.cli import Repl
+        from wynxo.ui import ActivityBar
 
-        source = inspect.getsource(Repl._chat_overlay)
-        assert "self._pet_frame += 1" in source
+        source = inspect.getsource(ActivityBar._render)
         for clock in ("time.monotonic", "time.time", "asyncio.sleep",
                       "time.sleep", "perf_counter", "Thread", "Timer"):
             assert clock not in source, f"{clock} drives the companion"

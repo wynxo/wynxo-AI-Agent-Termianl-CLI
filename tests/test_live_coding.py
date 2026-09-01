@@ -195,10 +195,9 @@ class TestTheCompanionFollowsTheAgent:
         a stall, showing typing while nothing is being written."""
         import inspect
 
-        from wynxo.cli import Repl
+        from wynxo.ui import ActivityBar
 
-        source = inspect.getsource(Repl._chat_overlay)
-        assert "self._pet_frame += 1" in source
+        source = inspect.getsource(ActivityBar._render)
         # Actual clock calls, not the word in the prose explaining why there
         # are none.
         for clock in ("time.monotonic", "time.time", "asyncio.sleep",
@@ -206,21 +205,36 @@ class TestTheCompanionFollowsTheAgent:
             assert clock not in source, f"{clock} drives the frame"
 
 
-class TestTheOverlayStaysAnOverlay:
-    def test_the_companion_cannot_move_the_composer(self):
-        """It renders into the same Float the plan uses, which reports no
-        height into the vertical split."""
+class TestTheLiveRegionStaysTransient:
+    """Everything provisional -- the edit card, the plan, the half-written
+    line, the strip itself -- is drawn by one transient ``Live``. Transient
+    is what makes it a layer rather than a record: it erases its own render
+    area on stop, so nothing it drew can end up in the scrollback."""
+
+    def test_the_bar_owns_a_transient_live(self):
         import inspect
 
-        from wynxo.cli import Repl
+        from wynxo.ui import ActivityBar
 
-        source = inspect.getsource(Repl._chat_overlay)
-        assert "plan_lines" in source, "one overlay, not two"
+        source = inspect.getsource(ActivityBar.start)
+        assert "transient=True" in source, (
+            "the status strip would be committed to the scrollback on every "
+            "repaint")
 
     def test_it_is_silent_when_the_pet_is_off(self):
         import inspect
 
-        from wynxo.cli import Repl
+        from wynxo.ui import ActivityBar
 
-        source = inspect.getsource(Repl._chat_overlay)
+        source = inspect.getsource(ActivityBar._render)
         assert "self.pet.enabled" in source
+
+    def test_there_is_exactly_one_live_region(self):
+        """Two rich Live displays on one console fight for the same rows."""
+        import inspect
+
+        from wynxo import cli
+
+        source = inspect.getsource(cli)
+        assert "Live(" not in source, (
+            "cli started a second live region; the bar owns the only one")

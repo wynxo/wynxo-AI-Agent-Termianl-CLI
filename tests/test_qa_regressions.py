@@ -15,50 +15,65 @@ from rich.cells import cell_len
 
 from wynxo import livediff
 from wynxo.cli import TerminalCallbacks
-from wynxo.layout import Transcript
-from wynxo.ui import UI, Glyphs
+from wynxo.ui import UI, Glyphs, SafeConsole
 
 
-def _attached(width: int = 80):
+def _captured(width: int = 80):
+    """A UI whose console writes into a buffer.
+
+    There is one renderer now and it writes at the terminal, so "what the
+    user would see" is read back from the stream rather than from a
+    transcript object that no longer exists.
+    """
+    import io
+
     ui = UI()
-    transcript = Transcript(width)
-    ui.attach(transcript)
-    return ui, transcript
+    ui.live_ok = False
+    ui.console = SafeConsole(file=io.StringIO(), force_terminal=True,
+                             color_system="truecolor", highlight=False,
+                             soft_wrap=False, width=width, height=10_000)
+    ui.width = width
+    return ui
+
+
+def _written(ui) -> list[str]:
+    return ui.console.file.getvalue().splitlines()
 
 
 def _callbacks():
-    ui, transcript = _attached()
+    ui = _captured()
     callbacks = TerminalCallbacks(ui, prompt_session=None)
     callbacks.workspace = pathlib.Path(tempfile.mkdtemp())
-    return callbacks, transcript
+    return callbacks, ui
 
 
-class TestCarriageReturnsAreLineEndings:
-    """CRLF arrived from Windows subprocess output, a CRLF file being
-    written, and a model echoing one. Splitting on \\n alone left the \\r on
-    the end of every row, where it survives into the rendered fragments as a
-    literal character -- and a terminal reads CR as "return to column 0", so
-    the row is overdrawn by whatever comes next."""
+class TestCarriageReturnsNeverReachTheTerminal:
+    """CRLF arrives from Windows subprocess output, a CRLF file being
+    written, and a model echoing one. A terminal reads CR as "return to
+    column 0", so a row carrying one is overdrawn by whatever comes next.
 
-    def test_a_trailing_cr_never_reaches_a_row(self):
-        _, transcript = _attached()
-        transcript.console.file.write("first\r\nsecond\r\n")
-        assert transcript.lines == ["first", "second"]
+    The guarantee is structural rather than per-call-site: SafeConsole
+    scrubs C0 controls out of every segment that did not come from rich
+    itself, so a display helper written tomorrow is covered without
+    knowing this exists.
+    """
 
-    def test_a_mid_line_cr_is_left_alone(self):
-        """A lone CR inside a line is a progress bar redrawing itself, which
-        is content. Only the one at the end is a line ending."""
-        _, transcript = _attached()
-        transcript.console.file.write("50%\r100%\n")
-        assert transcript.lines == ["50%\r100%"]
+    def test_a_cr_in_tool_output_is_dropped(self):
+        ui = _captured()
+        ui.tool_output("first\rsecond")
+        assert "\r" not in ui.console.file.getvalue()
 
-    def test_the_rendered_fragments_carry_no_stray_cr(self):
-        from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+    def test_a_cr_in_an_error_is_dropped(self):
+        ui = _captured()
+        ui.error("boom\roverdrawn")
+        assert "\r" not in ui.console.file.getvalue()
 
-        _, transcript = _attached()
-        transcript.console.file.write("alpha\r\nbeta\r\n")
-        rendered = to_formatted_text(ANSI("\n".join(transcript.lines)))
-        assert not any(text == "\r" for _style, text in rendered)
+    def test_the_text_itself_survives(self):
+        ui = _captured()
+        ui.tool_output("first\rsecond")
+        written = ui.console.file.getvalue()
+        assert "first" in written and "second" in written
+
 
 
 class TestACancelledEditDoesNotStayLive:
@@ -77,10 +92,10 @@ class TestACancelledEditDoesNotStayLive:
     def test_closing_says_what_happened(self):
         import re
 
-        callbacks, transcript = _callbacks()
+        callbacks, ui = _callbacks()
         asyncio.run(callbacks.on_code("half an edit\n"))
         callbacks.close_card()
-        plain = [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in transcript.lines]
+        plain = [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in _written(ui)]
         assert any("interrupted" in line for line in plain)
 
     def test_a_finished_card_is_not_reopened_or_relabelled(self):
@@ -200,118 +215,6 @@ class TestWideCharactersDoNotBreakTheBorder:
         assert livediff.fit("", 10) == ""
 
 
-class TestTheScreenIsNeverBlank:
-    """Squeezing the terminal blanked it outright.
-
-    ``HSplit._divide_heights`` returns None when the sum of its children's
-    *minimums* exceeds the available height, and prompt_toolkit renders that
-    as an empty screen -- not a clipped layout, nothing at all. Two separate
-    ways in: a composer that asked for its content height regardless of the
-    room left over, and fixed furniture (header + rule + footer + one
-    composer row = four) that alone outgrew a three-row terminal.
-    """
-
-    SIZES = [(160, 50), (120, 40), (80, 24), (60, 20), (40, 15),
-             (30, 10), (20, 6), (20, 4), (20, 3), (20, 2), (20, 1)]
-
-    def _layout(self, width, height, text="", overlay=()):
-        from wynxo.layout import ChatLayout
-
-        layout = ChatLayout(width=width, height=height,
-                            overlay=lambda: list(overlay))
-        layout.buffer.text = text
-        return layout
-
-    def _divided(self, layout, width, height):
-        body = layout.app.layout.container.content
-        return body._divide_heights(
-            type("Size", (), {"width": width, "height": height})())
-
-    def test_every_size_allocates(self):
-        for width, height in self.SIZES:
-            layout = self._layout(width, height)
-            assert self._divided(layout, width, height) is not None, \
-                f"blank screen at {width}x{height}"
-
-    def test_a_paste_taller_than_the_screen_still_allocates(self):
-        """Five lines of pasted text on a six-row terminal asked for five
-        composer rows on top of three fixed ones."""
-        paste = "\n".join(f"line {i}" for i in range(40))
-        for width, height in self.SIZES:
-            layout = self._layout(width, height, text=paste)
-            assert self._divided(layout, width, height) is not None, \
-                f"blank screen at {width}x{height} with a paste"
-
-    def test_the_regions_add_up_to_the_screen(self):
-        for width, height in self.SIZES:
-            layout = self._layout(width, height)
-            total = (layout.header_rows() + layout.transcript_rows()
-                     + layout.rule_rows() + layout.composer_rows()
-                     + layout.footer_rows())
-            assert total == height, f"{total} rows on a {height}-row screen"
-
-    def test_the_composer_survives_every_size(self):
-        """Whatever else is shed, there is somewhere to type."""
-        for width, height in self.SIZES:
-            assert self._layout(width, height).composer_rows() >= 1
-
-    def test_furniture_is_shed_in_order(self):
-        """Rule first -- it only separates two things that stay adjacent --
-        then the header, then the footer. Never the composer."""
-        assert self._layout(80, 24).rule_rows() == 1
-        assert self._layout(20, 4).rule_rows() == 0
-        assert self._layout(20, 4).header_rows() == 1
-        assert self._layout(20, 3).header_rows() == 0
-        assert self._layout(20, 3).footer_rows() == 1
-        assert self._layout(20, 2).footer_rows() == 0
-
-    def test_the_conversation_is_the_last_thing_squeezed(self):
-        """Shedding furniture is only worth doing if it buys a row of
-        conversation. Two rows is a transcript and a composer."""
-        for width, height in self.SIZES:
-            layout = self._layout(width, height)
-            if height >= 2:
-                assert layout.transcript_rows() >= 1, f"{width}x{height}"
-
-
-class TestTheOverlayFitsTheTerminal:
-    """TODO_WIDTH is a preference; as a *floor* it won a narrow terminal
-    outright and put a 36-column float on a screen that had 20."""
-
-    WIDTHS = [160, 120, 80, 60, 40, 30, 24, 20]
-
-    def _layout(self, width, height, rows):
-        from wynxo.layout import ChatLayout
-
-        return ChatLayout(width=width, height=height, overlay=lambda: rows)
-
-    def test_the_float_never_exceeds_the_screen(self):
-        rows = ["a plan line that is considerably wider than any terminal "
-                "here" * 2] * 20
-        for width in self.WIDTHS:
-            layout = self._layout(width, 24, rows)
-            assert layout._overlay_width() <= width, \
-                f"{layout._overlay_width()} columns on a {width}-column screen"
-
-    def test_an_empty_overlay_still_fits(self):
-        for width in self.WIDTHS:
-            assert self._layout(width, 24, [])._overlay_width() <= width
-
-    def test_a_wide_terminal_keeps_the_plan_panel_width(self):
-        """The narrow case must not cost the normal one: corner.py's panel
-        needs its 36 columns or its right border is clipped."""
-        from wynxo.layout import ChatLayout
-
-        assert self._layout(120, 40, ["short"])._overlay_width() \
-            == ChatLayout.TODO_WIDTH
-
-    def test_the_float_never_exceeds_the_height_either(self):
-        for height in (50, 40, 24, 15, 10, 6, 4, 3, 2):
-            layout = self._layout(80, height, ["row"] * 40)
-            assert layout._overlay_height() <= height, \
-                f"{layout._overlay_height()} rows on a {height}-row screen"
-
-
 class TestBackgroundJobsDieWithTheSession:
     """A background command is started in its own session so that the whole
     of it can be killed rather than just the shell that launched it -- and
@@ -408,64 +311,40 @@ class TestBackgroundJobsDieWithTheSession:
 
 
 class TestThePermissionPromptIsVisible:
-    """The agent stopped and waited on an invisible question.
+    """The agent must never stop and wait on an invisible question.
 
-    ``_ask`` handed its "[y] yes [a] always [n] no [q] stop:" line to
-    ``prompt_session.prompt_async`` as the message argument. Under the
-    full-screen layout that method is ChatLayout's -- it takes the same
-    arguments PromptSession does, because the REPL calls both, but the
-    composer draws a fixed caret and has nowhere to put a message, so the
-    text was accepted and dropped. On screen: an ordinary empty composer,
-    no question, and an agent that would not continue. The layout has
-    ``ask()`` for exactly this, and every other question in the REPL already
-    went through it.
+    ``_ask`` hands its "[y] yes [a] always [n] no [q] stop:" line to
+    ``prompt_session.prompt_async`` as the message argument, and that is
+    the one surface a question can be drawn on. It also has to suspend the
+    live region first: a rich ``Live`` repainting the bottom rows while
+    prompt_toolkit reads a line is two writers on the same cells.
     """
 
-    class _Chat:
-        def __init__(self, answer):
-            self.answer = answer
+    class _Session:
+        def __init__(self, answers):
+            self.answers = iter(answers)
             self.asked = []
 
-        async def ask(self, question, default=""):
-            self.asked.append(question)
-            return self.answer
+        async def prompt_async(self, message=None, **kwargs):
+            self.asked.append(str(message))
+            return next(self.answers)
 
-        def invalidate(self):
-            pass
-
-    class _Session:
-        def __init__(self):
-            self.used = False
-
-        async def prompt_async(self, *args, **kwargs):
-            self.used = True
-            return "y"
-
-    def _callbacks(self, answer):
-        ui, _ = _attached()
-        session = self._Session()
-        callbacks = TerminalCallbacks(ui, prompt_session=session)
-        callbacks.chat = self._Chat(answer)
-        return callbacks, session
+    def _callbacks(self, *answers):
+        ui = _captured()
+        session = self._Session(answers)
+        return TerminalCallbacks(ui, prompt_session=session), session
 
     def _decide(self, callbacks):
         return asyncio.run(
             callbacks.ask_permission("shell", "rm -rf build", ""))
 
     def test_the_question_reaches_the_screen(self):
-        callbacks, _ = self._callbacks("n")
-        self._decide(callbacks)
-        assert callbacks.chat.asked, "the question was never asked anywhere"
-        question = callbacks.chat.asked[0]
-        for key in ("[y]", "[a]", "[n]", "[q]"):
-            assert key in question, f"{key} missing from {question!r}"
-
-    def test_the_layout_is_asked_rather_than_the_prompt_session(self):
         callbacks, session = self._callbacks("n")
         self._decide(callbacks)
-        assert not session.used, (
-            "prompt_async cannot render a message under the layout; the "
-            "question would be silently dropped")
+        assert session.asked, "the question was never asked anywhere"
+        question = session.asked[0]
+        for key in ("[y]", "[a]", "[n]", "[q]"):
+            assert key in question, f"{key} missing from {question!r}"
 
     def test_every_answer_still_means_what_it_did(self):
         from wynxo.permissions import Decision
@@ -481,34 +360,39 @@ class TestThePermissionPromptIsVisible:
             assert self._decide(callbacks) is decision, answer
 
     def test_an_unusable_answer_asks_again_rather_than_deciding(self):
-        callbacks, _ = self._callbacks("maybe")
-
-        answers = iter(["maybe", "what", "n"])
-
-        async def ask(question, default=""):
-            callbacks.chat.asked.append(question)
-            return next(answers)
-
-        callbacks.chat.ask = ask
         from wynxo.permissions import Decision
 
+        callbacks, session = self._callbacks("maybe", "what", "n")
         assert self._decide(callbacks) is Decision.DENY
-        assert len(callbacks.chat.asked) == 3
+        assert len(session.asked) == 3
 
-    def test_the_classic_prompt_still_gets_its_message(self):
-        """The fallback path is the one place the message *is* rendered."""
-        ui, _ = _attached()
-        seen = []
+    def test_a_closed_stdin_aborts_rather_than_allowing(self):
+        """EOF is not consent."""
+        from wynxo.permissions import Decision
 
-        class Session:
+        class Closed:
             async def prompt_async(self, message=None, **kwargs):
-                seen.append(message)
-                return "n"
+                raise EOFError
 
-        callbacks = TerminalCallbacks(ui, prompt_session=Session())
-        callbacks.chat = None
-        asyncio.run(callbacks.ask_permission("shell", "ls", ""))
-        assert seen and seen[0] is not None
+        callbacks = TerminalCallbacks(_captured(), prompt_session=Closed())
+        assert self._decide(callbacks) is Decision.ABORT
+
+    def test_the_live_region_is_released_and_restored(self):
+        """Two writers on the bottom rows is a corrupted prompt."""
+        callbacks, _ = self._callbacks("n")
+        events = []
+
+        class Bar:
+            def start(self):
+                events.append("start")
+
+            def stop(self):
+                events.append("stop")
+
+        callbacks.bar = Bar()
+        self._decide(callbacks)
+        assert events == ["stop", "start"], events
+
 
 
 class TestPipeTransportsAreActuallyRetired:
@@ -655,10 +539,13 @@ class TestTerminalControlCannotBeSmuggledIn:
             for name, sequence in self.DANGEROUS.items():
                 assert sequence not in drawn, f"{label} let {name} through"
 
-    def test_the_transcript_console_is_covered_too(self):
-        _, transcript = _attached()
-        transcript.console.print("tool said: " + self.PAYLOAD)
-        self._assert_clean("\n".join(transcript.lines))
+    def test_the_ui_console_is_covered_too(self):
+        """The UI's own console is a SafeConsole, so everything the session
+        draws goes through the same scrub -- there is no second console for
+        a payload to arrive on."""
+        ui = _captured()
+        ui.console.print("tool said: " + self.PAYLOAD)
+        self._assert_clean(ui.console.file.getvalue())
 
     def _console(self):
         import io
@@ -754,7 +641,4 @@ class TestTheWindowsBranchesOfTodaysCode:
                              side_effect=AssertionError("os.kill was called")):
             assert shell_module._gone(Running()) is False
 
-    def test_the_layout_sheds_furniture_on_every_platform(self):
-        from wynxo.layout import ChatLayout
 
-        assert ChatLayout(width=20, height=3).composer_rows() >= 1

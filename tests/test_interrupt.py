@@ -1,14 +1,15 @@
 """Ctrl-C.
 
-The full-screen layout holds the terminal in prompt_toolkit's raw mode,
-which clears ISIG: the driver never raises SIGINT there, so the handler the
-session installs before every turn cannot fire, and the key has to be bound
-like any other. It was not -- outside a picker or an open question nothing
-claimed it at all, and Ctrl-C did nothing for a whole session while the
-status bar said "^C stop".
+There is one interactive surface now -- the scrolling prompt -- and Ctrl-C
+has to mean the right thing at every point in it.
 
-The scrolling prompt has its own gap: prompt_toolkit's teardown puts SIGINT
-back to Python's default after each prompt, so a Ctrl-C during a slow
+At the prompt prompt_toolkit raises KeyboardInterrupt: one press forgets the
+line, two in a row leave. During a turn the key watcher holds the terminal
+in cbreak mode (ISIG intact), so the press arrives twice over -- as SIGINT
+and as a bound key -- and both land on the same idempotent ``interrupt()``.
+
+The scrolling prompt's own historical gap: prompt_toolkit's teardown puts
+SIGINT back to Python's default after each prompt, so a Ctrl-C during a slow
 command raised KeyboardInterrupt out of the loop and ended the session.
 """
 
@@ -17,141 +18,10 @@ from __future__ import annotations
 import asyncio
 import types
 
-
-from prompt_toolkit.keys import Keys
-
 from wynxo import cli
 from wynxo.cli import LIVE_KEYS, Repl
 from wynxo.journal import Journal
-from wynxo.layout import ChatLayout
 from wynxo.ui import UI
-
-
-def bindings_for_ctrl_c(layout: ChatLayout):
-    """Every c-c binding whose filter passes in the layout's current state."""
-    return [b for b in layout.app.key_bindings.get_bindings_for_keys(
-        (Keys.ControlC,)) if b.filter()]
-
-
-class TestTheLayoutBindsIt:
-    def test_ctrl_c_is_live_with_no_modal_open(self):
-        """The regression: two bindings existed, both filtered off unless a
-        picker or a question was open."""
-        layout = ChatLayout(width=80, height=24, on_interrupt=lambda: None)
-        assert bindings_for_ctrl_c(layout), (
-            "Ctrl-C is unbound in the layout's normal state")
-
-    def test_it_calls_the_owner(self):
-        pressed = []
-        layout = ChatLayout(width=80, height=24,
-                            on_interrupt=lambda: pressed.append(1))
-        for binding in bindings_for_ctrl_c(layout):
-            binding.handler(None)
-        assert pressed == [1]
-
-    def test_an_open_question_still_owns_it(self):
-        """cancel_ask is what lets Ctrl-C out of a blocking permission
-        prompt. prompt_toolkit runs the last binding whose filter passes, so
-        a broader filter would have quietly taken the key from it."""
-        pressed = []
-        layout = ChatLayout(width=80, height=24,
-                            on_interrupt=lambda: pressed.append(1))
-        layout._ask = {"question": "?", "future": None}
-        live = bindings_for_ctrl_c(layout)
-        assert len(live) == 1, "more than one binding wants Ctrl-C while asking"
-        assert pressed == []
-
-    def test_an_open_picker_still_owns_it(self):
-        pressed = []
-        layout = ChatLayout(width=80, height=24,
-                            on_interrupt=lambda: pressed.append(1))
-        layout._picker = {"title": "", "choices": [], "index": 0, "future": None}
-        assert len(bindings_for_ctrl_c(layout)) == 1
-        assert pressed == []
-
-    def test_a_layout_without_an_owner_does_not_crash(self):
-        layout = ChatLayout(width=80, height=24)
-        for binding in bindings_for_ctrl_c(layout):
-            binding.handler(None)
-
-
-class FakeChat:
-    """Just the surface _on_interrupt_key touches."""
-
-    def __init__(self, text: str = ""):
-        self.buffer = types.SimpleNamespace(
-            text=text, reset=lambda: setattr(self.buffer, "text", ""))
-        self.submitted: list[str] = []
-        self.repaints = 0
-
-    def submit(self, text: str) -> None:
-        self.submitted.append(text)
-
-    def invalidate(self) -> None:
-        self.repaints += 1
-
-
-def repl_with(chat: FakeChat | None, task=None) -> Repl:
-    repl = Repl.__new__(Repl)
-    repl.chat = chat
-    repl._task = task
-    repl._interrupt_armed = 0.0
-    repl._prompt_note = None
-    repl.speaker = types.SimpleNamespace(stop=lambda: None)
-    return repl
-
-
-class TestWhatCtrlCDoes:
-    """In the order a terminal program is expected to do them."""
-
-    def test_a_running_turn_is_stopped_first(self):
-        async def go():
-            task = asyncio.ensure_future(asyncio.sleep(30))
-            repl = repl_with(FakeChat("half a sentence"), task)
-            repl._on_interrupt_key()
-            assert task.cancelled() or task.cancelling()
-            assert repl.chat.buffer.text == "half a sentence", (
-                "the draft was thrown away along with the turn")
-            assert repl.chat.submitted == []
-            task.cancel()
-
-        asyncio.run(go())
-
-    def test_a_typed_line_is_cleared_when_nothing_is_running(self):
-        repl = repl_with(FakeChat("a message I changed my mind about"))
-        repl._on_interrupt_key()
-        assert repl.chat.buffer.text == ""
-        assert repl.chat.submitted == []
-
-    def test_one_press_on_an_empty_composer_only_warns(self):
-        """A session is too expensive to lose to a stray keystroke."""
-        repl = repl_with(FakeChat())
-        repl._on_interrupt_key()
-        assert repl.chat.submitted == []
-        assert "again" in repl._prompt_note[0]
-
-    def test_a_second_press_quits(self):
-        repl = repl_with(FakeChat())
-        repl._on_interrupt_key()
-        repl._on_interrupt_key()
-        assert repl.chat.submitted == ["/quit"], (
-            "quitting must run the same shutdown /quit does")
-
-    def test_the_second_press_has_to_be_soon(self):
-        repl = repl_with(FakeChat())
-        repl._on_interrupt_key()
-        repl._interrupt_armed = 0.0          # the window elapsed
-        repl._on_interrupt_key()
-        assert repl.chat.submitted == []
-
-    def test_clearing_a_draft_disarms_the_quit(self):
-        """Ctrl-C to clear, then Ctrl-C again, must not end the session."""
-        repl = repl_with(FakeChat())
-        repl._on_interrupt_key()             # arms
-        repl.chat.buffer.text = "typed something"
-        repl._on_interrupt_key()             # clears the draft
-        repl._on_interrupt_key()             # first press again
-        assert repl.chat.submitted == []
 
 
 class TestTheScrollingPrompt:
@@ -194,7 +64,6 @@ class TestTheScrollingPrompt:
             return answer
 
         repl = Repl.__new__(Repl)
-        repl.chat = None
         repl.prompt_session = types.SimpleNamespace(prompt_async=prompt_async)
         repl._dictation_draft = ""
         repl._prompt_message = ">"
@@ -241,24 +110,8 @@ class TestEveryAdvertisedKeyIsBound:
 
 
 class TestTheNoteIsVisible:
-    def test_the_chat_footer_shows_a_transient_note(self):
-        """The layout had nowhere to put one, so "press Ctrl-C again to
-        quit" was written to a footer that never displayed it."""
-        import time
-
-        repl = types.SimpleNamespace(
-            _prompt_note=("press Ctrl-C again to quit", time.monotonic() + 5),
-            _status_line=lambda: "model  ctx 3%")
-        assert "press Ctrl-C again to quit" in Repl._chat_footer(repl)
-
-    def test_an_expired_note_leaves_the_footer_alone(self):
-        import time
-
-        repl = types.SimpleNamespace(
-            _prompt_note=("stale", time.monotonic() - 1),
-            _status_line=lambda: "model  ctx 3%")
-        assert Repl._chat_footer(repl) == " model  ctx 3%"
-        assert repl._prompt_note is None, "the note was never expired"
+    """"press Ctrl-C again to quit" and the Ctrl-E effort change are both
+    transient notes. They have one home -- the prompt's bottom border."""
 
     def test_a_fresh_note_is_shown_and_an_expired_one_is_dropped(self):
         import time
@@ -267,3 +120,52 @@ class TestTheNoteIsVisible:
         assert cli.live_note(fresh) == ("effort: high", fresh)
         assert cli.live_note(("stale", time.monotonic() - 1)) == ("", None)
         assert cli.live_note(None) == ("", None)
+
+    def test_the_bottom_border_carries_it(self):
+        import time
+
+        repl = types.SimpleNamespace(
+            _prompt_note=("press Ctrl-C again to quit", time.monotonic() + 5),
+            _status_line=lambda: "model  ctx 3%",
+            ui=UI())
+        rendered = str(Repl._bottom_toolbar(repl))
+        assert "press Ctrl-C again to quit" in rendered
+
+    def test_an_expired_note_leaves_the_border_alone(self):
+        import time
+
+        repl = types.SimpleNamespace(
+            _prompt_note=("stale", time.monotonic() - 1),
+            _status_line=lambda: "model  ctx 3%",
+            ui=UI())
+        rendered = str(Repl._bottom_toolbar(repl))
+        assert "stale" not in rendered
+        assert repl._prompt_note is None, "the note was never expired"
+
+
+class TestInterruptIsIdempotent:
+    """During a turn the press arrives as SIGINT *and* as a bound key from
+    the watcher: cbreak leaves ISIG on. Cancelling twice must be harmless."""
+
+    def test_two_interrupts_cancel_once(self):
+        async def go():
+            task = asyncio.ensure_future(asyncio.sleep(30))
+            repl = Repl.__new__(Repl)
+            repl._task = task
+            repl.speaker = types.SimpleNamespace(stop=lambda: None)
+            repl.interrupt()
+            repl.interrupt()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            assert task.cancelled()
+
+        import contextlib
+        asyncio.run(go())
+
+    def test_an_idle_interrupt_does_nothing(self):
+        repl = Repl.__new__(Repl)
+        repl._task = None
+        stopped = []
+        repl.speaker = types.SimpleNamespace(stop=lambda: stopped.append(1))
+        repl.interrupt()
+        assert stopped == [1], "the voice must stop even with no turn running"

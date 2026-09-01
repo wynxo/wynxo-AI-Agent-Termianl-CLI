@@ -13,7 +13,6 @@ import re
 from rich.cells import cell_len
 
 from wynxo import ui as ui_module
-from wynxo.layout import Transcript
 from wynxo.theme import resolve
 from wynxo.ui import UI, ActivityBar, CodeStreamer
 
@@ -123,46 +122,35 @@ class TestTheStreamerFollowsAResize:
         assert streamer.width > narrow
 
 
-class TestWidthFollowsTheLayout:
-    """prompt_toolkit's application installs its own SIGWINCH handler for as
-    long as it runs, and there is only one handler per signal -- so with the
-    layout up for the whole session nothing else could hear a resize, and
-    every width this module reasons about stayed frozen at the first draw."""
+class TestWidthFollowsTheTerminal:
+    """Everything that wraps -- the streamers, the activity bar, the diff
+    cards -- reads ``ui.width``. A resize is one re-measure, from the
+    SIGWINCH handler, and every consumer picks it up on its next draw."""
 
-    def test_attaching_adopts_the_transcript_width(self):
+    def test_refresh_size_re_reads_the_terminal(self, monkeypatch):
         ui = UI()
-        transcript = Transcript(100)
-        ui.attach(transcript)
-        assert ui.width == 100
-
-    def test_a_transcript_resize_reaches_the_ui(self):
-        ui = UI()
-        transcript = Transcript(100)
-        ui.attach(transcript)
-        transcript.resize(52)
+        monkeypatch.setattr("wynxo.ui.terminal_width", lambda: 52)
+        ui.refresh_size()
         assert ui.width == 52, "the UI never heard the window change size"
 
-    def test_narrow_follows_too(self):
+    def test_narrow_follows_the_new_width(self, monkeypatch):
         ui = UI()
-        transcript = Transcript(100)
-        ui.attach(transcript)
+        monkeypatch.setattr("wynxo.ui.terminal_width", lambda: 100)
+        ui.refresh_size()
         assert ui.narrow is False
-        transcript.resize(40)
+        monkeypatch.setattr("wynxo.ui.terminal_width", lambda: 40)
+        ui.refresh_size()
         assert ui.narrow is True
 
-    def test_refresh_size_prefers_the_transcript_over_the_terminal(self):
-        """SIGWINCH can still fire on the way into the layout. It must not
-        overwrite the pane's width with the whole terminal's."""
+    def test_a_streamer_widens_with_the_terminal(self, monkeypatch):
         ui = UI()
-        transcript = Transcript(64)
-        ui.attach(transcript)
+        monkeypatch.setattr("wynxo.ui.terminal_width", lambda: 40)
         ui.refresh_size()
-        assert ui.width == 64
-
-    def test_the_live_region_stays_off_after_attaching(self):
-        ui = UI()
-        ui.attach(Transcript(80))
-        assert ui.live_ok is False
+        streamer = CodeStreamer(ui, indent="  ")
+        narrow = streamer.width
+        monkeypatch.setattr("wynxo.ui.terminal_width", lambda: 120)
+        ui.refresh_size()
+        assert streamer.width > narrow
 
 
 class TestThePlanCountsItsOwnSteps:

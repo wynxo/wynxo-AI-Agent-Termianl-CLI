@@ -5,7 +5,7 @@ Everything wynxo does that is Windows-specific has deterministic coverage
 in tests/test_windows_surface.py, which runs anywhere by faking the
 platform. Faking it is not the same as being there: nothing on a Linux box
 can tell you whether Windows Terminal restores the screen on exit, whether
-Shift+drag selects, or whether taskkill really stops a process tree.
+drag-select really works, or whether taskkill really stops a process tree.
 
 So this runs the parts a machine can decide by itself and prints the parts
 only a person can, as a checklist. Run it in each host you care about --
@@ -248,27 +248,31 @@ def main() -> int:
 
 
 MANUAL = [
-    "It starts, draws a header, a conversation, a composer and a footer, "
-    "and the composer sits on the bottom row.",
-    "Type a multi-line message with Alt-Enter: the composer grows upward "
-    "and the footer does not move.",
+    "It starts, prints a banner, and leaves a prompt with a bordered "
+    "status line under it. The console is NOT switched to its alternate "
+    "screen: what was on screen before is still above the banner.",
+    "Type a multi-line message with Alt-Enter, then send it.",
     "Send a message: text streams in a word at a time rather than "
     "arriving in one lump.",
-    "Mouse wheel scrolls the conversation.",
-    "PageUp and PageDown scroll, and the composer keeps the cursor.",
-    "Press F2: the footer says [select mode]. Drag to select text, and "
-    "copy it (Ctrl-C or right-click, per your host).",
-    "Press F2 again: the wheel scrolls again, and typing still works.",
-    "Resize the window narrow and wide: nothing is stranded, the composer "
-    "stays at the bottom, the footer stays on the last row.",
+    "Mouse wheel scrolls the console's own scrollback, during a turn as "
+    "well as at the prompt. wynxo never enables mouse reporting, so this "
+    "is the host's behaviour and must be unchanged.",
+    "Drag to select text -- old answers included, while the agent is still "
+    "working -- and copy it the way you always do. No mode, no modifier.",
+    "Resize the window narrow and wide: the next thing drawn uses the new "
+    "width, and nothing is stranded mid-line.",
     "/model, arrow to another model, Enter. Then /model again and Escape. "
     "The screen is not corrupted either time.",
     "Ask for a file edit: a diff card appears with +/- counts, and Ctrl-D "
     "expands and collapses it.",
-    "Ask for something that needs permission: the question is VISIBLE in "
-    "the composer, and answering it works.",
-    "Press Ctrl-C at that permission prompt: it goes away, and the first "
-    "character of your next message is not eaten.",
+    "Ask for something that needs permission: the question is VISIBLE on "
+    "its own line, and answering it works.",
+    "Press Ctrl-C at that permission prompt: it aborts the tool rather "
+    "than allowing it, and the first character of your next message is "
+    "not eaten.",
+    "Then, in the SAME turn, press Ctrl-C again while it is still working: "
+    "it must still stop. (The prompt takes the console's Ctrl-C handler "
+    "with it when it closes; the session has to put it back.)",
     "Start a long command and press Ctrl-C: it stops, and Task Manager "
     "shows no leftover child processes.",
     "Ask it to open an application by name, in your own words.",

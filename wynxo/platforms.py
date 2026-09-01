@@ -124,7 +124,41 @@ def default_shell() -> tuple[str, list[str]]:
 
 # -- terminal --------------------------------------------------------------
 
+def _tty_size():
+    """The terminal's real size, asked of the terminal itself.
+
+    ``shutil.get_terminal_size`` consults ``COLUMNS``/``LINES`` *first* and
+    only falls back to the ioctl. Those variables are set once, by whatever
+    started the process, and nothing updates them when the window changes --
+    so anywhere they are exported (a shell with checkwinsize, tmux, CI, a
+    test harness) every width wynxo reasons about froze at launch and no
+    resize could move it. Streaming then ran off the edge of a narrowed
+    window for the rest of the session.
+
+    Asked of the file descriptor instead, the answer is always current.
+    stdout first, because that is what is being drawn on; stdin and stderr
+    after it, for the case where output is redirected but a terminal is
+    still attached. Returns None when none of them is a terminal, which is
+    when the environment variables are the right answer after all.
+    """
+    for stream in (sys.stdout, sys.stderr, sys.stdin):
+        try:
+            fd = stream.fileno()
+        except (AttributeError, ValueError, OSError):
+            continue
+        try:
+            size = os.get_terminal_size(fd)
+        except (AttributeError, OSError, ValueError):
+            continue
+        if size.columns > 0 and size.lines > 0:
+            return size
+    return None
+
+
 def terminal_width(default: int = 80) -> int:
+    size = _tty_size()
+    if size is not None:
+        return size.columns
     try:
         return shutil.get_terminal_size((default, 24)).columns
     except (OSError, ValueError):
@@ -132,6 +166,9 @@ def terminal_width(default: int = 80) -> int:
 
 
 def terminal_height(default: int = 24) -> int:
+    size = _tty_size()
+    if size is not None:
+        return size.lines
     try:
         return shutil.get_terminal_size((80, default)).lines
     except (OSError, ValueError):
@@ -257,11 +294,10 @@ def suspicious_workspace(path: Path) -> str | None:
 def copy_to_clipboard(text: str) -> bool:
     """Put text on the system clipboard, best effort per platform.
 
-    The chat layout holds the terminal with mouse reporting on, so the
-    usual drag-to-select does not reach the conversation; this is the
-    reliable way to get text out of it. Uses only tools that are already on
-    the machine -- nothing is installed -- and falls back along the list
-    until one of them accepts the text.
+    Drag-to-select works normally -- wynxo never captures the mouse -- but
+    a whole conversation is easier to take in one piece than to drag over.
+    Uses only tools that are already on the machine -- nothing is installed
+    -- and falls back along the list until one of them accepts the text.
     """
     import subprocess
 

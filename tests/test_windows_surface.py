@@ -223,23 +223,28 @@ class TestCarriageReturnsFromWindowsChildren:
 
         assert _clean(b"10%\r50%\r100%\n") == "100%"
 
-    def test_a_trailing_cr_never_reaches_a_transcript_row(self):
-        from wynxo.layout import Transcript
-        from wynxo.ui import UI
+    def test_a_trailing_cr_never_reaches_the_terminal(self):
+        """A CR that survives to the screen is read as "return to column 0",
+        so the row is overdrawn by whatever comes next."""
+        import io
+
+        from wynxo.ui import SafeConsole, UI
 
         ui = UI()
-        transcript = Transcript(80)
-        ui.attach(transcript)
-        transcript.console.file.write("first\r\nsecond\r\n")
-        assert transcript.lines == ["first", "second"]
+        ui.console = SafeConsole(file=io.StringIO(), force_terminal=True,
+                                 width=80, highlight=False, soft_wrap=False)
+        ui.tool_output("first\rsecond")
+        assert "\r" not in ui.console.file.getvalue()
 
 
 # What still needs a real Windows machine, and cannot be faked from here:
 #
 #   * Windows Terminal, PowerShell and cmd as hosts -- rendering, colour,
 #     and whether the alternate screen restores cleanly on exit.
-#   * The mouse wheel, Shift+drag selection, F2 selection mode and clipboard
-#     copy, which are the terminal's behaviour and not wynxo's.
+#   * The mouse wheel, drag selection and clipboard copy. wynxo never
+#     enables mouse reporting and never takes the alternate screen, so all
+#     three are the terminal's own behaviour -- but only a real console can
+#     confirm it.
 #   * Ctrl-C delivery: the console sends CTRL_C_EVENT to the process group
 #     rather than raising SIGINT the way a POSIX tty does.
 #   * A real resize of the console window.

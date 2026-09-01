@@ -350,7 +350,7 @@ class TestWindows:
         assert 'bindings.add("c-d")' in source or "c-d" in source
 
     def test_the_new_binding_collides_with_nothing(self):
-        """Ctrl-O, Ctrl-T, Ctrl-E, Ctrl-B, Ctrl-R, Ctrl-C and F2 are taken."""
+        """Ctrl-O, Ctrl-T, Ctrl-E, Ctrl-B, Ctrl-R and Ctrl-C are taken."""
         import inspect
         import re
 
@@ -378,19 +378,23 @@ class TestTheCardCatchesTheStream:
     """
 
     async def _run(self, repo, script):
+        import io
+
         from wynxo.cli import TerminalCallbacks
-        from wynxo.layout import Transcript
-        from wynxo.ui import UI
+        from wynxo.ui import SafeConsole, UI
 
         ui = UI()
-        transcript = Transcript(90)
-        ui.attach(transcript)
+        ui.live_ok = False
+        ui.console = SafeConsole(file=io.StringIO(), force_terminal=True,
+                                 color_system="truecolor", highlight=False,
+                                 soft_wrap=False, width=90, height=10_000)
+        ui.width = 90
         callbacks = TerminalCallbacks(ui, prompt_session=None)
         callbacks.workspace = repo
         agent = make_agent(repo, script, callbacks)
         await agent.run("fix calc.py")
         await agent.client.aclose()
-        return callbacks, transcript
+        return callbacks, ui
 
     async def test_the_card_holds_what_was_streamed(self, repo):
         callbacks, _ = await self._run(repo, [
@@ -413,23 +417,26 @@ class TestTheCardCatchesTheStream:
         assert (added, removed) != (0, 0)
         assert removed, "the broken lines it replaced must be counted"
 
-    async def test_one_summary_line_lands_in_the_transcript(self, repo):
-        """Not the whole file. The transcript is append-only -- anything
-        written there while streaming could never be compacted afterwards."""
+    async def test_one_summary_line_is_committed(self, repo):
+        """Not the whole file. What is written to the terminal is the
+        record: it goes into the scrollback and cannot be taken back, so
+        the streamed body belongs in the live region and only the summary
+        is committed."""
         import re
 
-        callbacks, transcript = await self._run(repo, [
+        callbacks, ui = await self._run(repo, [
             {"tool": "write_file", "arguments": {"path": "calc.py",
                                                  "content": FIXED}},
             {"content": "Done."},
         ])
-        plain = [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in transcript.lines]
+        plain = [re.sub(r"\x1b\[[0-9;]*m", "", line)
+                 for line in ui.console.file.getvalue().splitlines()]
         summaries = [line for line in plain if "write_file" in line and "+" in line]
         assert len(summaries) == 1, summaries
         assert "calc.py" in summaries[0]
         body = "\n".join(plain)
         assert "for value in values" not in body, (
-            "the streamed file must stay in the overlay, not the record")
+            "the streamed file must stay in the live region, not the record")
 
     async def test_a_non_edit_tool_does_not_leave_a_card_open(self, repo):
         callbacks, _ = await self._run(repo, [

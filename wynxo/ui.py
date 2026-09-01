@@ -69,8 +69,7 @@ MIN_ACTIVITY_WIDTH = 16
 _COLOUR_NAMES = ("ACCENT", "MUTED", "FAINT", "GOOD", "WARN", "BAD",
                  "BAR_STYLE", "BAR_ACCENT", "BAR_DIM")
 
-_COLOUR_CONSUMERS = ("wynxo.cli", "wynxo.wizard", "wynxo.doctor",
-                     "wynxo.corner", "wynxo.select", "wynxo.layout")
+_COLOUR_CONSUMERS = ("wynxo.cli", "wynxo.wizard", "wynxo.doctor")
 """Modules to look in. Being on this list is not enough to be rewritten --
 see below -- so a module that stops importing colours costs nothing."""
 
@@ -357,10 +356,6 @@ class UI:
             legacy_windows=False if sys.platform == "win32" else None,
         )
         self.g = Glyphs(_supports_unicode())
-        self.transcript = None
-        """Set by attach() when the full-screen layout owns the screen. Its
-        presence is what tells this UI it is drawing into a region rather
-        than at a terminal."""
         self.bar: "ActivityBar | None" = None
         """The pinned bar, while a turn is running. Streamed text has
         to be handed to it rather than written straight out, or its
@@ -378,49 +373,16 @@ class UI:
         self.live_ok = True
         """Whether a rich Live may drive the screen."""
 
-    def attach(self, transcript) -> None:
-        """Send everything this UI draws into the chat transcript instead of
-        straight at the terminal.
-
-        Every render path in wynxo goes through ``ui.console``, so swapping
-        that one object moves panels, diffs, syntax highlighting, tool cards
-        and the pet into the scrollable region without any of them knowing.
-        Each print is drained immediately so the transcript is never a frame
-        behind what the agent has already said.
-
-        The live region is switched off at the same time: a rich ``Live``
-        drives the real screen with cursor moves, and inside a full-screen
-        application those land on rows prompt_toolkit owns.
-        """
-        self.transcript = transcript
-        self.live_ok = False
-        self._resized(transcript.width)
-        # A resize reaches this UI through the transcript rather than
-        # through SIGWINCH. prompt_toolkit's application installs its own
-        # SIGWINCH handler for as long as it runs, and there is only one
-        # handler per signal -- so with the layout up for the whole session,
-        # refresh_size() was never called again and every width this module
-        # reasons about stayed frozen at whatever it was on the first draw.
-        transcript.on_resize = self._resized
-        # No print wrapper: the transcript's sink drains on every write, so
-        # Console.print and the streamers' direct console.file.write both
-        # arrive by the same door. Wrapping print alone was the bug -- the
-        # streamers bypassed it and their output sat in the buffer until an
-        # unrelated print happened to flush it, which is why streaming
-        # arrived in lumps instead of as it was written.
-        self.console = transcript.console
-
     def refresh_size(self) -> None:
-        """Re-read the width after the window changed size.
+        """Re-measure the terminal.
 
-        The classic prompt hears resizes through SIGWINCH, which is what
-        calls this. Under the layout the transcript is the only thing told,
-        so its width is the honest one -- and the signal is not ours to
-        listen to there anyway.
+        Everything that wraps -- the streamers, the activity bar, the diff
+        cards -- reads ``ui.width``, so this one call is the whole resize
+        story. It is called where a draw begins rather than only from the
+        SIGWINCH handler: prompt_toolkit owns that signal for the length of
+        every read it does, so a resize while somebody sits at the prompt
+        would otherwise never be heard.
         """
-        if self.transcript is not None:
-            self._resized(self.transcript.width)
-            return
         self._resized(terminal_width())
 
     def _resized(self, width: int) -> None:
@@ -437,17 +399,6 @@ class UI:
         server address goes before the project path does, because the path is
         the one you actually need to see.
         """
-        if self.transcript is not None:
-            # The layout has a header row carrying the same identity, and it
-            # updates when the model changes -- which a line printed once
-            # into the transcript cannot. Printing both put two headers on
-            # screen, one of them permanently stale.
-            #
-            # Not even a rule: the layout draws its own above the composer,
-            # so this one landed three rows from it and the greeting sat in
-            # a two-rule sandwich that read as a widget rather than as the
-            # first line of the conversation.
-            return
         server = endpoint.split(" (")[0].replace("http://", "").replace("https://", "")
         parts = [model, f"{effort_meter(effort, self.g.unicode)} {effort}",
                  self.shorten_path(workspace), server]
@@ -485,14 +436,6 @@ class UI:
         Scrollback too: clearing only the visible rows leaves the previous
         session one scroll away, which is worse than not clearing at all.
         """
-        if self.transcript is not None:
-            # Inside the full-screen layout there is no terminal to clear:
-            # prompt_toolkit owns the screen, and a clear sequence written
-            # here would land in the transcript as content -- a stray
-            # "\x1b[3J" printed into the conversation. Clearing means
-            # emptying the conversation.
-            self.transcript.clear()
-            return
         if not self.console.is_terminal:
             return
         self.console.clear()
@@ -1452,10 +1395,13 @@ class ActivityBar:
         plan is one thing that changes, not a stream of panels."""
         self.plan_done_frame = 0
         """Non-zero while the completion animation is playing."""
-        self.corner = None
-        """A CornerPlan when the terminal can pin one. The plan lives in the
-        top-right corner there instead of in this strip, so it stops shoving
-        the answer and the composer around every time a step ticks off."""
+        self.card = None
+        """The edit being streamed right now, if any.
+
+        It draws here rather than in the conversation because what is
+        written to the terminal is the record: it goes into the scrollback
+        and cannot be taken back. The live region is the one place wynxo
+        may redraw, so it is where anything provisional belongs."""
         self.lead: Text | None = None
         self.tool_events: list = []
         self.max_tool_events = 6
@@ -1640,8 +1586,6 @@ class ActivityBar:
     def set_plan(self, rendered: str) -> None:
         self.plan = rendered or ""
         self.plan_done_frame = 0
-        if self.corner is not None:
-            self.corner.set(self.plan)
         self.refresh()
 
     def plan_is_complete(self) -> bool:
@@ -1661,23 +1605,22 @@ class ActivityBar:
             return
         for frame in range(1, self.PLAN_DONE_FRAMES + 1):
             self.plan_done_frame = frame
-            if self.corner is not None:
-                self.corner.pulse(frame)
             self.refresh()
             await asyncio.sleep(0.06)
         self.plan = ""
         self.plan_done_frame = 0
-        if self.corner is not None:
-            self.corner.clear()
         self.refresh()
 
     def _plan_panel(self):
-        """The plan drawn inline, for terminals that cannot pin a corner.
+        """The plan, drawn inside the live region.
 
-        Where CornerPlan armed, the plan is up in the top-right and drawing
-        it again here would show it twice.
+        One place, redrawn in place. It used to have a second home pinned to
+        the top-right corner with a DECSTBM scrolling region -- a mechanism
+        that costs the terminal its scrollback for the rows below it, so the
+        panel was bought with the user's ability to scroll back through the
+        conversation.
         """
-        if not self.plan or (self.corner is not None and self.corner.armed):
+        if not self.plan:
             return None
         g = self.ui.g
         body = Text()
@@ -1730,6 +1673,15 @@ class ActivityBar:
         """The pinned block: plan on top, then the line being written, then
         the status strip. Everything here is redrawn in place."""
         parts = []
+        # A card is provisional and the plan is a state; both belong above
+        # the strip and neither is ever committed from here. The card first:
+        # it is what is happening *now*, and the eye reads down to the strip.
+        if self.card is not None and self.card.live:
+            body = Text()
+            for line in self.card.render(self.ui.g, min(self.ui.width, 100)):
+                body.append(line + "\n", style=BAR_DIM)
+            body.rstrip()
+            parts.append(body)
         if self.tool_events:
             history = Text()
             for event in self.tool_events:
@@ -1743,7 +1695,16 @@ class ActivityBar:
         return parts[0] if len(parts) == 1 else Group(*parts)
 
     def __rich_console__(self, console, options):
-        """Re-render on every refresh, not just when something calls update().
+        """One frame. Measure the terminal, then draw against that width.
+
+        Measuring here rather than inside the parts is what makes a resize
+        arrive: this is the only per-frame entry point, and everything the
+        frame contains -- the strip, the plan, the card, and the streamer
+        writing between frames -- reads ``ui.width``. The SIGWINCH handler
+        is a nudge that only fires while nothing else owns the signal, so it
+        cannot be the mechanism. Twelve frames a second is twelve ioctls.
+
+        Re-render on every refresh, not just when something calls update().
 
         Live was being handed the *result* of _renderable() -- a finished
         Text object. Auto-refresh then redrew that same frozen object twelve
@@ -1753,6 +1714,7 @@ class ActivityBar:
         all thirty of them. Handing Live the bar itself makes each refresh
         recompute.
         """
+        self.ui.refresh_size()
         yield self._renderable()
 
     def stop(self) -> None:
@@ -1760,12 +1722,6 @@ class ActivityBar:
         if live is not None:
             with contextlib.suppress(Exception):
                 live.stop()
-        if self.corner is not None:
-            # The scrolling region must not outlive the turn: the composer
-            # is drawn below it, and a stale region would keep the top rows
-            # frozen for the rest of the session -- and after wynxo exits.
-            with contextlib.suppress(Exception):
-                self.corner.clear()
 
     def __enter__(self) -> "ActivityBar":
         self.start()
