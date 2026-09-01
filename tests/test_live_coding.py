@@ -18,12 +18,9 @@ from __future__ import annotations
 import json
 
 import httpx
-import pytest
 
-from wynxo import motion
 from wynxo.config import Config, Endpoint
 from wynxo.provider import Chunk, OpenAIClient
-from wynxo.task_state import TaskState
 
 
 class TestTheCodeStreamIsReal:
@@ -143,66 +140,6 @@ class TestTheCodeStreamIsReal:
         await agent._call_model(stream_content=False)
         await client.aclose()
         assert shown == []
-
-
-class TestTheCompanionFollowsTheAgent:
-    """One mapping, from the task state machine that already exists to the
-    scenes that already exist. Not a second state machine, and not a timer."""
-
-    @pytest.mark.parametrize("state,scene", [
-        (TaskState.IDLE, "idle"),
-        (TaskState.THINKING, "thinking"),
-        (TaskState.PLANNING, "thinking"),
-        (TaskState.EXECUTING, "working"),
-        (TaskState.TESTING, "testing"),
-        (TaskState.RECOVERING, "error"),
-        (TaskState.COMPLETED, "happy"),
-        (TaskState.FAILED, "error"),
-        (TaskState.CANCELLED, "idle"),
-    ])
-    def test_every_task_state_has_a_scene(self, state, scene):
-        assert motion.scene_for_state(state.value).name == scene
-
-    @pytest.mark.parametrize("tool,scene", [
-        ("edit_file", "coding"), ("write_file", "coding"),
-        ("read_file", "reading"), ("grep", "searching"),
-        ("run_tests", "testing"), ("shell", "running"),
-    ])
-    def test_the_running_tool_decides_what_it_looks_like(self, tool, scene):
-        """"executing" is equally true of reading a file and of writing one;
-        they must not look the same."""
-        assert motion.scene_for_state("executing", tool).name == scene
-
-    def test_an_unknown_tool_falls_back_to_the_state(self):
-        assert motion.scene_for_state("testing", "some_new_tool").name == "testing"
-
-    def test_an_unknown_state_is_survivable(self):
-        """A companion that raises inside a repaint is worse than a dull one."""
-        assert motion.scene_for_state("nonsense").name == "idle"
-        assert motion.scene_for_state("").name == "idle"
-
-    def test_reduced_motion_is_one_still_frame(self):
-        frames = motion.select(motion.SCENES["coding"], reduced=True)
-        assert len(frames) == 1
-
-    def test_a_non_unicode_terminal_gets_ascii(self):
-        for name in ("coding", "thinking", "testing", "happy", "error"):
-            frames = motion.select(motion.SCENES[name], unicode=False)
-            assert all(frame.isascii() for frame in frames), name
-
-    def test_the_frame_is_not_driven_by_a_clock(self):
-        """It advances per repaint. A scheduler would keep animating through
-        a stall, showing typing while nothing is being written."""
-        import inspect
-
-        from wynxo.ui import ActivityBar
-
-        source = inspect.getsource(ActivityBar._render)
-        # Actual clock calls, not the word in the prose explaining why there
-        # are none.
-        for clock in ("time.monotonic", "time.time", "asyncio.sleep",
-                      "time.sleep", "perf_counter"):
-            assert clock not in source, f"{clock} drives the frame"
 
 
 class TestTheLiveRegionStaysTransient:

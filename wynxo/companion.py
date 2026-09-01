@@ -556,36 +556,6 @@ _OVER = frozenset({State.IDLE, State.SUCCESS, State.ERROR, State.CANCELLED})
 just ended must not animate one of these into looking busy."""
 
 
-def is_over(state: "State | str") -> bool:
-    """Whether this state means there is nothing in flight."""
-    if isinstance(state, State):
-        return state in _OVER
-    try:
-        return State(str(state).strip().lower()) in _OVER
-    except ValueError:
-        return True
-
-
-def state_for(task_state: str, tool: str = "", *, listening: bool = False,
-              speaking: bool = False) -> State:
-    """The companion's state, from what the agent is really doing.
-
-    Voice wins, because it is about the person rather than the work and is
-    the one thing they are waiting on. Otherwise the running tool decides,
-    but only while a task is running: between a cancellation and the turn's
-    teardown the tool is still set, and a companion that keeps typing under
-    the word "Interrupted" is worse than one that does nothing.
-    """
-    if listening:
-        return State.LISTENING
-    if speaking:
-        return State.SPEAKING
-    resolved = _BY_TASK.get(str(task_state).strip().lower(), State.IDLE)
-    if tool and resolved not in _OVER:
-        return _BY_TOOL.get(tool.strip().lower(), resolved)
-    return resolved
-
-
 # -- drawing ----------------------------------------------------------------
 
 def frames_for(state: "State | str", *, unicode: bool = True,
@@ -619,33 +589,3 @@ def _parse(value) -> State:
     except ValueError:
         return State.IDLE
 
-
-def panel(state: "State | str", frame: int = 0, *, unicode: bool = True,
-          reduced: bool = False, width: int = WIDTH + 4,
-          title: str = "wyn") -> list[str]:
-    """The companion, in its own bordered box, as rows ready to draw.
-
-    Bounded on purpose and in both directions: it is drawn as a Float over
-    the conversation, so a box that grew would cover the thing the person is
-    actually reading. The conversation is the product; this sits beside it.
-    """
-    frames = frames_for(state, unicode=unicode, reduced=reduced, width=width)
-    body = frames[frame % len(frames)].split("\n")
-    # Never wider than what it was given. Flooring this at the scene's own
-    # width made the panel 30 columns on a 20-column terminal, which the
-    # float then clipped -- so the box lost its right border and stopped
-    # being a box. Below the staging's width the rows crop instead, which
-    # loses the mug and the thought before it loses the character.
-    inner = max(10, min(width, 60)) - 2
-    if unicode:
-        tl, tr, bl, br, h, v = "╭", "╮", "╰", "╯", "─", "│"
-    else:
-        tl, tr, bl, br, h, v = "+", "+", "+", "+", "-", "|"
-    label = label_for(state)
-    head = f" {title} " + (f"{h} {label} " if label else "")
-    head = head[:inner]
-    rows = [tl + head + h * max(0, inner - len(head)) + tr]
-    for line in body:
-        rows.append(v + line[:inner].ljust(inner) + v)
-    rows.append(bl + h * inner + br)
-    return rows

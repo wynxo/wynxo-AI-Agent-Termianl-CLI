@@ -339,38 +339,17 @@ class TestTheLiveRegionCannotContradictTheConversation:
         after = source.split("finally:", 1)[1]
         assert "if interrupted:" in after and "Interrupted." in after
 
-    def test_the_pet_codes_while_the_edit_is_running(self):
-        from wynxo import motion
+    def test_the_face_says_what_the_tool_is(self):
+        """One mapping, not three. The activity name the tool reports picks
+        the mood, and the mood picks the face -- there is no second table
+        turning the same facts into a second visual."""
+        from wynxo.cli import _ACTIVITY
+        from wynxo.pet import ACTIVITY_MOODS, Mood, Pet
 
-        assert motion.scene_for_state("executing", "write_file").name == "coding"
-
-    def test_a_leftover_tool_cannot_animate_a_finished_task(self):
-        from wynxo import motion
-
-        for state in ("cancelled", "failed", "completed", "idle"):
-            for tool in ("write_file", "grep", "run_tests", "shell"):
-                scene = motion.scene_for_state(state, tool)
-                assert scene.name not in {"coding", "reading", "searching",
-                                          "running", "testing", "working"}, \
-                    f"{state} + {tool} showed {scene.name}"
-
-    def test_a_running_task_still_follows_the_tool(self):
-        from wynxo import motion
-
-        for state in ("executing", "thinking", "planning", "recovering"):
-            assert motion.scene_for_state(state, "edit_file").name == "coding"
-
-    def test_task_is_over_agrees_with_the_state_machine(self):
-        """The two must not drift apart: the overlay uses this to decide
-        whether anything is in flight at all."""
-        from wynxo import motion
-        from wynxo.task_state import TaskState
-
-        over = {TaskState.IDLE, TaskState.COMPLETED, TaskState.FAILED,
-                TaskState.CANCELLED}
-        for state in TaskState:
-            assert motion.task_is_over(state.value) is (state in over), state
-
+        pet = Pet()
+        pet.set_activity(_ACTIVITY["write_file"])
+        assert pet.mood is ACTIVITY_MOODS[_ACTIVITY["write_file"]]
+        assert pet.mood is not Mood.IDLE
 
 class TestAPermissionPromptCanBeAbandoned:
     """Ctrl-C at a blocking permission prompt has to get you out.
