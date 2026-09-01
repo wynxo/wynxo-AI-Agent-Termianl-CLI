@@ -4131,11 +4131,15 @@ class Repl:
         # Straight off the palette, not the module-level names: cli.py
         # already has a WARN, and it is the status tag, not a colour.
         palette = self.ui.palette
-        for label, style in (("accent", palette.accent), ("text", palette.text),
-                             ("muted", palette.muted), ("ok", palette.good),
-                             ("warn", palette.warn), ("error", palette.bad)):
-            row.append(f" {label} ", style=f"bold {style}")
-            row.append(" ")
+        for index, (label, style) in enumerate((
+                ("accent", palette.accent), ("text", palette.text),
+                ("muted", palette.muted), ("ok", palette.good),
+                ("warn", palette.warn), ("error", palette.bad))):
+            # No leading pad on the first swatch: it put the row one cell
+            # off the margin every other line in the conversation keeps.
+            if index:
+                row.append("  ")
+            row.append(label, style=f"bold {style}")
         self.ui.console.print(row)
         self.ui.console.print()
 

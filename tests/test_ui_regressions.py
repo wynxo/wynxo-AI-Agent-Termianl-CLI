@@ -319,7 +319,14 @@ class TestTheBannerKeepsWhatMatters:
         ui.console.file = out
         ui.console.width = width
         ui.banner("qwen2.5-coder:32b", "http://homelab:11434", "high", path)
-        return "".join(ln for ln in plain(out.getvalue()) if "wynxo" in ln)
+        return self.rows(out.getvalue())
+
+    @staticmethod
+    def rows(written: str) -> list[str]:
+        """The identity block's own rows: the name and model on one, the
+        settings that give way on the next. The rule is not one of them."""
+        return [ln.rstrip() for ln in plain(written)
+                if ln.strip() and set(ln.strip()) != {"\u2500"}]
 
     def test_the_server_is_never_shown_without_the_path(self):
         """The property, at every width: dropping is by priority, so the
@@ -327,7 +334,7 @@ class TestTheBannerKeepsWhatMatters:
         path = "/home/you/code/some-project-with-a-long-name"
         squeezed = False
         for width in range(24, 130):
-            line = self.drawn(width, path)
+            line = "\n".join(self.drawn(width, path))
             has_path = "long-name" in line
             if "homelab" in line:
                 assert has_path, (
@@ -338,13 +345,14 @@ class TestTheBannerKeepsWhatMatters:
         assert squeezed, "no width actually exercised the choice"
 
     def test_both_fit_when_there_is_room(self):
-        line = self.drawn(120, "/home/you/code/proj")
-        assert "proj" in line and "homelab" in line
+        block = "\n".join(self.drawn(120, "/home/you/code/proj"))
+        assert "proj" in block and "homelab" in block
 
-    def test_the_banner_never_runs_past_the_terminal(self):
+    def test_no_row_of_the_banner_runs_past_the_terminal(self):
         for width in range(24, 130, 7):
-            assert cell_len(self.drawn(
-                width, "/home/you/code/some-project-with-a-long-name")) <= width
+            for row in self.drawn(
+                    width, "/home/you/code/some-project-with-a-long-name"):
+                assert cell_len(row) <= width, f"{width}: {row!r}"
 
 
 class TestShortenPathHonoursItsBudget:

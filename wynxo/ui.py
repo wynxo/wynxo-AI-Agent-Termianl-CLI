@@ -316,6 +316,7 @@ class Glyphs:
             # two cells in a CJK locale, which breaks a list that is redrawn
             # in place.
             self.step_done, self.step_now, self.step_todo = "✓", "◉", "◦"
+            self.spark = "✦"
             # Rounded box corners, for the input field the prompt sits in.
             self.tl, self.tr, self.bl, self.br = "╭", "╮", "╰", "╯"
             self.hbar, self.vbar, self.ellipsis = "─", "│", "…"
@@ -324,6 +325,7 @@ class Glyphs:
             self.cross, self.gear, self.dot = "x", "o", "."
             self.caret = ">"
             self.step_done, self.step_now, self.step_todo = "+", ">", "-"
+            self.spark = "*"
             self.tl, self.tr, self.bl, self.br = "+", "+", "+", "+"
             self.hbar, self.vbar, self.ellipsis = "-", "|", "..."
 
@@ -408,42 +410,52 @@ class UI:
     # -- chrome ------------------------------------------------------------
 
     def banner(self, model: str, endpoint: str, effort: str, workspace: str) -> None:
-        """A single line of identity, then a rule.
+        """The identity block: a name, then the session it belongs to.
 
-        Assembled by priority rather than truncated: on a narrow terminal the
-        server address goes before the project path does, because the path is
-        the one you actually need to see.
+        Two lines rather than one, because five facts joined by dots is a
+        dashboard row and not a header -- there is nothing in it to read
+        first. The name and the model carry the weight; the effort level,
+        the project and the server are the settings underneath, in muted
+        text, and they are the ones that give way on a narrow terminal.
+
+        Still assembled by priority rather than truncated: the server
+        address goes before the project path does, because the path is the
+        one you actually need to see.
         """
         server = endpoint.split(" (")[0].replace("http://", "").replace("https://", "")
-        parts = [model, f"{effort_meter(effort, self.g.unicode)} {effort}",
+        parts = [f"{effort_meter(effort, self.g.unicode)} {effort}",
                  self.shorten_path(workspace), server]
 
         separator = f"  {self.g.dot}  "
-        prefix = "  wynxo"
+        indent = "    "
         budget = self.width - 1
 
         def room(candidate: list[str]) -> int:
-            return cell_len(prefix) + sum(
-                cell_len(separator) + cell_len(p) for p in candidate)
+            return cell_len(indent) + sum(
+                cell_len(separator) + cell_len(p) for p in candidate) \
+                - cell_len(separator)
 
-        # Drop from the least important end, rather than skipping whichever
-        # single part happens not to fit. The old loop kept going after a
-        # part it could not place, so a long project path was dropped and
-        # the shorter server address that follows it was kept -- exactly
-        # backwards, and on a wide terminal with room for the path.
         shown = list(parts)
         while shown and room(shown) > budget:
             shown.pop()
 
-        head = Text()
-        head.append(prefix, style=f"bold {ACCENT}")
-        for i, part in enumerate(shown):
-            head.append(separator, style=MUTED)
-            head.append(part, style="bold" if i == 0 else "")
+        name = Text("  ")
+        name.append(f"{self.g.spark} wynxo", style=f"bold {ACCENT}")
+        if model:
+            name.append(separator, style=MUTED)
+            name.append(model, style="bold")
+
+        details = Text(indent, style=MUTED)
+        for index, part in enumerate(shown):
+            if index:
+                details.append(separator, style=FAINT)
+            details.append(part, style=MUTED)
 
         self.console.print()
-        self.console.print(head, overflow="ellipsis", no_wrap=True)
-        self.console.print(Rule(style=MUTED, characters=self.g.hbar))
+        self.console.print(name, overflow="ellipsis", no_wrap=True)
+        if shown:
+            self.console.print(details, overflow="ellipsis", no_wrap=True)
+        self.console.print(Rule(style=FAINT, characters=self.g.hbar))
 
     def clear(self) -> None:
         """Clear the screen and scrollback, so a session starts on a clean page.

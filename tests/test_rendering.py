@@ -425,10 +425,15 @@ class TestPinnedBar:
 
 
 class TestHeader:
-    def test_header_is_two_lines(self, capsys):
+    def test_the_header_is_a_name_a_detail_line_and_a_rule(self, capsys):
+        """Five facts joined by dots is a dashboard row, not a header: there
+        is nothing in it to read first. The name and the model carry the
+        weight; the settings sit under them."""
         UI().banner("qwen3-coder:30b", "http://127.0.0.1:11434", "medium", "/tmp/p")
         lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
-        assert len(lines) == 2, "the header should be a line and a rule, not a box"
+        assert len(lines) == 3, "the header should be two lines and a rule"
+        assert "wynxo" in lines[0] and "qwen3-coder:30b" in lines[0]
+        assert "medium" in lines[1] and "wynxo" not in lines[1]
 
     def test_narrow_header_drops_parts_rather_than_truncating(self, capsys):
         ui = UI()
