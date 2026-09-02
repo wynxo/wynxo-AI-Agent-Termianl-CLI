@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import random
 
-from rich.cells import cell_len
+from rich.text import Text
+
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -38,87 +39,97 @@ class Mood(Enum):
     saying nothing is happening than a spinner that never stops."""
 
 
-# One cat, in one size.
+# One cat, drawn rather than spelled.
 #
-# Two rules hold the whole set together, and both were broken before.
+# This replaces a one-line kaomoji -- the ₍ᐢ∙ᴥ∙ᐢ₎ shape -- which was
+# width-stable, glyph-safe and bidi-safe, and still read as punctuation
+# rather than as an animal. Every property it had was worth having and none
+# of them was the point: a face that has to be explained is not a mascot.
 #
-# EVERY FRAME IS EXACTLY ``BOX`` CELLS. Frames used to be padded to the
-# widest frame *of the current mood*, which fixes jitter inside a mood and
-# not between them: idle was 7 cells and running 8, so every time the agent
-# picked up a tool the entire status line shifted sideways by one column.
-# The ASCII set was worse, moving between 5 and 7. The box is one width for
-# the whole session, so nothing after the mascot can ever move.
+# The mascot is three rows now, and the thing that makes it read as a cat is
+# the pair of diagonal strokes in the first one. No single Unicode glyph
+# draws an ear as well as "/\" does at this size, which is why the drawn
+# version and the plain-terminal version are the same drawing rather than a
+# good one and an apologetic fallback.
 #
-# EVERY GLYPH IS SAFE TO PUT IN A LINE OF TEXT -- unambiguous width, and
-# left-to-right. The old eyes were U+2022 BULLET,
-# whose East Asian Width is "Ambiguous" -- one cell in a Western locale and
-# two in a CJK one. So were the breve, the ≧≦ squint, the ╥ tears and the ×.
-# WORKING was built from combining accents, which terminals place however
-# they like. Those are all fine in prose and wrong in an animation, where a
-# glyph that measures 1 and draws 2 tears the line on the frame it appears.
-# Everything here is width "N" or "Na" and carries no combining marks.
+# Three rows will not fit on a status line, and that is the other half of
+# the design: the mascot is no longer a status indicator. It appears where
+# the session has room for a character -- the header, the farewell -- and
+# the status line carries a single mark instead. See MARKS below.
 #
-# The muzzle is U+1D25 LATIN LETTER AIN, the one from ʕ•ᴥ•ʔ, and not the
-# Arabic presentation form that looks the same: that glyph's bidi class is
-# AL, so a terminal implementing the bidirectional algorithm is entitled to
-# reorder the neutrals either side of it -- the eyes -- and the face comes
-# apart. A mascot may not depend on the reading direction of the sentence it
-# lands in.
-#
-# The character is the same in every frame: the ears, the body and the mouth
-# never move. Only the eyes change, plus one optional cell to the right for
-# a paw, a question mark or a sleepy z. That is what makes a frame change
-# read as an expression rather than as a different animal.
+# The character never changes. The ears, the cheeks and the body are
+# identical in every frame; only the eyes and the mouth move. That is what
+# makes a frame change read as an expression rather than as a different
+# animal.
 
-BOX = 8
-"""Cells every frame occupies: seven for the face, one for the accessory."""
+EARS = r" /\_/\ "
+"""The top row, in every frame of every mood. Seven cells."""
 
-FACES: dict[Mood, list[str]] = {
-    Mood.IDLE:        ["₍ᐢ∙ᴥ∙ᐢ₎ ", "₍ᐢ∙ᴥ∙ᐢ₎ ", "₍ᐢ∙ᴥ∙ᐢ₎ ", "₍ᐢ-ᴥ-ᐢ₎ "],
-    Mood.THINKING:    ["₍ᐢ∙ᴥ-ᐢ₎ ", "₍ᐢ-ᴥ∙ᐢ₎ ", "₍ᐢ∙ᴥ-ᐢ₎ ", "₍ᐢ∙ᴥ∙ᐢ₎ "],
-    Mood.READING:     ["₍ᐢ◉ᴥ◉ᐢ₎ ", "₍ᐢ◉ᴥ◉ᐢ₎ ", "₍ᐢ◉ᴥ◉ᐢ₎ ", "₍ᐢ-ᴥ-ᐢ₎ "],
-    # The eyes track left and right: a cat looking for something.
-    Mood.SEARCHING:   ["₍ᐢ◉ᴥ∙ᐢ₎ ", "₍ᐢ∙ᴥ◉ᐢ₎ ", "₍ᐢ◉ᴥ∙ᐢ₎ "],
-    Mood.WORKING:     ["₍ᐢ>ᴥ<ᐢ₎ ", "₍ᐢ>ᴥ<ᐢ₎ ", "₍ᐢ∙ᴥ∙ᐢ₎ "],
-    # Scrutiny: one eye narrowed, then the other. Reading is two wide eyes
-    # held still, and the two states have to be told apart at a glance.
-    Mood.TESTING:     ["₍ᐢ◉ᴥ-ᐢ₎ ", "₍ᐢ◉ᴥ-ᐢ₎ ", "₍ᐢ-ᴥ◉ᐢ₎ ", "₍ᐢ-ᴥ◉ᐢ₎ "],
-    Mood.RUNNING:     ["₍ᐢ∙ᴥ∙ᐢ₎ฅ", "₍ᐢ∙ᴥ∙ᐢ₎ﾉ", "₍ᐢ∙ᴥ∙ᐢ₎ฅ", "₍ᐢ∙ᴥ∙ᐢ₎ﾉ"],
-    Mood.ASKING:      ["₍ᐢ◉ᴥ∙ᐢ₎?", "₍ᐢ◉ᴥ∙ᐢ₎ ", "₍ᐢ◉ᴥ∙ᐢ₎?", "₍ᐢ◉ᴥ∙ᐢ₎ "],
-    Mood.HAPPY:       ["₍ᐢ‿ᴥ‿ᐢ₎ ", "₍ᐢ‿ᴥ‿ᐢ₎✧"],
-    Mood.SAD:         ["₍ᐢxᴥxᐢ₎ ", "₍ᐢxᴥxᐢ₎ ", "₍ᐢ-ᴥ-ᐢ₎ "],
-    Mood.CELEBRATING: ["₍ᐢ‿ᴥ‿ᐢ₎✧", "₍ᐢ◉ᴥ◉ᐢ₎ ", "₍ᐢ‿ᴥ‿ᐢ₎✦", "₍ᐢ◉ᴥ◉ᐢ₎ "],
-    Mood.SLEEPY:      ["₍ᐢ-ᴥ-ᐢ₎ ", "₍ᐢ-ᴥ-ᐢ₎z", "₍ᐢ-ᴥ-ᐢ₎z", "₍ᐢ-ᴥ-ᐢ₎ "],
+WIDTH = 7
+"""Cells every row occupies. One number for the whole set."""
+
+HEIGHT = 3
+
+FRAMES: dict[Mood, list[tuple[str, str]]] = {
+    #                   eyes         mouth
+    Mood.IDLE:        [("( o.o )", " > ^ < "), ("( o.o )", " > ^ < "),
+                       ("( o.o )", " > ^ < "), ("( -.- )", " > ^ < ")],
+    Mood.THINKING:    [("( o.- )", " > ^ < "), ("( -.o )", " > ^ < ")],
+    Mood.READING:     [("( O.O )", " > ^ < "), ("( O.O )", " > ^ < "),
+                       ("( -.- )", " > ^ < ")],
+    Mood.SEARCHING:   [("( O.o )", " > ^ < "), ("( o.O )", " > ^ < ")],
+    Mood.WORKING:     [("( >.< )", " > ^ < "), ("( >.< )", " > ^ < "),
+                       ("( o.o )", " > ^ < ")],
+    Mood.TESTING:     [("( O.- )", " > ^ < "), ("( -.O )", " > ^ < ")],
+    Mood.RUNNING:     [("( o.o )", " >-^-< "), ("( o.o )", " > ^ < ")],
+    Mood.ASKING:      [("( O.o )", " > ~ < "), ("( O.o )", " > ^ < ")],
+    Mood.HAPPY:       [("( ^.^ )", " > w < ")],
+    Mood.SAD:         [("( x.x )", " > _ < ")],
+    Mood.CELEBRATING: [("( ^.^ )", " >*^*< "), ("( O.O )", " > w < ")],
+    Mood.SLEEPY:      [("( -.- )", " > ^ < "), ("( -.- )", " > z < ")],
 }
 
-# The same cat where the font cannot be trusted with anything but ASCII.
-# Same grammar, same box, same expressions -- ears, eyes, nose, accessory --
-# so it is recognisably the character rather than a different mascot for
-# people with a plainer terminal.
-FACES_ASCII: dict[Mood, list[str]] = {
-    Mood.IDLE:        ["=^o.o^= ", "=^o.o^= ", "=^o.o^= ", "=^-.-^= "],
-    Mood.THINKING:    ["=^o.-^= ", "=^-.o^= ", "=^o.-^= ", "=^o.o^= "],
-    Mood.READING:     ["=^O.O^= ", "=^O.O^= ", "=^O.O^= ", "=^-.-^= "],
-    Mood.SEARCHING:   ["=^O.o^= ", "=^o.O^= ", "=^O.o^= "],
-    Mood.WORKING:     ["=^>.<^= ", "=^>.<^= ", "=^o.o^= "],
-    Mood.TESTING:     ["=^O.-^= ", "=^O.-^= ", "=^-.O^= ", "=^-.O^= "],
-    Mood.RUNNING:     ["=^o.o^=/", "=^o.o^=-", "=^o.o^=\\", "=^o.o^=-"],
-    Mood.ASKING:      ["=^O.o^=?", "=^O.o^= ", "=^O.o^=?", "=^O.o^= "],
-    Mood.HAPPY:       ["=^u.u^= ", "=^u.u^=*"],
-    Mood.SAD:         ["=^x.x^= ", "=^x.x^= ", "=^-.-^= "],
-    Mood.CELEBRATING: ["=^u.u^=*", "=^O.O^= ", "=^u.u^=+", "=^O.O^= "],
-    Mood.SLEEPY:      ["=^-.-^= ", "=^-.-^=z", "=^-.-^=z", "=^-.-^= "],
+# The status line's share of the mascot: one mark, whose colour carries the
+# rest. Four of them, because four is what a glance tells apart -- resting,
+# working, went well, went wrong -- and because a status line competing with
+# the answer above it has already lost.
+MARKS: dict[Mood, str] = {
+    Mood.IDLE: "◦", Mood.SLEEPY: "◦",
+    Mood.THINKING: "◉", Mood.READING: "◉",
+    Mood.SEARCHING: "◉", Mood.WORKING: "◉",
+    Mood.TESTING: "◉", Mood.RUNNING: "◉",
+    Mood.ASKING: "◉",
+    Mood.HAPPY: "✓", Mood.CELEBRATING: "✓",
+    Mood.SAD: "✗",
+}
+PULSE = ("◌", "◍", "◉", "◍")
+PULSE_ASCII = (".", "o", "O", "o")
+"""The one thing that moves while a tool runs.
+
+The strip carries a single cell, so the animation has to live inside it:
+one shape gaining and losing weight, which reads as breathing rather than
+as a widget. It replaced the spinner and then, for one pass, nothing at all
+-- the mark was drawn straight from the mood table and the whole strip went
+still, so a call that took thirty seconds looked identical to a wedged one
+apart from the elapsed count.
+
+Every frame is East Asian Width Neutral and one cell wide. The strip is
+width-exact and redrawn a dozen times a second; an Ambiguous glyph here
+draws two cells in a CJK locale and tears the line on every other frame.
+"""
+
+MARKS_ASCII: dict[Mood, str] = {
+    Mood.IDLE: ".", Mood.SLEEPY: ".",
+    Mood.THINKING: "o", Mood.READING: "o", Mood.SEARCHING: "o",
+    Mood.WORKING: "o", Mood.TESTING: "o", Mood.RUNNING: "o",
+    Mood.ASKING: "o",
+    Mood.HAPPY: "+", Mood.CELEBRATING: "+",
+    Mood.SAD: "x",
 }
 
-# The mascot's colour, by the job the colour does rather than by name. Four
-# roles, because four is what a glance can tell apart: resting, busy, went
-# well, went wrong. The face already says *which* kind of busy -- the eyes
-# differ per mood and the strip spells the activity out beside it -- so a
-# fifth and sixth hue would be the same fact a third time.
-#
-# Roles, not literals, is the point. These used to be grey62, bright_cyan,
-# bright_magenta and so on, which made the mascot the one thing on screen
-# that /theme could not reach: catboy's violet never touched the cat.
+# The mascot's colour, by the job the colour does rather than by name. Roles,
+# not literals: these used to be grey62, bright_cyan and bright_magenta,
+# which made the mascot the one thing on screen that /theme could not reach.
 MOOD_ROLES: dict[Mood, str] = {
     Mood.IDLE: "muted",
     Mood.SLEEPY: "faint",
@@ -136,6 +147,10 @@ MOOD_ROLES: dict[Mood, str] = {
 
 # Which activity name maps to which mood. Anything unrecognised stays THINKING,
 # which is the honest default: something is happening and we did not label it.
+_BUSY = frozenset({Mood.THINKING, Mood.READING, Mood.SEARCHING,
+                   Mood.WORKING, Mood.TESTING, Mood.RUNNING})
+"""The moods that mean a tool or the model is working right now."""
+
 ACTIVITY_MOODS: dict[str, Mood] = {
     "thinking": Mood.THINKING,
     "planning": Mood.THINKING,
@@ -194,17 +209,6 @@ REMARKS_MOMMY: dict[str, list[str]] = {
 }
 
 
-def face_width(text: str) -> int:
-    """Display cells, not codepoints.
-
-    Faces are full of characters where the two differ: a combining accent is
-    a codepoint occupying no cell, and a CJK dot occupies two. Getting this
-    wrong pads every face by the wrong amount and makes the bar jitter on
-    each frame.
-    """
-    return cell_len(text)
-
-
 @dataclass
 class Pet:
     """State, face and voice of the companion."""
@@ -225,30 +229,45 @@ class Pet:
 
     # -- appearance --------------------------------------------------------
 
-    def faces(self) -> dict[Mood, list[str]]:
-        """The frame set for this terminal.
+    def _frame_index(self) -> int:
+        frames = FRAMES[self.mood]
+        if not self.animate:
+            return 0
+        return (self._frame // max(1, self.pace)) % len(frames)
 
-        One cat, in two tiers: the drawn one, and the ASCII one for a font
-        that cannot be trusted with the rest. There used to be a third --
-        the kawaii voice got a different animal from the default voice --
-        so what the mascot *was* depended on a personality setting. Voice
-        changes what it says; it does not change the species.
+    def rows(self, advance: bool = True) -> list[str]:
+        """The mascot, as three rows of equal width.
+
+        ``advance`` steps the animation. ``pace`` divides the frame counter,
+        so a lower value animates faster; it follows the effort level,
+        because choosing ultra should visibly cost something and a companion
+        working visibly harder says that more cheaply than a number.
         """
-        return FACES if self.unicode else FACES_ASCII
-
-    def face(self, advance: bool = True) -> str:
-        """The current frame. ``advance`` steps the animation.
-
-        ``pace`` divides the frame counter, so a lower value animates faster.
-        It is driven by the effort level: choosing ultra should visibly cost
-        something, and a companion working visibly harder is a cheaper way to
-        show that than a number nobody reads.
-        """
-        frames = self.faces()[self.mood]
         if advance and self.animate:
             self._frame += 1
-        index = (self._frame // max(1, self.pace)) % len(frames) if self.animate else 0
-        return frames[index]
+        eyes, mouth = FRAMES[self.mood][self._frame_index()]
+        return [EARS, eyes, mouth]
+
+    def mark(self, advance: bool = False) -> str:
+        """The one-cell stand-in, for lines with no room for a character.
+
+        The status strip used to carry the whole mascot, which is how a
+        companion ends up competing with the answer above it. It carries
+        this instead: one cell whose colour says the mood.
+
+        While something is running the cell breathes, on the same frame
+        counter the drawing uses -- one clock, so nothing here can drift
+        against the header or run on after the turn. At rest, waiting, or
+        finished it holds still: motion means work in progress, and a mark
+        that pulses after the answer has landed says the opposite.
+        """
+        table = MARKS if self.unicode else MARKS_ASCII
+        if self.mood not in _BUSY or not self.animate:
+            return table[self.mood]
+        if advance:
+            self._frame += 1
+        frames = PULSE if self.unicode else PULSE_ASCII
+        return frames[(self._frame // max(1, self.pace)) % len(frames)]
 
     def set_pace(self, effort: str) -> None:
         """Faster animation the harder it is working."""
@@ -266,22 +285,6 @@ class Pet:
         from . import theme
 
         return theme.active().role(MOOD_ROLES[self.mood])
-
-    def width(self) -> int:
-        """Cells the mascot occupies. One number, for the whole session.
-
-        It used to be the widest frame *of the current mood*, which stops
-        the jitter inside a mood and not between them -- idle was seven
-        cells and running eight, so the whole status line stepped sideways
-        every time the agent picked up a tool. The frames are all one width
-        by construction now; this stays as the guarantee, so a frame added
-        later cannot quietly reintroduce the shift.
-        """
-        return BOX
-
-    def padded(self, advance: bool = True) -> str:
-        face = self.face(advance)
-        return face + " " * max(0, self.width() - face_width(face))
 
     # -- state -------------------------------------------------------------
 
@@ -325,7 +328,30 @@ class Pet:
         self._last_remark[event] = chosen
         return chosen
 
+    def block(self, right: list | None = None, advance: bool = False):
+        """The mascot with text set beside it, as a rich Text.
+
+        One helper, because the header, the greeting and the farewell all
+        want the same thing: the character on the left and a short stack of
+        lines to its right, aligned to a single baseline. ``right`` is one
+        entry per row; shorter lists leave the remaining rows blank.
+        """
+        rows = self.rows(advance=advance)
+        right = list(right or [])
+        right += [None] * (len(rows) - len(right))
+        out = Text()
+        for index, (art, beside) in enumerate(zip(rows, right)):
+            if index:
+                out.append("\n")
+            out.append("  ")
+            out.append(art, style=self.style())
+            if beside is not None:
+                out.append("   ")
+                out.append_text(beside if isinstance(beside, Text)
+                                else Text(str(beside)))
+        return out
+
     def greeting(self) -> str:
         if not self.enabled:
             return ""
-        return f"{self.face(advance=False)}  {self.name} — {self.remark('greet')}"
+        return f"{self.name} — {self.remark('greet')}"

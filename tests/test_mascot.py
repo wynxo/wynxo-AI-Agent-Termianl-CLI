@@ -1,25 +1,32 @@
 """One cat, one size, and glyphs a terminal can be trusted with.
 
-The mascot is an animation on the bottom row of a live display, which makes
-it the one place in the interface where a glyph's *measured* width has to
-match its *drawn* width. Everywhere else a bad guess costs a ragged margin;
-here it tears the status line on whichever frame the glyph appears in, and
-then repairs itself on the next, which reads as the terminal glitching.
+The cat is three rows of line art in the header, and the status strip
+carries a single mark whose colour is the mood. That split is what these
+pin: the drawing has to hold its block so the text beside it does not move
+between moods, and the mark has to measure exactly one cell so the strip --
+which is redrawn a dozen times a second on the bottom row of a live display
+-- cannot tear on whichever frame a glyph appears in.
 
-Three separate faults, all of which this pins shut:
+The drawing itself is ASCII, which is not a limitation but the point. The
+face before it was a kaomoji, and it collected exactly the faults a
+single-line Unicode face collects:
 
-  * Frames were padded to the widest frame of the *current mood*. Inside a
-    mood nothing moved; between moods idle (7 cells) to running (8) shifted
-    the whole line, and the ASCII set moved between 5 and 7.
+  * Frames were padded to the widest frame of the *current mood*, so idle
+    (7 cells) to running (8) shifted the whole line at every mood change.
 
   * The eyes were U+2022 BULLET, East Asian Width "Ambiguous" -- one cell in
-    a Western locale, two in a CJK one. So were the breve, the ≧≦ squint,
-    the ╥ tears and the ×; WORKING was built from combining accents.
+    a Western locale, two in a CJK one. So were the breve, the squint, the
+    tears and the multiplication sign; one mood was built from combining
+    accents.
 
   * The muzzle was U+FECC, an Arabic presentation form, whose bidi class is
     AL. A terminal implementing the bidirectional algorithm may reorder the
     neutrals either side of a strong RTL character -- which is to say, the
     eyes -- and the face comes apart.
+
+Line art has none of those questions to answer, so what is left to check is
+that the block holds and that the one remaining Unicode glyph, the status
+mark, is safe.
 """
 
 from __future__ import annotations
@@ -29,113 +36,106 @@ import unicodedata
 import pytest
 from rich.cells import cell_len
 
-from wynxo.pet import (ACTIVITY_MOODS, BOX, FACES, FACES_ASCII, MOOD_ROLES,
-                       Mood, Pet)
-
-TABLES = [(FACES, "unicode"), (FACES_ASCII, "ascii")]
+from wynxo.pet import (ACTIVITY_MOODS, EARS, FRAMES, HEIGHT, MARKS,
+                       MARKS_ASCII, MOOD_ROLES, Mood, Pet, WIDTH)
 
 
-def _every_frame():
-    for table, label in TABLES:
-        for mood, frames in table.items():
-            for index, frame in enumerate(frames):
-                yield label, mood, index, frame
+def _every_row():
+    for mood, frames in FRAMES.items():
+        for index, (eyes, mouth) in enumerate(frames):
+            yield mood, index, eyes
+            yield mood, index, mouth
 
 
-class TestTheBoxNeverChangesSize:
-    @pytest.mark.parametrize("table,label", TABLES)
-    def test_every_frame_is_the_same_width(self, table, label):
-        widths = {cell_len(f) for frames in table.values() for f in frames}
-        assert widths == {BOX}, f"{label}: {sorted(widths)}"
+class TestTheBlockNeverChangesSize:
+    def test_every_row_is_the_same_width(self):
+        widths = {cell_len(row) for _mood, _i, row in _every_row()}
+        assert widths == {WIDTH}, sorted(widths)
+        assert cell_len(EARS) == WIDTH
 
-    @pytest.mark.parametrize("table,label", TABLES)
-    def test_both_tiers_agree_on_the_box(self, table, label):
-        """A terminal that falls back to ASCII must not get a different
-        layout, only a different drawing."""
-        assert {cell_len(f) for frames in table.values() for f in frames} \
-            == {BOX}
-
-    def test_padded_is_the_box_in_every_mood(self):
+    def test_the_drawing_is_the_block_in_every_mood(self):
         for unicode_ok in (True, False):
             pet = Pet(unicode=unicode_ok)
             for mood in Mood:
                 pet.react(mood)
                 for _ in range(8):
-                    assert cell_len(pet.padded()) == BOX, mood.value
+                    rows = pet.rows()
+                    assert len(rows) == HEIGHT, mood.value
+                    assert {cell_len(r) for r in rows} == {WIDTH}, mood.value
 
-    def test_the_line_after_the_mascot_never_moves(self):
+    def test_the_text_beside_the_mascot_never_moves(self):
         """The failure this is really about: everything to the right of the
-        mascot sitting still while the mood changes."""
+        cat sitting still while the mood changes."""
         pet = Pet()
         starts = set()
         for mood in Mood:
             pet.react(mood)
-            starts.add(cell_len(pet.padded() + "  activity"))
+            starts |= {cell_len(row + "  wynxo") for row in pet.rows()}
         assert len(starts) == 1, starts
+
+    def test_the_status_mark_is_one_cell(self):
+        """The strip is width-exact. A two-cell mark tears it."""
+        for mood in Mood:
+            assert cell_len(MARKS[mood]) == 1, mood.value
+            assert cell_len(MARKS_ASCII[mood]) == 1, mood.value
 
 
 class TestEveryGlyphIsSafeInALineOfText:
-    @pytest.mark.parametrize("label,mood,index,frame", list(_every_frame()))
-    def test_no_ambiguous_width(self, label, mood, index, frame):
-        for ch in frame:
-            width = unicodedata.east_asian_width(ch)
-            assert width not in ("A", "W", "F"), (
-                f"{label}/{mood.value}[{index}] {ch!r} is width {width}: it "
-                "measures one cell here and draws two in a CJK locale")
+    @pytest.mark.parametrize("mood,index,row", list(_every_row()))
+    def test_the_drawing_is_ascii(self, mood, index, row):
+        """Which settles ambiguous width, combining marks and bidi at once:
+        no ASCII character is any of those things."""
+        row.encode("ascii")     # raises if not
 
-    @pytest.mark.parametrize("label,mood,index,frame", list(_every_frame()))
-    def test_no_combining_marks(self, label, mood, index, frame):
-        for ch in frame:
-            assert not unicodedata.combining(ch), (
-                f"{label}/{mood.value}[{index}] {ch!r} is a combining mark")
-
-    @pytest.mark.parametrize("label,mood,index,frame", list(_every_frame()))
-    def test_nothing_reverses_the_reading_direction(self, label, mood, index,
-                                                    frame):
-        for ch in frame:
-            bidi = unicodedata.bidirectional(ch)
-            assert bidi not in ("AL", "R", "AN"), (
-                f"{label}/{mood.value}[{index}] {ch!r} is bidi {bidi}: the "
-                "eyes either side of it may be reordered")
-
-    def test_the_ascii_tier_is_actually_ascii(self):
-        for frames in FACES_ASCII.values():
-            for frame in frames:
-                frame.encode("ascii")
+    @pytest.mark.parametrize("mood", list(Mood))
+    def test_the_status_mark_is_safe(self, mood):
+        mark = MARKS[mood]
+        for ch in mark:
+            assert unicodedata.east_asian_width(ch) not in ("A", "W", "F"), (
+                f"{mood.value}: {ch!r} measures one cell here and draws two "
+                "in a CJK locale")
+            assert not unicodedata.combining(ch), f"{mood.value}: {ch!r}"
+            assert unicodedata.bidirectional(ch) not in ("AL", "R", "AN"), (
+                f"{mood.value}: {ch!r} may reorder what sits beside it")
+        MARKS_ASCII[mood].encode("ascii")
 
 
 class TestItIsOneCharacter:
     def test_the_voice_does_not_change_the_species(self):
         pet = Pet()
-        base = pet.faces()
+        pet.react(Mood.IDLE)
+        base = pet.rows(advance=False)
         for voice in ("mommy", "kawaii", "plain", "mentor", "blunt", ""):
             pet.style_name = voice
-            assert pet.faces() is base, voice
+            assert pet.rows(advance=False) == base, voice
 
-    @pytest.mark.parametrize("table,label", TABLES)
-    def test_the_body_is_identical_in_every_frame(self, table, label):
-        """Ears, muzzle and body hold still; only the eyes and the one
-        accessory cell change. That is what makes a frame change read as an
-        expression rather than as a different animal."""
+    def test_the_body_is_identical_in_every_frame(self):
+        """Ears and outline hold still; only the middle three cells of each
+        row change. That is what makes a frame change read as an expression
+        rather than as a different animal: the parentheses that are the
+        cheeks and the > < that is the muzzle are in the same place in
+        every frame of every mood, so what moves is the face inside them.
+        """
         skeletons = set()
-        for frames in table.values():
-            for frame in frames:
-                face = frame[:-1] if label == "unicode" else frame[:-1]
-                # Blank the two eye positions, keep everything else.
-                chars = list(face)
-                for slot in (2, 4):
-                    chars[slot] = "_"
-                skeletons.add("".join(chars))
-        assert len(skeletons) == 1, f"{label}: {skeletons}"
+        for frames in FRAMES.values():
+            for eyes, mouth in frames:
+                blanked = []
+                for row in (eyes, mouth):
+                    chars = list(row)
+                    for slot in (2, 3, 4):
+                        chars[slot] = "_"
+                    blanked.append("".join(chars))
+                skeletons.add(tuple(blanked))
+        assert skeletons == {("( ___ )", " >___< ")}, skeletons
 
-    def test_every_mood_is_drawn_in_both_tiers(self):
+    def test_every_mood_is_drawn(self):
         for mood in Mood:
-            assert FACES[mood], mood.value
-            assert FACES_ASCII[mood], mood.value
+            assert FRAMES[mood], mood.value
+            assert MARKS[mood], mood.value
 
     def test_reading_and_testing_do_not_look_alike(self):
         """They are different things to be doing and used to share a face."""
-        assert set(FACES[Mood.READING]) & set(FACES[Mood.TESTING]) == set()
+        assert set(FRAMES[Mood.READING]) & set(FRAMES[Mood.TESTING]) == set()
 
 
 class TestTheColourComesFromTheTheme:
@@ -181,13 +181,13 @@ class TestTheColourComesFromTheTheme:
 class TestTheMoodAlwaysHasAFace:
     def test_every_mapped_activity_lands_somewhere_drawable(self):
         for activity, mood in ACTIVITY_MOODS.items():
-            assert FACES[mood], f"{activity} -> {mood.value}"
+            assert FRAMES[mood], f"{activity} -> {mood.value}"
 
     def test_an_unknown_activity_is_survivable(self):
         pet = Pet()
         pet.set_activity("something nobody has mapped")
         assert pet.mood is Mood.THINKING
-        assert cell_len(pet.padded()) == BOX
+        assert {cell_len(row) for row in pet.rows()} == {WIDTH}
 
 
 class TestTheCompanionDoesNotRepeatItself:

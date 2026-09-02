@@ -66,22 +66,33 @@ class TestInputBox:
         repl._border_plain = cli.Repl._border_plain.__get__(repl, type(repl))
         return repl
 
-    def test_the_top_edge_is_part_of_the_prompt(self, monkeypatch):
-        """The border belongs to prompt_toolkit's own render now.
+    def test_there_is_no_top_edge_to_strand(self, monkeypatch):
+        """The composer is one row, so nothing can drift away from it.
 
-        It used to be printed separately with console.print while
+        There was a top border, printed separately with console.print while
         prompt_toolkit drew the closing toolbar. prompt_toolkit reaches the
-        bottom row by emitting newlines, so the two drifted apart: the top
+        bottom row by emitting newlines, so the two drifted apart and the
         border was stranded halfway up the screen with a void of blank rows
-        between it and the rest of the box.
+        under it. Folding it into the prompt fixed that; deleting it is
+        better still, because a full width of ─ above the input was chrome
+        answering chrome -- the edge below already closes the region and
+        carries the status as well.
         """
         monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
         ui = ascii_ui()
         ui.width = 40
         message = self._repl(ui)._prompt_message().value
-        top = message.splitlines()[0]
-        assert "+" + "-" * 38 + "+" in top
-        assert top.isascii()
+        assert "\n" not in message
+        assert "-" not in message and "+" not in message
+        assert message.isascii()
+
+    def test_the_caret_is_the_one_the_transcript_uses(self, monkeypatch):
+        """What you type and what it becomes are the same shape. The
+        composer drew a bare ">" while the echoed line drew "❯"."""
+        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
+        ui = UI()
+        ui.g = Glyphs(True)
+        assert ui.g.caret in self._repl(ui)._prompt_message().value
 
     def test_the_box_is_never_drawn_into_the_transcript(self, monkeypatch):
         """Nothing prints a border any more, so no frame can be stranded."""
@@ -187,12 +198,17 @@ class TestInputBox:
         ui.width = 30
         assert "^C stop" not in repl._border_plain()
 
-    def test_unicode_terminals_still_get_the_rounded_box(self):
+    def test_the_bottom_edge_turns_one_corner_and_runs_out_flush(self):
+        """It closes the left edge coming down the input and then stops
+        being a box. With no top border there is nothing above the
+        right-hand end for a corner to meet, and a ╯ with nothing over it
+        is the half-drawn frame this design is trying not to be."""
         ui = UI()
         ui.g = Glyphs(True)
         ui.width = 60
         border = self._repl(ui)._border_plain()
-        assert border.startswith("╰") and border.endswith("╯")
+        assert border.startswith("╰")
+        assert border.endswith("─") and not border.endswith("╯")
 
 
 class TestPanelsAndRules:

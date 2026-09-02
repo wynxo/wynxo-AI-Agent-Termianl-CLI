@@ -2,7 +2,7 @@
 
 import pytest
 
-from wynxo.pet import FACES, FACES_ASCII, Mood, Pet
+from wynxo.pet import FRAMES, Mood, Pet
 from wynxo.prompts import VOICES, build_system_prompt
 from wynxo.repo import parse
 from wynxo.scope import Scope
@@ -155,18 +155,30 @@ class TestKawaii:
         changes what it says, not what it is."""
         pet = Pet()
         pet.react(Mood.HAPPY)
-        default = pet.face(advance=False)
+        default = pet.rows(advance=False)
         for voice in ("kawaii", "mommy", "plain", "mentor"):
             pet.style_name = voice
-            assert pet.face(advance=False) == default, voice
-        assert pet.faces() is FACES
+            assert pet.rows(advance=False) == default, voice
 
-    def test_ascii_terminals_still_get_ascii(self):
-        pet = Pet(unicode=False)
-        pet.style_name = "kawaii"
-        pet.react(Mood.HAPPY)
-        assert pet.faces() is FACES_ASCII
-        pet.face(advance=False).encode("ascii")
+    def test_ascii_terminals_get_the_same_cat(self):
+        """There is no second drawing to fall back to any more.
+
+        The cat is line art, so it renders on a terminal that has nothing
+        but ASCII -- which is why the parallel FACES_ASCII table could be
+        deleted rather than maintained. Only the one-cell status mark still
+        has a fallback, because that one really is a Unicode glyph.
+        """
+        plain, fancy = Pet(unicode=False), Pet(unicode=True)
+        plain.style_name = "kawaii"
+        for mood in FRAMES:
+            plain.react(mood)
+            fancy.react(mood)
+            assert plain.rows(advance=False) == fancy.rows(advance=False), mood
+            for row in plain.rows(advance=False):
+                row.encode("ascii")     # raises if not
+        # The one-cell status mark is the only thing that still has a
+        # fallback, because that one really is a Unicode glyph.
+        plain.mark().encode("ascii")
 
 
 class TestARepoNameIsNotAPath:

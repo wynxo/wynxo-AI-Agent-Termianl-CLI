@@ -27,7 +27,6 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from . import __version__
 from . import config as config_module
-from . import logo
 from . import stt_devices
 from .agent import Agent, Callbacks, Interrupted
 from .events import ToolEvent
@@ -54,8 +53,37 @@ from .tools import build_registry
 from .tools.appcatalog import ApplicationCatalog
 from rich.text import Text
 
-from .ui import (ACCENT, BAD, BAR_ACCENT, FAINT, GOOD, MUTED, ActivityBar,
-                 CodeStreamer, ThoughtStreamer, UI, _ansi_of, effort_meter)
+from .ui import (ACCENT, BAR_ACCENT, FAINT, MUTED, ActivityBar,
+                 CodeStreamer, ThoughtStreamer, UI, _ansi_of, effort_meter,
+                 plan_steps, sanitise)
+
+def _trim_echo(detail: str, tool: str, target: str) -> str:
+    """``detail`` with the words the head line already said taken out.
+
+    The block's head is "read_file  calc.py" and the tool's own summary of
+    what it did is "read calc.py (5 lines)", so the pair spent two lines to
+    say "read" twice, "calc.py" twice, and "5 lines" once -- and the one new
+    fact was the part in brackets. Only the leading verb is considered, and
+    only when the tool's name is built from it: "read" leads "read_file", so
+    it goes; "updated" does not lead "write_file", so it stays, because
+    "updated" is news about what happened to the file.
+
+    Never empties the line. If everything in it was an echo there is nothing
+    to report and the caller drops the row rather than printing a bracket.
+    """
+    out = detail.strip()
+    head = out.split(" ", 1)[0].strip(":").lower()
+    stem = (tool or "").split("_", 1)[0].lower()
+    if head and stem and (head == stem or head.startswith(stem)
+                          or stem.startswith(head)):
+        out = out[len(out.split(" ", 1)[0]):].lstrip()
+    if target and target in out:
+        out = out.replace(target, "", 1)
+    out = " ".join(out.split()).strip(" ·-,")
+    if out.startswith("(") and out.endswith(")"):
+        out = out[1:-1].strip()
+    return out
+
 
 # What the activity bar says while each tool runs.
 _ACTIVITY = {
@@ -205,7 +233,6 @@ COMMANDS = {
     "/dictate": "record one spoken message onto the prompt (Ctrl-R)",
     "/theme": "colour palette: purple | sakura | midnight | ember | plain | minimal",
     "/secrets": "credential protection: on | off | allow <path>",
-    "/logo": "the start-up logo: pick one, or off",
     "/speak": "read answers out loud: on | off | test | engine <name>",
     "/talker": "small model that does the talking: <model> | off",
     "/log": "where this session is being recorded",
@@ -386,6 +413,12 @@ class TerminalCallbacks(Callbacks):
         self._tool_started = 0.0
         """When the running tool began, for deciding whether anybody is
         waiting on its output."""
+        self._pending_call: tuple[str, str] | None = None
+        self._plan_shape: tuple[str, ...] = ()
+        """The steps of the last plan committed to the transcript, so a
+        todo_write that only ticks one off does not reprint the list."""
+        """The call the live region is currently narrating. Held so the block
+        printed when it finishes can name what it acted on."""
         self._held_output: list[str] = []
         """Lines from a command too young to be worth showing yet."""
         """Ctrl-T: show full tool output instead of a one-line summary."""
@@ -733,11 +766,12 @@ class TerminalCallbacks(Callbacks):
             pet.set_activity(_ACTIVITY.get(name, name))
         if self.bar is not None:
             self.bar.update(activity=_ACTIVITY.get(name, name), detail=summary)
-            if event is not None:
-                self.bar.record_tool_event(event)
-            if name == "todo_write":
-                return       # the pinned plan is the announcement
-        self.ui.tool_start(name, summary)
+        # Nothing is committed here. What is in flight is the live region's
+        # job -- it says "reading calc.py" for as long as that is true -- and
+        # the conversation gets one block when the call finishes. Printing
+        # both is how the tool name, the file name and the outcome all ended
+        # up on screen twice per call.
+        self._pending_call = (name, summary)
 
     async def on_tool_result(self, name: str, ok: bool, display: str, output: str, event: ToolEvent | None = None) -> None:
         async with self._status_lock:
@@ -767,10 +801,25 @@ class TerminalCallbacks(Callbacks):
         self._end_stream()
         if self.journal is not None:
             self.journal.tool_result(name, ok, output)
-        # The pinned plan already shows every step and its state, so a result
-        # line per todo_write is the same information a second time -- and it
-        # scrolls, which is exactly what pinning the panel was meant to stop.
-        if name == "todo_write" and ok and self.bar is not None:
+        # The plan is a structure, not a sentence: it gets the plan block
+        # rather than a tool line. The pinned copy in the live region is a
+        # layer and disappears with the turn, so suppressing this entirely
+        # -- which is what happened while the bar was up -- left the record
+        # with no plan in it at all. Scrolling back past a finished session
+        # showed "plan the work" answered by nothing.
+        #
+        # Only when the steps themselves changed. A todo_write that moves
+        # one step from doing to done is the live region's news, and
+        # reprinting four lines for it is how the plan ended up on screen
+        # once per tool call.
+        if name == "todo_write" and ok:
+            steps = plan_steps(sanitise(display or output))
+            shape = tuple(text for _state, text in steps)
+            if steps and shape != self._plan_shape:
+                self._plan_shape = shape
+                self.ui.console.gap()
+                self.ui.todos(sanitise(display or output))
+                self.ui.console.print()
             return
         # Whatever was held back because the command looked too quick to be
         # worth watching. It worked out is the only reason holding it was
@@ -780,21 +829,12 @@ class TerminalCallbacks(Callbacks):
             for held in self._held_output:
                 self.ui.tool_output(held)
         self._held_output.clear()
-        if self.verbose_tools and output.strip():
-            # The marker line first, then the whole output under it. It used
-            # to be asked for with empty arguments, and tool_result returns
-            # early on empty text -- so verbose mode printed the output and
-            # no tick or cross at all, and whether the tool had succeeded was
-            # something you had to work out from the text.
-            self.ui.tool_result(name, ok, display, output)
-            # And only when the block says more than the marker already did.
-            # A one-line result printed as a line and then again as a
-            # syntax-highlighted block is the same sentence twice, which is
-            # not what asking for detail meant.
-            if len(output.strip().splitlines()) > 1:
-                self.ui.code(output[:4000], _LANGUAGE.get(name, "text"))
-        else:
-            self.ui.tool_result(name, ok, display, output)
+        target, detail = self._call_summary(name, ok, display, output)
+        self.ui.tool_call(name, target, detail, ok=ok)
+        # Ctrl-T: the whole output under the block, when it says more than
+        # the block's one dim line already did.
+        if self.verbose_tools and len(output.strip().splitlines()) > 1:
+            self.ui.code(output[:4000], _LANGUAGE.get(name, "text"))
 
     async def on_code(self, text: str) -> None:
         if not text:
@@ -832,6 +872,32 @@ class TerminalCallbacks(Callbacks):
                                        style=MUTED, code=False, literal=True)
         self._coder.feed(text)
 
+    def _call_summary(self, name: str, ok: bool, display: str,
+                      output: str) -> tuple[str, str]:
+        """(what it acted on, what came of it) for one finished tool call.
+
+        The target comes from the call the agent made rather than from the
+        result text, so the block reads the same whether the tool succeeded
+        or not -- an error changes the mark and the colour, not the shape.
+        """
+        pending = getattr(self, "_pending_call", None)
+        target = pending[1] if pending and pending[0] == name else ""
+        self._pending_call = None
+        body = sanitise(display or output).strip()
+        if not body:
+            return target, ""
+        first = body.splitlines()[0]
+        if not ok:
+            # "ERROR: nope.py does not exist." beside a cross that already
+            # says so. The mark carries the fact; the line carries the
+            # reason.
+            first = first.split("ERROR:", 1)[-1].strip() or first
+        rest = len(body.splitlines()) - 1
+        if not target:
+            return first[:80], f"+{rest} more lines" if rest else ""
+        return target, (_trim_echo(first, name, target)[:110]
+                        + (f"  (+{rest} lines)" if rest else ""))
+
     def _commit_card(self) -> None:
         """Put the finished edit into the transcript.
 
@@ -839,17 +905,31 @@ class TerminalCallbacks(Callbacks):
         which is a layer rather than a record -- the conversation on screen
         is append-only, so anything written into it while streaming could
         never be taken back.
+
+        The same block every other tool gets. An edit used to print its own
+        shape -- "✓ write_file · demo.py · +0 -0" -- beside blocks that read
+        "◈ read_file  calc.py", so which of the two a call rendered as came
+        down to whether the tool happened to write a file. And "+0 -0" is
+        not a fact about the edit: it is what the counter says when the
+        provider wrote the file atomically and there was nothing to count.
+        Counts are shown when there are counts.
         """
         card = self.card
         if card is None:
             return
-        # Out of the live region first: the summary about to be printed is
+        # Out of the live region first: the block about to be printed is
         # the committed record of this edit, and a card still drawn above it
         # would be the same edit twice, one of them saying "streaming".
         if self.bar is not None:
             self.bar.card = None
-        self.ui.console.print(Text(f"  {card.summary(self.ui.g)}",
-                                   style=GOOD if card.state == "done" else BAD))
+        ok = card.state == "done"
+        if not ok:
+            detail = (card.error.splitlines()[0][:110] if card.error
+                      else "failed")
+        else:
+            added, removed = card.counts()
+            detail = f"+{added} -{removed}" if (added or removed) else ""
+        self.ui.tool_call(card.tool, card.path or "", detail, ok=ok)
         if self.detail_diffs:
             for line in card.render(self.ui.g, self.ui.width - 4,
                                     expanded=True):
@@ -1299,24 +1379,15 @@ class Repl:
                 status.line(state, message, detail)
         status.close()
 
-        if self.config.logo and self.config.logo != "off":
-            await logo.play(self.ui, self.config.logo, self.config.animations)
-        else:
-            await self.ui.wake(self.pet, self.pet.name)
+        await self.ui.wake(self.pet, self.pet.name)
         self.ui.banner(
             self.config.model,
             f"{self.client.base_url} (ollama {version})",
             self.policy.name,
             str(self.workspace),
+            pet=self.pet,
+            greeting=self.pet.remark("greet") if self.pet.enabled else "",
         )
-        if self.pet.enabled and (greeting := self.pet.remark("greet")):
-            line = Text("  ")
-            line.append(self.pet.face(advance=False),
-                        style=f"bold {self.pet.style()}")
-            line.append("  ")
-            line.append(f"{self.pet.name} {self.ui.g.dot} {greeting}", style=MUTED)
-            self.ui.console.print(line)
-            self.ui.console.print()
         return True
 
     async def _offer_endpoint_discovery(self) -> str | None:
@@ -1393,9 +1464,16 @@ class Repl:
             # "bye" when it is disabled.
             farewell = self.pet.remark("bye")
             if farewell:
-                self.ui.console.print(f"  {self.pet.name} — {farewell}")
+                line = Text("  ")
+                line.append(self.pet.name, style=f"bold {ACCENT}")
+                line.append(f" — {farewell}", style=MUTED)
             else:
-                self.ui.console.print(f"  [{MUTED}]bye[/]")
+                line = Text("  bye", style=MUTED)
+            # One row. The remarks run to forty characters and the name is
+            # in front of them, so at a narrow width the tail wrapped to
+            # column zero -- the last line of the session, and the only one
+            # that broke the margin.
+            self.ui.console.print(line, overflow="ellipsis", no_wrap=True)
 
 
     async def _prompt_loop(self) -> int:
@@ -1414,6 +1492,9 @@ class Repl:
                 text = await self.prompt_session.prompt_async(
                     self._prompt_message, bottom_toolbar=self._bottom_toolbar,
                     default=draft)
+                # The composer wrote straight to the tty and erased itself,
+                # leaving one newline behind that the console did not see.
+                self.ui.console.wrote_elsewhere(1)
             except KeyboardInterrupt:
                 # prompt_toolkit throws away the line and raises. One press
                 # is "forget what I typed" and always was; a second within
@@ -1663,14 +1744,7 @@ class Repl:
         if not result.interrupted:
             report = self.agent.task_state.completion_report()
             if report:
-                # At the same margin as everything else in the conversation.
-                # It was the last block still starting hard against column
-                # zero, which reads as output that escaped the transcript
-                # rather than as the turn's own summing-up.
-                self.ui.console.print()
-                self.ui.console.print(
-                    Text("\n".join(f"  {line}" for line in
-                                    report.splitlines()), style="dim"))
+                self.ui.outcome(report)
 
         # No stats line here: the pinned bar under the input already shows
         # tokens, rate and context, and printing them again above the next
@@ -1822,37 +1896,36 @@ class Repl:
             return
         self.ui.console.print()
         self.ui.console.print(
-            Text("  " + self.pet.face(advance=False) + "  ",
+            Text(f"  {self.pet.mark()}  ",
                  style=f"bold {self.pet.style()}") + Text(line, style=ACCENT))
         await self.speaker.say_async(line)
 
     def _prompt_message(self) -> HTML:
-        """The composer's top edge and its caret, as one prompt_toolkit
-        message.
+        """The composer's left edge and its caret.
 
-        The top border used to be printed separately with console.print while
-        prompt_toolkit drew the closing toolbar, and the two could not stay
-        together. prompt_toolkit seats its toolbar on the last row by
-        *emitting newlines* until it gets there -- so whatever gap the manual
-        cursor arithmetic left behind became a void of blank rows between the
-        top border and the rest of the box, with the border stranded halfway
-        up the screen. Making the border part of the message puts the whole
-        box inside prompt_toolkit's own render, so it is seated as one piece
-        and there is no gap to leave.
+        No top border. It was a full width of ─ drawn above every prompt,
+        carrying nothing: the edge below already closes the region and has
+        the status set into it, so the line above was chrome answering
+        chrome. What is left is an L -- the left edge down the input, the
+        bottom edge under it -- which brackets the composer without boxing
+        it, and costs one row less of the screen per prompt.
 
-        Re-evaluated on every redraw, so a mid-prompt Ctrl-E shows up at once.
+        The caret is the transcript's caret. It was a bare ">" here while
+        the echoed line used "❯", so the line you typed and the line it
+        became were different shapes, and the composer's own docstring
+        claimed they matched.
+
+        Re-evaluated on every redraw, so a mid-prompt Ctrl-E shows up at
+        once.
         """
-        if is_dumb_terminal():
-            return HTML('<b>&gt;</b> ')
         g = self.ui.g
-        width = max(24, self.ui.width)
-        top = escape(g.tl + g.hbar * (width - 2) + g.tr)
+        if is_dumb_terminal():
+            return HTML("<b>%s</b> " % escape(g.caret))
         return HTML(
-            '<style fg="%s">%s</style>\n'
-            '<style fg="%s">%s</style> <b><style fg="%s">&gt;</style></b> '
-            % (ACCENT, top, ACCENT, escape(g.vbar), ACCENT))
+            '<style fg="%s">%s</style> <b><style fg="%s">%s</style></b> '
+            % (ACCENT, escape(g.vbar), ACCENT, escape(g.caret)))
 
-    def _echo_prompt(self, text: str) -> None:
+    def _echo_prompt(self, text: str, note: str = "") -> None:
         """Put what was asked into the transcript, compactly.
 
         The composer erases itself when it closes, which is what keeps a
@@ -1863,12 +1936,21 @@ class Repl:
         if is_dumb_terminal():
             return
         body = Text()
-        body.append("  > ", style=f"bold {ACCENT}")
+        # The same caret the composer draws, so the line you typed and the
+        # line it becomes are the same shape. It used to be a bare ">",
+        # which is the least distinctive glyph a prompt can have -- and the
+        # queue drain drew its own line with "›", so one concept had two
+        # carets and two renderers.
+        body.append(f"  {self.ui.g.caret} ", style=f"bold {ACCENT}")
         first, *rest = text.splitlines() or [""]
         body.append(first, style="bold")
         for line in rest:
             body.append("\n    " + line, style="bold")
-        self.ui.console.print(body)
+        if note:
+            body.append(f"   {note}", style=FAINT)
+        self.ui.console.boundary()
+        self.ui.console.print(body, overflow="ellipsis", no_wrap=True)
+        self.ui.console.print()
 
     def _bottom_toolbar(self):
         """The closing edge of the input box, with the status set into it.
@@ -1920,7 +2002,11 @@ class Repl:
             f"{frame}" + g.hbar * fill
         if hint:
             line += f"{reset} {hint_style}{hint}{reset} {frame}{g.hbar}"
-        line += f"{g.br}{reset}"
+        # Runs out flush rather than turning a corner. With no top edge
+        # there is nothing above the right-hand end for a corner to meet,
+        # and a ╯ with nothing over it is the half-drawn box this design
+        # is trying not to be.
+        line += f"{g.hbar}{reset}"
         return ANSI(line)
 
     def _border_plain(self) -> str:
@@ -1953,7 +2039,7 @@ class Repl:
         if waiting := len(self.pending):
             pieces.append(f"\u203a {waiting} queued")
         if self.pet.enabled:
-            pieces.append(f"{self.pet.face()} {self.pet.name}")
+            pieces.append(f"{self.pet.mark()} {self.pet.name}")
         pieces += [self.config.model,
                    f"{effort_meter(self.policy.name, self.ui.g.unicode)} "
                    f"{self.policy.name}",
@@ -1983,9 +2069,7 @@ class Repl:
         runs or is dropped.
         """
         while (queued := self.pending.take()) is not None:
-            self.ui.console.print()
-            self.ui.console.print(
-                Text("  \u203a ", style=f"bold {ACCENT}") + Text(queued))
+            self._echo_prompt(queued, note="queued")
             if queued.startswith("/"):
                 if await self.command(queued) is False:
                     return False
@@ -2299,9 +2383,6 @@ class Repl:
 
         if name == "/secrets":
             return await self.cmd_secrets(args)
-
-        if name == "/logo":
-            return await self.cmd_logo(args)
 
         if name == "/speak":
             return await self.cmd_speak(args)
@@ -4040,37 +4121,6 @@ class Repl:
                          "/effort high or above turns reasoning on.")
         return True
 
-    async def cmd_logo(self, args: list[str]) -> bool:
-        """Choose the start-up logo, and show it straight away.
-
-        Shown on choosing rather than described: the whole point of a logo
-        is what it looks like, and "logo: wordmark" tells you nothing.
-        """
-        names = logo.available()
-        want = args[0].lower() if args else ""
-        if want not in names and want != "off":
-            chosen = await self._pick(
-                "logo",
-                [(n, "the start-up picture" if n != "off" else "")
-                 for n in names] + [("off", "no logo at all")],
-                self.config.logo,
-            )
-            if chosen is NO_PICKER:
-                self.ui.info(f"logo: {self.config.logo}  {self.ui.g.dot}  "
-                             f"/logo {' | '.join(names)} | off")
-                return True
-            if chosen is None:
-                return True
-            want = chosen
-
-        self.config.logo = want
-        self.config.save()
-        if want == "off":
-            self.ui.success("no logo at start-up")
-            return True
-        await logo.play(self.ui, want, self.config.animations)
-        return True
-
     async def cmd_secrets(self, args: list[str]) -> bool:
         shield = self.agent.shield
 
@@ -4183,19 +4233,42 @@ class Repl:
                      f"/log list  {dot}  /log off")
         return True
 
+    MOOD_COLUMNS = 4
+    """Expressions shown side by side. The mascot is three rows tall, so a
+    row per mood would be thirty-six lines to show twelve faces."""
+
+    def _show_moods(self) -> None:
+        """Every expression, in columns, so the set reads as one character
+        in different moods rather than as a list of drawings."""
+        from .pet import FRAMES, EARS, WIDTH
+
+        moods = list(Mood)
+        gap = "   "
+        for start in range(0, len(moods), self.MOOD_COLUMNS):
+            group = moods[start:start + self.MOOD_COLUMNS]
+            for row in range(3):
+                line = Text("  ")
+                for mood in group:
+                    eyes, mouth = FRAMES[mood][0]
+                    self.pet.react(mood)
+                    line.append((EARS, eyes, mouth)[row],
+                                style=f"bold {self.pet.style()}")
+                    line.append(gap)
+                self.ui.console.print(line)
+            labels = Text("  ")
+            for mood in group:
+                labels.append(f"{mood.value:<{WIDTH}}", style=MUTED)
+                labels.append(gap)
+            self.ui.console.print(labels)
+            self.ui.console.print()
+
     async def cmd_pet(self, args: list[str]) -> bool:
         from .prompts import VOICES
 
         if not args:
             self.ui.console.print()
-            for mood in Mood:
-                self.pet.react(mood)
-                self.pet._frame = 0
-                frames = "  ".join(self.pet.face() for _ in range(0, 12, 3))
-                self.ui.console.print(
-                    f"    [{self.pet.style()}]{frames}[/]  [{MUTED}]{mood.value}[/]")
+            self._show_moods()
             self.pet.rest()
-            self.ui.console.print()
             # The moods are worth seeing, so they stay. What used to follow
             # them was a line of usage text -- it told you what you could
             # type and left you to type it. The picker acts instead.
@@ -4265,7 +4338,7 @@ class Repl:
             self.pet.name = " ".join(args[1:])[:24]
             self.config.pet_name = self.pet.name
             self.config.save()
-            self.ui.success(f"{self.pet.face(advance=False)}  hello, {self.pet.name}")
+            self.ui.success(f"{self.pet.mark()}  hello, {self.pet.name}")
             return True
 
         if action == "voice":

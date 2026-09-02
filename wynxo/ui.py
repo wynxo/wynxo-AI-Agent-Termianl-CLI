@@ -17,7 +17,7 @@ from typing import Iterable
 
 from rich.box import ASCII as ASCII_BOX, ROUNDED
 from rich.cells import cell_len
-from rich.console import Console, Group
+from rich.console import Console, Control, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.padding import Padding
@@ -139,6 +139,11 @@ def apply_palette(palette: Palette) -> None:
 
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+_ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+"""Colour and hyperlink sequences. Stripped before measuring how a line
+ends, since a reset code after the last newline is not a character on
+screen but does stop the text from ending in one."""
 """C0, DEL, and C1.
 
 The C1 range (U+0080-U+009F) is the single-character form of the same
@@ -246,8 +251,114 @@ class SafeConsole(Console):
     covered without knowing this exists.
     """
 
+    _tail = "\n\n"
+    """The last two visible characters written, so ``gap()`` can tell
+    whether the transcript already ends on a blank line.
+
+    Read from what rich actually rendered rather than from what the caller
+    passed. Guessing from the arguments got Markdown wrong every time: rich
+    ends a rendered paragraph with its own blank line, so print(Markdown)
+    left the screen blank while the argument was plainly not "" -- and the
+    answer to every question was followed by two blank lines, or three when
+    the turn had also printed its own separator.
+
+    Spacing used to be decided by each caller: the prose block printed a
+    blank before and after itself, the prompt echo did the same, and the
+    completion report added one more. Every one of them was right on its
+    own and wrong together -- an answer followed by a new question put
+    three blank lines on screen, while two tool blocks in a row got none,
+    so the transcript's rhythm depended on which blocks happened to be
+    adjacent. ``gap()`` asks for a separation rather than for a newline,
+    and one place decides what that costs."""
+
+    _transient = False
+    """Set while a repaint that leaves nothing behind is being written."""
+
+
+    def print(self, *args, **kwargs):
+        # A blank line is a request for separation, not for a newline, and
+        # asking twice does not buy more of it. Thirty-four call sites each
+        # decided their own spacing -- the prose block put one after itself,
+        # the turn put one after the answer, the prompt echo put one before
+        # the question -- and each was right alone and wrong together, so
+        # the gap above a question was one, two or three lines depending on
+        # what the turn before it had happened to print. Deciding it here
+        # is the only way it can be decided once.
+        # Only a caller's own blank line. rich writes NewLine() when a Live
+        # tears down, and that one is load-bearing: it is what pushes the
+        # region below the transcript before the erase runs. Dropped, the
+        # status strip is left committed in the scrollback.
+        if (not args or (len(args) == 1 and args[0] == "")) \
+                and self._blank_rows() >= 1:
+            return None
+        # A Live repaint reaches the console as print(Control(...)): cursor
+        # moves and erases, not transcript. Whatever it draws is taken back
+        # before the next committed line, so it must not count as content --
+        # a prompt that landed while the bar was up got a second blank line
+        # from gap() separating it from a repaint that is no longer there.
+        transient = bool(args) and all(isinstance(a, Control) for a in args)
+        was, self._transient = self._transient, transient
+        try:
+            return super().print(*args, **kwargs)
+        finally:
+            self._transient = was
+
+    def _blank_rows(self) -> int:
+        """How many empty rows the transcript currently ends with."""
+        trailing = len(self._tail) - len(self._tail.rstrip("\n"))
+        return max(0, trailing - 1)
+
+    def gap(self) -> None:
+        """One empty row between two blocks. Never doubles.
+
+        The same thing ``print()`` with no arguments does; named, for call
+        sites where asking for a separation reads better than asking for a
+        blank line.
+        """
+        self.print()
+
+    def boundary(self) -> None:
+        """Two empty rows: the seam between one exchange and the next.
+
+        The transcript has exactly two levels of separation -- one row
+        between the blocks inside a turn, two between turns -- and that is
+        the whole vertical language. Asking for the seam rather than for
+        newlines is what lets the two paths that open a turn (a typed line
+        and one drained from the queue) end up looking the same, when the
+        terminal has left a different number of rows behind each.
+        """
+        for _ in range(2 - self._blank_rows()):
+            super().print()
+            self._tail = (self._tail + "\n")[-8:]
+
+    def wrote_elsewhere(self, newlines: int) -> None:
+        """Something that is not this console wrote ``newlines`` newlines.
+
+        Two things do. rich's Live writes one when it tears down, and
+        prompt_toolkit draws the composer straight to the tty and erases it
+        again when the line is accepted, leaving one more. Neither passes
+        through ``print()``, so without this the console's idea of where
+        the transcript ends runs two rows behind the screen -- which is why
+        the space above a question was three rows after a typed line and
+        one after a queued one, for the same seam.
+        """
+        self._tail = (self._tail + "\n" * max(0, newlines))[-8:]
+
+    _TRAILING_SPACE = re.compile(r"[ \t]+(?=\n)")
+
     def _render_buffer(self, buffer) -> str:
-        return super()._render_buffer(_scrubbed(buffer))
+        text = super()._render_buffer(_scrubbed(buffer))
+        if text and not self._transient:
+            visible = _ANSI_SGR.sub("", text)
+            if visible:
+                # Padded to the console width, a "blank" line rich emits is
+                # a run of spaces and a newline, so a tail kept verbatim
+                # ended " \n" and never looked blank. Enough of it is kept
+                # that the padding of a line split across two writes still
+                # collapses.
+                self._tail = self._TRAILING_SPACE.sub(
+                    "", self._tail + visible)[-8:]
+        return text
 
 
 def _scrubbed(buffer):
@@ -264,6 +375,13 @@ def _scrubbed(buffer):
             yield segment._replace(text=_CONTROL.sub("", segment.text))
         else:
             yield segment
+
+
+def pet_width(pet) -> int:
+    """Cells the mascot occupies, or zero when it is switched off."""
+    from .pet import WIDTH
+
+    return WIDTH if getattr(pet, "enabled", False) else 0
 
 
 def _supports_unicode() -> bool:
@@ -315,8 +433,9 @@ class Glyphs:
             # U+25CB): those two are East Asian Width "Ambiguous" and draw
             # two cells in a CJK locale, which breaks a list that is redrawn
             # in place.
-            self.step_done, self.step_now, self.step_todo = "✓", "◉", "◦"
+            self.step_done, self.step_now, self.step_todo = "✓", "●", "○"
             self.spark = "✦"
+            self.tool = "◈"
             # Rounded box corners, for the input field the prompt sits in.
             self.tl, self.tr, self.bl, self.br = "╭", "╮", "╰", "╯"
             self.hbar, self.vbar, self.ellipsis = "─", "│", "…"
@@ -326,6 +445,7 @@ class Glyphs:
             self.caret = ">"
             self.step_done, self.step_now, self.step_todo = "+", ">", "-"
             self.spark = "*"
+            self.tool = "*"
             self.tl, self.tr, self.bl, self.br = "+", "+", "+", "+"
             self.hbar, self.vbar, self.ellipsis = "-", "|", "..."
 
@@ -409,53 +529,63 @@ class UI:
 
     # -- chrome ------------------------------------------------------------
 
-    def banner(self, model: str, endpoint: str, effort: str, workspace: str) -> None:
-        """The identity block: a name, then the session it belongs to.
+    def banner(self, model: str, endpoint: str, effort: str, workspace: str,
+               pet=None, greeting: str = "") -> None:
+        """The identity block: the mascot, the name, the session, a hello.
 
-        Two lines rather than one, because five facts joined by dots is a
-        dashboard row and not a header -- there is nothing in it to read
-        first. The name and the model carry the weight; the effort level,
-        the project and the server are the settings underneath, in muted
-        text, and they are the ones that give way on a narrow terminal.
+        Three rows, and the whole start-up. It replaces five rows of block
+        art, two rows of dotted metadata, a full-width rule and a separate
+        greeting line -- nine rows of chrome before the first prompt, whose
+        largest element degraded into unreadable mush at forty columns.
 
-        Still assembled by priority rather than truncated: the server
-        address goes before the project path does, because the path is the
-        one you actually need to see.
+        The character carries the identity; the name is the only bold thing;
+        the session facts sit under it in muted text and give way from the
+        least useful end. No rule: the blank line after it is the divider,
+        and a solid eighty-cell bar is a heavier one than this needs.
         """
         server = endpoint.split(" (")[0].replace("http://", "").replace("https://", "")
-        parts = [f"{effort_meter(effort, self.g.unicode)} {effort}",
-                 self.shorten_path(workspace), server]
+        facts = [model, effort, self.shorten_path(workspace), server]
 
         separator = f"  {self.g.dot}  "
-        indent = "    "
-        budget = self.width - 1
+        # The mascot's own width plus its margins, so the text beside it is
+        # measured against what is actually left.
+        gutter = 2 + (pet_width(pet) if pet is not None else 0) + 3
+        budget = max(12, self.width - gutter - 1)
 
-        def room(candidate: list[str]) -> int:
-            return cell_len(indent) + sum(
-                cell_len(separator) + cell_len(p) for p in candidate) \
-                - cell_len(separator)
+        def room(parts: list[str]) -> int:
+            return sum(cell_len(p) for p in parts) \
+                + cell_len(separator) * max(0, len(parts) - 1)
 
-        shown = list(parts)
-        while shown and room(shown) > budget:
+        shown = list(facts)
+        while len(shown) > 1 and room(shown) > budget:
             shown.pop()
 
-        name = Text("  ")
-        name.append(f"{self.g.spark} wynxo", style=f"bold {ACCENT}")
-        if model:
-            name.append(separator, style=MUTED)
-            name.append(model, style="bold")
-
-        details = Text(indent, style=MUTED)
+        detail = Text()
         for index, part in enumerate(shown):
             if index:
-                details.append(separator, style=FAINT)
-            details.append(part, style=MUTED)
+                detail.append(separator, style=FAINT)
+            detail.append(part, style="" if index == 0 else MUTED)
+
+        beside = [Text("wynxo", style=f"bold {ACCENT}"), detail]
+        if greeting:
+            # Trimmed to the same budget the facts get, rather than left for
+            # rich to cut at the console edge: at forty columns a long
+            # remark ran to the last cell, so the block had a two-cell
+            # margin down its left and none at all on the right.
+            hello = Text(greeting, style=FAINT)
+            hello.truncate(budget, overflow="ellipsis")
+            beside.append(hello)
 
         self.console.print()
-        self.console.print(name, overflow="ellipsis", no_wrap=True)
-        if shown:
-            self.console.print(details, overflow="ellipsis", no_wrap=True)
-        self.console.print(Rule(style=FAINT, characters=self.g.hbar))
+        if pet is not None and pet.enabled:
+            self.console.print(pet.block(beside), overflow="ellipsis",
+                               no_wrap=True)
+        else:
+            for line in beside:
+                row = Text("  ")
+                row.append_text(line)
+                self.console.print(row, overflow="ellipsis", no_wrap=True)
+        self.console.print()
 
     def clear(self) -> None:
         """Clear the screen and scrollback, so a session starts on a clean page.
@@ -490,9 +620,7 @@ class UI:
         start-up coroutine, so a ``time.sleep`` here stopped the event loop
         for the length of the animation -- harmless in practice, since
         nothing else is pending four tenths of a second into a session, and
-        exactly the habit that is not harmless anywhere else. The logo
-        beside it has always awaited; these two are the same kind of thing
-        and should not be written two different ways.
+        exactly the habit that is not harmless anywhere else.
         """
         if not (pet and pet.enabled and pet.animate and self.console.is_terminal):
             return
@@ -502,8 +630,7 @@ class UI:
             # carriage returns into the output as literal "?25l" and "^M".
             # One still frame instead.
             self.console.print()
-            self.console.print(f"  {pet.padded()}  {pet.name} is awake",
-                               style=pet.style())
+            self.console.print(pet.block(), style=pet.style())
             return
         from .pet import Mood
 
@@ -513,10 +640,7 @@ class UI:
                   transient=True) as live:
             for mood, pause in sequence:
                 pet.react(mood)
-                line = Text("  ")
-                line.append(pet.face(advance=False), style=f"bold {pet.style()}")
-                line.append(f"  {name}", style=MUTED)
-                live.update(line)
+                live.update(pet.block([None, Text(name, style=MUTED)]))
                 if pause:
                     await asyncio.sleep(pause)
         pet.rest()
@@ -552,6 +676,26 @@ class UI:
         self.console.print(Rule(label, style=MUTED, characters=self.g.hbar))
 
     # -- messages ----------------------------------------------------------
+
+    def detail_line(self, text: str, style: str, indent: int = 6) -> None:
+        """A secondary line under a block, wrapped inside its own column.
+
+        rich wraps at the console edge and resumes at column zero, so at 40
+        columns "◈ tests  syntax check passed (compileall)" put
+        "(compileall)" hard against the left margin -- the one place in the
+        transcript nothing else ever sits. Every line printed here belongs
+        to the block above it and has to keep saying so on the second row.
+        """
+        pad = " " * indent
+        room = max(8, self.width - indent - 1)
+        out = Text()
+        for i, line in enumerate(sanitise(text).split("\n")):
+            for piece in wrap_cells(line, room) or [""]:
+                if i or out.plain:
+                    out.append("\n")
+                out.append(pad + piece, style=style)
+        if out.plain.strip():
+            self.console.print(out)
 
     def _marked(self, marker: str, message: str, style: str) -> None:
         """One message, wrapped so it stays in its own column.
@@ -600,32 +744,113 @@ class UI:
         self._marked("!", message, WARN)
 
     def error(self, message: str) -> None:
+        """A failure, in the shape everything else in the transcript uses.
+
+        It was a bordered Panel titled "error", drawn hard against column
+        zero while every other line -- the user's own, the answer, every
+        tool block -- sits at column two. So the one moment the eye is
+        pulled hardest was also the one element that broke the margin, and
+        a four-line connection hint became eight rows of box to say it. The
+        border was carrying no information the red mark does not.
+
+        First line as the headline, the rest indented under it: the same
+        head-and-detail shape as ``tool_call``, so a failed tool and a
+        failed connection read as the same kind of event.
+        """
+        body = sanitise(message).strip()
+        if not body:
+            return
+        head, *rest = body.splitlines()
+        self.console.gap()
+        line = Text()
+        line.append(f"  {self.g.cross} ", style=BAD)
+        line.append(head, style=f"bold {BAD}")
+        self.console.print(line)
+        for extra in rest:
+            self.detail_line(extra.strip(), BAD)
         self.console.print()
-        self.console.print(Panel(Text(message), title="error", border_style=BAD, box=self.box,
-                  padding=(0, 1)))
 
     def success(self, message: str) -> None:
         self._marked(self.g.tick, message, GOOD)
+
+    def outcome(self, report: str) -> None:
+        """How a coding turn ended: a headline, then the evidence under it.
+
+        The whole block used to be printed FAINT at a flat two-space indent,
+        so "✓ completed" -- the one line that answers "did it work" -- was
+        the dimmest thing on screen and sat at the same level as the files
+        it summarised. Now the verdict carries the colour and the evidence
+        stays quiet at the same detail column tool blocks use, so the shape
+        is one the eye has already learnt by the time it gets here.
+        """
+        lines = report.splitlines()
+        if not lines:
+            return
+        head, *rest = lines
+        style = GOOD if head.lstrip().startswith(self.g.tick) else WARN
+        self.console.gap()
+        self.console.print(Text(f"  {head.strip()}", style=f"bold {style}"))
+        for line in rest:
+            # The report indents its own detail by two; the transcript's
+            # detail column is six, so its structure is preserved rather
+            # than flattened or doubled.
+            depth = len(line) - len(line.lstrip())
+            self.detail_line(line.strip(), FAINT, indent=4 + depth)
+        self.console.print()
 
     def assistant_markdown(self, text: str) -> None:
         if not text.strip():
             return
         text = sanitise(text)
-        self.console.print()
+        self.console.gap()
         # Same left margin as every other kind of line in the transcript.
         self.console.print(Padding(Markdown(text, code_theme=self.code_theme),
                                    (0, 0, 0, 2)))
-        self.console.print()
+        self.console.gap()
 
     # -- tools -------------------------------------------------------------
 
-    def tool_start(self, name: str, summary: str) -> None:
+    def tool_call(self, name: str, target: str, detail: str = "",
+                  ok: bool = True) -> None:
+        """One tool call, as one block.
+
+            ◈ read_file  calc.py
+                5 lines
+
+        It used to be two, and they said the same thing:
+
+            ● read_file  calc.py
+                ✓ read calc.py (5 lines)
+
+        -- the tool named twice, the file named twice, and a tick beside a
+        line that already read as success. The split was structural rather
+        than deliberate: one line was printed when the call started and the
+        other when it finished. What is in flight belongs in the live
+        region, which is redrawable; the conversation is a record, and a
+        record wants the outcome once.
+
+        The name is the prominent part, the target is muted beside it, and
+        anything further is dimmer again on its own line.
+
+        Failure changes the mark as well as the colour. Colour alone was
+        the whole signal for one pass, and in a scrollback of a dozen calls
+        a red diamond and a violet one are the same shape at a glance --
+        worth nothing at all with NO_COLOR set, on a monochrome terminal,
+        or to a red-green colourblind reader. The cross carries the fact
+        without needing the palette to survive.
+        """
         line = Text()
-        line.append(f"  {self.g.gear} ", style=ACCENT)
-        line.append(name, style=f"bold {ACCENT}")
-        if summary:
-            line.append(f"  {summary[:100]}", style=MUTED)
-        self.console.print(line)
+        line.append(f"  {self.g.tool if ok else self.g.cross} ",
+                    style=ACCENT if ok else BAD)
+        line.append(name, style="bold")
+        if target:
+            line.append(f"  {sanitise(target)[:120]}", style=MUTED)
+        # One row, always. The head is a label -- what ran, on what -- and a
+        # label that wraps stops being scannable, so a long target is cut
+        # rather than folded. The detail underneath is prose and wraps.
+        self.console.print(line, overflow="ellipsis", no_wrap=True)
+        if detail:
+            self.detail_line(detail[:400], BAD if not ok else FAINT)
 
     def tool_result(self, name: str, ok: bool, display: str, output: str) -> None:
         if display.startswith(("--- ", "diff --git")) or "\n+++ " in display[:200]:
@@ -829,6 +1054,11 @@ def plan_block(rendered: str, glyphs: "Glyphs", *, complete: bool = False) -> Te
     Every step gets a mark, including the ones not started: without one they
     were bare indented text and read as wrapped continuations of the step
     above.
+
+    The steps sit one level in from the heading. Flush with it, "plan 1/4"
+    was just the first row of the list rather than the thing the list
+    belongs to, and the block had no top edge at all -- the indent is the
+    only structure here, since there is no border to carry it.
     """
     steps = plan_steps(rendered)
     if not steps:
@@ -837,8 +1067,8 @@ def plan_block(rendered: str, glyphs: "Glyphs", *, complete: bool = False) -> Te
     if complete:
         done = len(steps)
     body = Text()
-    body.append(f"  plan  {done}/{len(steps)}\n",
-                style=GOOD if done == len(steps) else MUTED)
+    body.append("  plan", style=GOOD if done == len(steps) else "bold")
+    body.append(f"  {done}/{len(steps)}\n", style=FAINT)
     for state, text in steps:
         if complete:
             state = "done"
@@ -847,7 +1077,7 @@ def plan_block(rendered: str, glyphs: "Glyphs", *, complete: bool = False) -> Te
             "now": (glyphs.step_now, f"bold {ACCENT}"),
             "todo": (glyphs.step_todo, MUTED),
         }[state]
-        body.append(f"  {mark} ", style=GOOD if state == "done" else style)
+        body.append(f"    {mark} ", style=GOOD if state == "done" else style)
         body.append(text + "\n", style=style)
     body.rstrip()
     return body
@@ -1524,8 +1754,6 @@ class ActivityBar:
         and cannot be taken back. The live region is the one place wynxo
         may redraw, so it is where anything provisional belongs."""
         self.lead: Text | None = None
-        self.tool_events: list = []
-        self.max_tool_events = 6
         """A half-written line of the answer, drawn just above the strip.
 
         Streamed prose cannot be written to the terminal while the bar owns
@@ -1618,9 +1846,13 @@ class ActivityBar:
         # off it is the spinner. Never both, and never a third.
         left = Text(style=BAR_STYLE)
         if self.pet is not None and self.pet.enabled:
-            left.append(" ")
-            left.append(self.pet.padded(), style=f"bold {self.pet.style()}")
-            left.append("  ")
+            # One mark, not the whole character. Three rows of cat will not
+            # fit on a status line, and a one-line cat is the kaomoji this
+            # design replaced -- so the mascot lives in the header and the
+            # strip carries a mark whose colour says the mood and whose
+            # weight breathes while something is running.
+            left.append(f" {self.pet.mark(advance=self.animate)}  ",
+                        style=f"bold {self.pet.style()}")
         elif self.animate:
             frames = self.SPINNER if self.ui.g.unicode else self.SPINNER_ASCII
             left.append(f" {frames[self._frame % len(frames)]}  ",
@@ -1745,11 +1977,6 @@ class ActivityBar:
     PLAN_DONE_FRAMES = 8
     """Long enough to register at 12fps, short enough not to be in the way."""
 
-    def record_tool_event(self, event) -> None:
-        """Keep a compact recent activity history in the pinned region."""
-        self.tool_events = [*self.tool_events, event][-self.max_tool_events:]
-        self.refresh()
-
     def set_plan(self, rendered: str) -> None:
         self.plan = rendered or ""
         self.plan_done_frame = 0
@@ -1808,7 +2035,19 @@ class ActivityBar:
 
     def _renderable(self):
         """The pinned block: plan on top, then the line being written, then
-        the status strip. Everything here is redrawn in place."""
+        the status strip. Everything here is redrawn in place.
+
+        No history of finished calls. Six of them used to be kept and
+        redrawn here as "✓ read calc.py (5 lines)  0.00s", which is the
+        third rendering of a call the transcript had already committed as
+        a block two lines above -- and the block above is the one that
+        stays. A pinned region is for what is true *now*; anything that has
+        finished belongs to the record, which does not need repainting.
+
+        It also never trimmed its own trailing newline, so the group grew a
+        blank row for as long as any call had ever run: the empty line that
+        sat between the answer and the next question all session.
+        """
         parts = []
         # A card is provisional and the plan is a state; both belong above
         # the strip and neither is ever committed from here. The card first:
@@ -1819,11 +2058,6 @@ class ActivityBar:
                 body.append(line + "\n", style=BAR_DIM)
             body.rstrip()
             parts.append(body)
-        if self.tool_events:
-            history = Text()
-            for event in self.tool_events:
-                history.append(event.compact()[:120] + "\n", style=BAR_DIM)
-            parts.append(history)
         if (panel := self._plan_panel()) is not None:
             parts.append(panel)
         if self.lead is not None and self.lead.plain:
@@ -1859,6 +2093,11 @@ class ActivityBar:
         if live is not None:
             with contextlib.suppress(Exception):
                 live.stop()
+            # rich ends a Live by erasing the region and writing a newline
+            # of its own, straight past print(). It cannot be dropped -- it
+            # is what pushes the region clear before the erase -- so it is
+            # counted instead.
+            self.ui.console.wrote_elsewhere(1)
 
     def __enter__(self) -> "ActivityBar":
         self.start()

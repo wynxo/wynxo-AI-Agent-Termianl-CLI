@@ -431,9 +431,16 @@ class TestTheCardCatchesTheStream:
         ])
         plain = [re.sub(r"\x1b\[[0-9;]*m", "", line)
                  for line in ui.console.file.getvalue().splitlines()]
-        summaries = [line for line in plain if "write_file" in line and "+" in line]
-        assert len(summaries) == 1, summaries
-        assert "calc.py" in summaries[0]
+        # The same block every other tool gets: the call on one row, what
+        # came of it dimmer underneath. It used to print its own shape --
+        # "✓ write_file · calc.py · +6 -2" -- so which of two renderings a
+        # call got came down to whether it happened to write a file.
+        heads = [line for line in plain if "write_file" in line]
+        assert len(heads) == 1, heads
+        assert "calc.py" in heads[0]
+        counts = [line for line in plain if line.strip().startswith("+")
+                  and "-" in line]
+        assert len(counts) == 1, counts
         body = "\n".join(plain)
         assert "for value in values" not in body, (
             "the streamed file must stay in the live region, not the record")

@@ -104,13 +104,6 @@ class Config(Schema):
                    default="purple",
                    choices=("purple", "sakura", "kawaii", "midnight", "ember", "catboy", "plain", "minimal"))
     clear_on_start = Field(bool, "Clear the terminal when wynxo opens.", default=True)
-    logo = Field(str, "Which start-up logo to show, or 'off' for none.",
-                 default="wordmark")
-    """`wyn` is a photograph converted to ASCII: sixty-nine rows of @ and #
-    that fill more than half a 30-row terminal, scroll with the conversation
-    rather than away from it, and read as corrupted output rather than as a
-    logo. The wordmark says the same thing in eleven rows and is legible.
-    `wyn` is still there for anyone who wants it."""
     log = Field(bool, "Write a session transcript for debugging.", default=True)
     voice = Field(str, "How the agent talks: plain, warm, mentor, blunt, "
                        "kawaii or mommy.",

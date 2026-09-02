@@ -203,30 +203,51 @@ class TestATruncatedDiffSaysSo:
 
 
 class TestEveryColourFollowsTheTheme:
-    def test_the_edit_card_and_the_surge_change_with_the_theme(self):
-        """cli.py imports GOOD, BAD and BAR_ACCENT from ui, and the
-        hand-kept sweep list named none of them: after /theme the edit
-        card's done and failed marks kept the palette before last."""
+    def _held_by_cli(self):
+        """Every colour cli.py takes from ui, read from the import itself.
+
+        Naming them by hand is how this broke in the first place: the sweep
+        list was hand-kept, missed three, and after /theme the edit card's
+        marks kept the palette before last. Read from the "from .ui import
+        (...)" line instead, this keeps checking the right names when
+        cli's imports change -- and it deliberately does not include a
+        same-named constant cli defines for itself, which is what the test
+        below is about.
+        """
+        import ast
+        import inspect
+
         from wynxo import cli
 
+        tree = ast.parse(inspect.getsource(cli))
+        held = [alias.name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module == "ui"
+                for alias in node.names
+                if alias.name.isupper()
+                and isinstance(getattr(ui_module, alias.name, None), str)
+                and getattr(ui_module, alias.name).startswith("#")]
+        assert held, "cli imports no colour constants at all"
+        return cli, held
+
+    def test_the_edit_card_and_the_surge_change_with_the_theme(self):
+        cli, held = self._held_by_cli()
         try:
             ui_module.apply_palette(resolve("sakura"))
-            sakura = resolve("sakura")
-            assert cli.GOOD == sakura.good
-            assert cli.BAD == sakura.bad
-            assert cli.BAR_ACCENT == sakura.bar_accent
+            for name in held:
+                assert getattr(cli, name) == getattr(ui_module, name), name
         finally:
             ui_module.apply_palette(resolve("purple"))
 
     def test_a_second_change_still_lands(self):
         """The sweep matches on the previous value, so it has to keep
         working after the first change has moved it."""
-        from wynxo import cli
-
+        cli, held = self._held_by_cli()
         try:
             ui_module.apply_palette(resolve("sakura"))
             ui_module.apply_palette(resolve("ember"))
-            assert cli.GOOD == resolve("ember").good
+            for name in held:
+                assert getattr(cli, name) == getattr(ui_module, name), name
         finally:
             ui_module.apply_palette(resolve("purple"))
 

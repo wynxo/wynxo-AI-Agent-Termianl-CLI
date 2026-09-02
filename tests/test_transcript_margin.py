@@ -78,9 +78,14 @@ class TestVerboseToolOutputSaysWhetherItWorked:
         glyphs = ui.g
         assert any(glyphs.cross in line for line in _lines(ui)), _lines(ui)
 
-    def test_a_success_is_marked(self):
+    def test_a_success_is_not_marked_like_a_failure(self):
+        """A tick on every call is noise: nearly all of them work, so the
+        mark that matters is the one on the exception. The ordinary mark
+        says "a tool ran"; the cross says "and it did not work"."""
         ui = self._run(ok=True)
-        assert any(ui.g.tick in line for line in _lines(ui)), _lines(ui)
+        lines = _lines(ui)
+        assert any(ui.g.tool in line for line in lines), lines
+        assert not any(ui.g.cross in line for line in lines), lines
 
     def test_the_whole_output_is_still_shown(self):
         ui = self._run(ok=True)
@@ -111,16 +116,7 @@ class TestTheCompletionReportKeepsTheMargin:
     reads as output that escaped the transcript rather than as the turn's
     own summing-up."""
 
-    def test_the_report_is_indented(self):
-        import inspect
-
-        from wynxo.cli import Repl
-
-        source = inspect.getsource(Repl._turn_locked)
-        block = source.split("completion_report()", 1)[1].split("# No stats")[0]
-        assert 'f"  {line}"' in block, block[:400]
-
-    def test_every_line_of_a_real_report_is_indented(self):
+    def _report(self):
         from wynxo.task_state import TaskState, TaskStateMachine
 
         machine = TaskStateMachine()
@@ -130,6 +126,33 @@ class TestTheCompletionReportKeepsTheMargin:
         machine.record_failure("tests failed: 2 of 9")
         report = machine.completion_report()
         assert report
-        indented = "\n".join(f"  {line}" for line in report.splitlines())
-        for line in indented.splitlines():
+        return report
+
+    def test_every_line_of_a_real_report_is_indented(self):
+        """Drawn, not grepped for.
+
+        This used to read the source of _turn_locked looking for the string
+        that built the indent, which passed for whatever that line happened
+        to say and told you nothing about what reached the screen. The
+        report goes through the UI now, so the UI is what gets asked.
+        """
+        ui = _ui()
+        ui.outcome(self._report())
+        lines = _lines(ui)
+        assert lines
+        for line in lines:
             assert line.startswith("  "), repr(line)
+
+    def test_the_verdict_leads_and_the_evidence_sits_under_it(self):
+        """The headline answers "did it work" and the evidence explains it,
+        so the evidence is indented past the headline rather than level
+        with it -- and the whole block was FAINT before, which made the one
+        line worth reading the dimmest thing on the screen."""
+        ui = _ui()
+        ui.outcome(self._report())
+        lines = _lines(ui)
+        head, *rest = lines
+        assert len(head) - len(head.lstrip()) == 2, repr(head)
+        assert rest, lines
+        for line in rest:
+            assert len(line) - len(line.lstrip()) > 2, repr(line)

@@ -1,49 +1,69 @@
-"""The companion face, and the voice that shapes how the agent talks.
+"""The companion, and the voice that shapes how the agent talks.
 
-The face lives inside a width-exact status bar, so anything that mismeasures
-it makes the bar jitter on every frame. The voice edits the system prompt, so
-anything that lets it excuse work is worse than not having it.
+The cat is a three-row drawing in the header, so a frame of a different size
+makes the header jump between moods. In the status strip it is a single mark
+whose colour carries the state, so nothing there can shift the line's width.
+The voice edits the system prompt, so anything that lets it excuse work is
+worse than not having it.
 """
 
 import pytest
 from rich.cells import cell_len
 
-from wynxo.pet import (ACTIVITY_MOODS, FACES, FACES_ASCII, Mood, Pet,
-                       REMARKS_MOMMY, face_width)
+from wynxo.pet import (ACTIVITY_MOODS, EARS, FRAMES, HEIGHT, MARKS,
+                       MARKS_ASCII, Mood, Pet, REMARKS_MOMMY, WIDTH)
 from wynxo.prompts import VOICES, build_system_prompt
 from wynxo.ui import UI, ActivityBar
 
 
-class TestFaces:
-    @pytest.mark.parametrize("table,label", [(FACES, "unicode"), (FACES_ASCII, "ascii")])
-    def test_every_mood_has_frames(self, table, label):
+class TestTheDrawing:
+    def test_every_mood_has_frames(self):
         for mood in Mood:
-            assert table[mood], f"{label}: {mood.value} has no frames"
+            assert FRAMES[mood], f"{mood.value} has no frames"
 
-    @pytest.mark.parametrize("table,label", [(FACES, "unicode"), (FACES_ASCII, "ascii")])
-    def test_frames_of_a_mood_are_the_same_width(self, table, label):
-        """Frames of differing width make the bar shift on every blink."""
-        for mood, frames in table.items():
-            widths = {cell_len(f) for f in frames}
-            assert len(widths) == 1, f"{label}/{mood.value}: widths {widths}"
+    def test_every_frame_is_the_same_size(self):
+        """A frame of a different size makes the header jump.
 
-    def test_width_counts_cells_not_codepoints(self):
-        """Combining marks take no cell; CJK punctuation takes two."""
-        assert face_width("(•ᴗ•)") == 5
-        assert face_width("à") == 1     # combining grave
-        assert face_width("・") == 2           # fullwidth
+        Every row of every frame of every mood is one width, so the cat
+        occupies the same block whatever it is doing and the text set
+        beside it never moves.
+        """
+        for mood, frames in FRAMES.items():
+            for eyes, mouth in frames:
+                for row in (EARS, eyes, mouth):
+                    assert cell_len(row) == WIDTH, f"{mood.value}: {row!r}"
 
-    def test_ascii_frames_are_pure_ascii(self):
-        for frames in FACES_ASCII.values():
-            for frame in frames:
-                frame.encode("ascii")     # raises if not
+    def test_the_cat_is_drawn_in_ascii(self):
+        """One drawing, not two.
 
-    def test_padded_is_always_the_mood_width(self):
+        The face used to be a kaomoji with a whole second table beside it
+        for terminals that could not render it -- two sets of frames to
+        keep in step, and the fallback was always the worse of the two.
+        Line art made of slashes and parentheses is legible everywhere and
+        needs no second tier, so there is one cat to maintain and it is the
+        same cat on every terminal.
+        """
+        EARS.encode("ascii")
+        for frames in FRAMES.values():
+            for eyes, mouth in frames:
+                eyes.encode("ascii")      # raises if not
+                mouth.encode("ascii")
+
+    def test_rows_are_always_the_same_block(self):
         pet = Pet()
         for mood in Mood:
             pet.react(mood)
             for _ in range(12):
-                assert cell_len(pet.padded()) == pet.width()
+                rows = pet.rows()
+                assert len(rows) == HEIGHT
+                assert all(cell_len(r) == WIDTH for r in rows)
+
+    def test_the_mark_is_one_cell_for_every_mood(self):
+        """The status strip is width-exact: a two-cell mark shifts it."""
+        for mood in Mood:
+            assert cell_len(MARKS[mood]) == 1, mood.value
+            assert cell_len(MARKS_ASCII[mood]) == 1, mood.value
+            MARKS_ASCII[mood].encode("ascii")
 
 
 class TestMoods:
@@ -70,12 +90,12 @@ class TestMoods:
 
     def test_every_mapped_activity_has_a_face(self):
         for mood in ACTIVITY_MOODS.values():
-            assert FACES[mood] and FACES_ASCII[mood]
+            assert FRAMES[mood] and MARKS[mood]
 
     def test_changing_mood_restarts_the_animation(self):
         pet = Pet()
         for _ in range(7):
-            pet.face()
+            pet.rows()
         pet.react(Mood.HAPPY)
         assert pet._frame == 0
 
@@ -84,13 +104,13 @@ class TestAnimationToggle:
     def test_a_still_pet_never_changes_frame(self):
         pet = Pet(animate=False)
         pet.react(Mood.THINKING)
-        first = pet.face()
-        assert all(pet.face() == first for _ in range(10))
+        first = pet.rows()
+        assert all(pet.rows() == first for _ in range(10))
 
     def test_an_animated_pet_does_change(self):
         pet = Pet(animate=True)
         pet.react(Mood.THINKING)
-        seen = {pet.face() for _ in range(24)}
+        seen = {tuple(pet.rows()) for _ in range(24)}
         assert len(seen) > 1
 
 
@@ -100,11 +120,14 @@ class TestBarIntegration:
         ui.width = 90
         bar = ActivityBar(ui, "medium", pet=Pet())
         bar.update(activity="reading", tokens=5)
-        # Taken from the table rather than written out, so redesigning the
-        # faces does not break a test about the bar.
-        from wynxo.pet import FACES, Mood
+        # The strip carries one cell, not the drawing: three rows of cat in
+        # a one-row status line was never possible. While a tool runs that
+        # cell breathes, so what is on the strip is a pulse frame; its
+        # colour is the mood. Taken from the table rather than written out,
+        # so redesigning the cat does not break a test about the bar.
+        from wynxo.pet import PULSE
 
-        assert FACES[Mood.READING][0] in bar._render().plain
+        assert any(f" {frame} " in bar._render().plain for frame in PULSE)
 
     def test_disabled_pet_falls_back_to_the_spinner(self):
         ui = UI()
@@ -248,10 +271,11 @@ class TestVoice:
     def test_the_voice_does_not_change_the_face(self):
         """There is one cat. Voices change the words, not the animal."""
         pet = Pet()
-        base = pet.faces()
+        pet.react(Mood.IDLE)
+        base = pet.rows(advance=False)
         for voice in ("mommy", "kawaii", "plain", "mentor", "blunt"):
             pet.style_name = voice
-            assert pet.faces() is base, voice
+            assert pet.rows(advance=False) == base, voice
 
 
 class TestConfig:

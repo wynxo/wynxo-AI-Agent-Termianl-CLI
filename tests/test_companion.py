@@ -122,7 +122,7 @@ class TestThereIsOnlyOneCharacter:
         from wynxo.ui import ActivityBar
 
         source = inspect.getsource(ActivityBar._render)
-        assert "self.pet.padded()" in source
+        assert "self.pet.mark(" in source
 
     def test_nothing_advances_the_frame_but_a_repaint(self):
         """A scheduler would keep animating through a stall, showing typing

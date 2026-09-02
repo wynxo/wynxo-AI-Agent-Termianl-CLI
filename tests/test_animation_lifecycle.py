@@ -19,7 +19,6 @@ import inspect
 import threading
 
 
-from wynxo import logo
 from wynxo.pet import Mood, Pet
 from wynxo.ui import ActivityBar, UI
 
@@ -49,16 +48,16 @@ class TestOneClockDrivesEverything:
     def test_the_frame_advances_only_when_something_draws(self):
         pet = Pet()
         pet.react(Mood.SEARCHING)
-        before = pet.face(advance=False)
+        before = tuple(pet.rows(advance=False))
         for _ in range(50):
-            assert pet.face(advance=False) == before
-        moved = {pet.face() for _ in range(12)}
+            assert tuple(pet.rows(advance=False)) == before
+        moved = {tuple(pet.rows()) for _ in range(12)}
         assert len(moved) > 1, "drawing never advances the frame"
 
     def test_reduced_motion_holds_the_frame_even_when_drawn(self):
         pet = Pet(animate=False)
         pet.react(Mood.SEARCHING)
-        assert len({pet.face() for _ in range(20)}) == 1
+        assert len({tuple(pet.rows()) for _ in range(20)}) == 1
 
 
 class TestNothingKeepsRunningAfterwards:
@@ -124,8 +123,7 @@ class TestStartupAnimationsAreBounded:
         import textwrap
 
         assert inspect.iscoroutinefunction(UI.wake)
-        assert inspect.iscoroutinefunction(logo.play)
-        for func in (UI.wake, logo.play):
+        for func in (UI.wake,):
             tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
             # The calls themselves, not a docstring that mentions one.
             called = {ast.unparse(node.func) for node in ast.walk(tree)
@@ -134,12 +132,11 @@ class TestStartupAnimationsAreBounded:
                         if name.endswith("sleep") and "asyncio" not in name]
             assert blocking == [], f"{func.__name__}: {blocking}"
 
-    def test_the_logo_is_under_a_second(self):
-        assert logo.FRAMES * logo.FRAME_TIME < 1.0
-
     def test_the_whole_startup_animation_is_short(self):
-        total = logo.FRAMES * logo.FRAME_TIME + sum(p for _, p in UI.WAKE)
-        assert total < 1.5, f"{total:.2f}s of animation before the prompt"
+        """One animation at start-up, not two. The block-art logo that used
+        to play before it is gone, so this is the whole of it."""
+        total = sum(p for _, p in UI.WAKE)
+        assert total < 1.0, f"{total:.2f}s of animation before the prompt"
 
     def test_nothing_animates_without_a_terminal(self):
         """A Live where nothing can repaint writes its cursor moves into the
@@ -151,15 +148,6 @@ class TestStartupAnimationsAreBounded:
         bar.start()
         assert bar._live is None
         bar.stop()
-
-    def test_the_logo_never_animates_where_it_cannot_repaint(self):
-        """A Live where nothing can repaint writes its cursor moves into the
-        output as literal "?25l" and "^M"."""
-        ui = _ui()
-        assert ui.live_ok is False
-        assert logo.should_play(ui, animations=True) is False \
-            or not ui.live_ok
-
 
 class TestReducedMotionIsRealAndStillReadable:
     def _bar(self):
@@ -178,9 +166,13 @@ class TestReducedMotionIsRealAndStillReadable:
         assert "thinking" in self._bar()._render().plain
 
     def test_the_mascot_is_still_drawn(self):
-        """Reduced motion means nothing moves, not that nothing is there."""
+        """Reduced motion means nothing moves, not that nothing is there.
+
+        The strip carries the pet's one-cell mark rather than the drawing:
+        the cat itself is three rows tall and belongs to the header, where
+        it is identity rather than a status widget."""
         bar = self._bar()
-        assert bar.pet.padded(advance=False) in bar._render().plain
+        assert bar.pet.mark() in bar._render().plain
 
     def test_the_layout_does_not_shift_when_motion_is_turned_off(self):
         """Animation off must not move anything: the still mark occupies the

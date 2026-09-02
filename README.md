@@ -1149,7 +1149,6 @@ effort-level setting.
 /resume [id]             pick up an earlier conversation
 /secrets ...             credential protection: on | off | allow <path>
 /animate [name|on|off]   the companion's animations
-/logo [name|off]         the start-up logo
 /pull <model>            pull a model onto the server
 /clear                   fresh conversation
 /compact                 summarise now, reclaim context

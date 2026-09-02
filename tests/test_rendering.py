@@ -62,12 +62,22 @@ class TestCodeStreaming:
         }
         for forbidden in ("clear_lines", "console.control", "Control.move"):
             assert not any(forbidden in call for call in calls), forbidden
-        imported = {
-            alias.name
-            for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
-            for alias in node.names
-        }
-        assert "Control" not in imported
+        # Control may be named, but only to recognise rich's own repaints:
+        # a Live refresh reaches the console as print(Control(...)), and the
+        # transcript has to know that such a print leaves nothing behind.
+        # Recognising one is not the same as emitting one, so what is banned
+        # is constructing it -- which is the act that moves the cursor.
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == "Control":
+                raise AssertionError("ui.py constructs a Control")
+        used = [node for node in ast.walk(tree)
+                if isinstance(node, ast.Name) and node.id == "Control"]
+        checks = [node for node in ast.walk(tree)
+                  if isinstance(node, ast.Call)
+                  and ast.unparse(node.func) == "isinstance"
+                  and "Control" in ast.unparse(node)]
+        assert len(used) <= len(checks) + 1, (
+            "Control is referenced outside an isinstance check")
 
     def test_code_renders_once(self, capsys):
         self._render(["```python\n", "x = 1\n", "y = 2\n", "```\n"])
@@ -273,12 +283,29 @@ class TestSomebodyElsesTextCannotDriveTheTerminal:
                "\x1b[31mred\x1b[0m end")
 
     def _console(self):
+        """A console that scrubs nothing, so each helper is tested alone.
+
+        SafeConsole strips control sequences out of everything rich renders,
+        which would make this pass whether or not a single helper called
+        sanitise -- and defence in depth is only defence if both layers
+        work. It cannot be a bare rich Console either: the transcript's
+        spacing lives on SafeConsole, so a plain one is missing methods the
+        UI calls. Subclassing and dropping only the scrub leaves exactly the
+        thing under test.
+        """
         import io
 
         from rich.console import Console
 
+        from wynxo.ui import SafeConsole
+
+        class _NoScrub(SafeConsole):
+            def _render_buffer(self, buffer):
+                return Console._render_buffer(self, buffer)
+
         ui = UI()
-        ui.console = Console(file=io.StringIO(), force_terminal=True, width=80)
+        ui.console = _NoScrub(file=io.StringIO(), force_terminal=True,
+                              width=80)
         return ui
 
     def _shown(self, ui):
@@ -425,15 +452,36 @@ class TestPinnedBar:
 
 
 class TestHeader:
-    def test_the_header_is_a_name_a_detail_line_and_a_rule(self, capsys):
+    def test_the_header_is_a_name_over_a_detail_line(self, capsys):
         """Five facts joined by dots is a dashboard row, not a header: there
-        is nothing in it to read first. The name and the model carry the
-        weight; the settings sit under them."""
-        UI().banner("qwen3-coder:30b", "http://127.0.0.1:11434", "medium", "/tmp/p")
+        is nothing in it to read first. The name carries the weight and the
+        settings sit under it.
+
+        No rule under it any more. A full-width line of ─ is the loudest
+        thing a terminal can draw and it was being spent on a separator
+        between the header and a blank line -- the whitespace was already
+        doing the separating, and doing it more quietly.
+        """
+        UI().banner("qwen3-coder:30b", "http://127.0.0.1:11434", "medium",
+                    "/tmp/p")
         lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
-        assert len(lines) == 3, "the header should be two lines and a rule"
-        assert "wynxo" in lines[0] and "qwen3-coder:30b" in lines[0]
+        assert len(lines) == 2, lines
+        assert "wynxo" in lines[0] and "qwen3-coder:30b" not in lines[0]
         assert "medium" in lines[1] and "wynxo" not in lines[1]
+        assert "─" not in "".join(lines)
+
+    def test_the_mascot_stands_beside_the_name(self, capsys):
+        """The header is where the cat lives: identity, drawn once, with the
+        name beside it rather than a widget somewhere in the chrome."""
+        from wynxo.pet import EARS, Pet
+
+        pet = Pet()
+        UI().banner("m", "http://127.0.0.1:11434", "medium", "/tmp/p",
+                    pet=pet, greeting="hello")
+        lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+        assert len(lines) == 3, lines
+        assert EARS.strip() in lines[0] and "wynxo" in lines[0]
+        assert "hello" in lines[2]
 
     def test_narrow_header_drops_parts_rather_than_truncating(self, capsys):
         ui = UI()
@@ -448,17 +496,19 @@ class TestHeader:
         UI().banner("m", "http://127.0.0.1:11434", "low", "/tmp/p")
         assert "?[" not in capsys.readouterr().out
 
-    def test_header_shows_the_effort_meter(self, capsys):
-        """The banner names the effort level and shows the same gauge the
-        status bar does, so the two halves of the chrome agree."""
+    def test_the_header_names_the_effort_without_drawing_a_gauge(self, capsys):
+        """"███   ultra" spent four cells of solid block on a word that was
+        already there, in a header whose job is to be read once and then
+        ignored. The level is a fact, so it is written as one; the gauge
+        belongs to the status strip, where it changes while you watch."""
         from wynxo.ui import Glyphs
 
         ui = UI()
         ui.g = Glyphs(True)
         ui.banner("m", "http://127.0.0.1:11434", "ultra", "/tmp/p")
         out = capsys.readouterr().out
-        assert "███ ultra" in out
         assert "ultra" in out
+        assert "█" not in out
 
 
 class TestAMessageStaysInItsOwnColumn:
