@@ -21,6 +21,14 @@ class Palette:
     text: str
     muted: str           # secondary detail
     faint: str           # things you should be able to ignore
+    """Ignorable, not unreadable.
+
+    Every one of these was mixed to sit just under 4.5:1 against a black
+    terminal -- the threshold below which body text stops being reliably
+    legible -- because "quiet" and "invisible" are one nudge apart and the
+    first draft landed on the wrong side of it. They stay well under muted,
+    so the hierarchy is unchanged; they are simply readable when you go
+    looking."""
 
     good: str
     warn: str
@@ -56,7 +64,7 @@ PURPLE = Palette(
     accent_dim="#7c5cbf",
     text="#e6e0f0",
     muted="#9a8fb0",
-    faint="#6b6280",
+    faint="#7b7192",
     good="#7ee081",
     warn="#f0c674",
     bad="#ff6b7a",
@@ -73,7 +81,7 @@ MIDNIGHT = Palette(
     accent_dim="#4a86b8",
     text="#dfe7ef",
     muted="#8fa3b8",
-    faint="#5f7183",
+    faint="#65788b",
     good="#7ee081",
     warn="#f0c674",
     bad="#ff6b7a",
@@ -130,7 +138,7 @@ EMBER = Palette(
     accent_dim="#c26a33",
     text="#f0e6de",
     muted="#b39d8c",
-    faint="#7d6a5c",
+    faint="#867263",
     good="#9ad17a",
     warn="#f0c674",
     bad="#ff6b6b",
@@ -176,7 +184,7 @@ CATBOY = Palette(
     accent_dim="#8e5bc4",
     text="#f2e9ff",          # near-white with a violet cast
     muted="#b9a3d4",
-    faint="#7c6d94",
+    faint="#7e6f96",
     good="#8ff0c4",          # soft mint
     warn="#ffcf7a",          # warm amber
     bad="#ff7a9c",           # soft red, clearly not the accent

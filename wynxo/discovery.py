@@ -190,7 +190,7 @@ async def scan_subnets(networks=None, port: int = OLLAMA_PORT, on_progress=None)
         return host if opened else None
     candidates = [host for host in await asyncio.gather(*(check(h) for h in hosts)) if host]
     versions = await asyncio.gather(*(verify(f"http://{h}:{port}") for h in candidates))
-    return [Found(f"http://{host}:{port}", version, False) for host, version in zip(candidates, versions) if version]
+    return [Found(f"http://{host}:{port}", version, False) for host, version in zip(candidates, versions, strict=True) if version]
 
 
 async def discover(on_progress=None, scan_network: bool = True) -> list[Found]:

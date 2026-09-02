@@ -29,7 +29,12 @@ def replacement_ratio(before: str, after: str) -> float:
     flag on a no-op edit."""
     total = max(1, sum(len(line) for line in before.splitlines()))
     common = 0
-    for left, right in zip(before.splitlines(), after.splitlines()):
+    # Deliberately not strict. The two files are different lengths --
+    # that is the whole reason for measuring how much of one survives in
+    # the other -- so stopping at the shorter is the intended behaviour
+    # here, unlike everywhere else zip() is used in this project.
+    for left, right in zip(before.splitlines(),
+                          after.splitlines(), strict=False):
         if left == right:
             common += len(left)
     return max(0.0, min(1.0, 1.0 - common / total))

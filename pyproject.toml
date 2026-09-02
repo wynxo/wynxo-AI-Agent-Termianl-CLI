@@ -45,4 +45,14 @@ testpaths = ["tests"]
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["F"]
+# F is pyflakes: the class of bug this project keeps tripping on --
+# undefined names, unused imports, dangling __all__ entries.
+#
+# B905 is the one rule outside it worth enforcing, because it is not
+# style. A zip() over two sequences that are supposed to be the same
+# length will, if they ever are not, silently stop at the shorter one --
+# so a tool call gets announced and never answered, or a companion frame
+# loses its bottom row, and nothing raises. Saying strict=True turns that
+# into an exception at the point the invariant broke. The single place
+# where unequal lengths are intended says so in a comment.
+select = ["F", "B905"]

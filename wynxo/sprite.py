@@ -278,9 +278,11 @@ def rows(state, frame: int, palette) -> list[Text]:
         return palette.role(role) if role else ""
 
     out = []
-    for top, bottom in zip(pixels[0::2], pixels[1::2]):
+    # strict: an odd number of pixel rows would otherwise drop the last
+    # one and draw a shorter character, silently.
+    for top, bottom in zip(pixels[0::2], pixels[1::2], strict=True):
         line = Text()
-        for a, b in zip(top, bottom):
+        for a, b in zip(top, bottom, strict=True):
             glyph, style = _pack(a, b, colour)
             line.append(glyph, style=style)
         out.append(line)

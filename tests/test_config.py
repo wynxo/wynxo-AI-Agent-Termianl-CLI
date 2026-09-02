@@ -61,7 +61,8 @@ class TestEffort:
     def test_effort_increases_monotonically(self):
         """The ladder must actually be a ladder."""
         policies = [POLICIES[n] for n in ORDER]
-        for lower, higher in zip(policies, policies[1:]):
+        # A sliding window: the two are meant to differ by one.
+        for lower, higher in zip(policies, policies[1:], strict=False):
             assert higher.max_iterations > lower.max_iterations
             assert higher.max_tool_output >= lower.max_tool_output
             assert higher.repair_attempts >= lower.repair_attempts

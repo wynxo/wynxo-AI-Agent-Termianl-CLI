@@ -758,7 +758,7 @@ class UI:
             # the transcript's detail column, so its structure carries
             # over rather than being flattened or doubled.
             depth = len(line) - len(line.lstrip())
-            self.detail_line(line.strip(), FAINT, indent=max(2, depth))
+            self.detail_line(line.strip(), MUTED, indent=max(2, depth))
         self.console.print()
 
     def help_block(self, text: str) -> None:
@@ -920,19 +920,37 @@ class UI:
             return
         self.console.print(plan_block(rendered, self.g))
 
+    MAX_CODE_LINES = 120
+    """The same ceiling a diff gets, for the same reason.
+
+    A diff has stopped at a hundred and twenty lines with an honest count of
+    the remainder for a long time; a block of output had no limit at all, so
+    a test run that printed five hundred lines put five hundred lines into
+    the scrollback -- thirty-eight kilobytes past the point where anyone was
+    still reading. What is cut is counted, never dropped in silence."""
+
     def code(self, text: str, language: str = "text") -> None:
         """A block of somebody else's code or output.
 
-        Indented to the same column the tool lines, the answer and the
-        user's own line all sit at. Syntax() draws a filled background band,
-        so a block started hard against column zero reads as a panel that
-        has escaped the conversation rather than as part of it -- it was the
-        one kind of content in the whole transcript with no left margin.
+        Set one step in from the transcript, because it is quoted material
+        rather than the agent talking. Syntax() draws a filled background
+        band, so a block started hard against column zero reads as a panel
+        that has escaped the conversation rather than as part of it.
         """
+        body = sanitise(text).rstrip("\n")
+        if not body.strip():
+            return
+        lines = body.split("\n")
+        dropped = max(0, len(lines) - self.MAX_CODE_LINES)
         self.console.print(
-            Padding(Syntax(sanitise(text), language, theme=self.code_theme,
-                           word_wrap=True),
+            Padding(Syntax("\n".join(lines[:self.MAX_CODE_LINES]), language,
+                           theme=self.code_theme, word_wrap=True),
                     (0, 0, 0, 2)))
+        if dropped:
+            self.detail_line(
+                f"{self.g.ellipsis} {dropped} more line"
+                f"{'' if dropped == 1 else 's'}",
+                f"{MUTED} italic")
 
     def highlight(self, line: str, language: str = "text") -> Text:
         """One line, syntax-highlighted, with no block chrome.
@@ -1135,7 +1153,7 @@ def plan_block(rendered: str, glyphs: "Glyphs", *, complete: bool = False) -> Te
         done = len(steps)
     body = Text()
     body.append("  plan", style=GOOD if done == len(steps) else "bold")
-    body.append(f"  {done}/{len(steps)}\n", style=FAINT)
+    body.append(f"  {done}/{len(steps)}\n", style=MUTED)
     for state, text in steps:
         if complete:
             state = "done"

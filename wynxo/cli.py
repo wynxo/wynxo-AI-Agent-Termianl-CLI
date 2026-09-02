@@ -870,7 +870,11 @@ class TerminalCallbacks(Callbacks):
         # Ctrl-T: the whole output under the block, when it says more than
         # the block's one dim line already did.
         if self.verbose_tools and len(output.strip().splitlines()) > 1:
-            self.ui.code(output[:4000], _LANGUAGE.get(name, "text"))
+            # Whole lines. Slicing at four thousand characters cut the
+            # last one wherever it happened to land -- usually mid-token,
+            # sometimes mid-escape -- and said nothing about the rest.
+            # code() has its own ceiling now and counts what it leaves out.
+            self.ui.code(output, _LANGUAGE.get(name, "text"))
 
     async def on_code(self, text: str) -> None:
         if not text:
@@ -2001,7 +2005,7 @@ class Repl:
         for line in rest:
             body.append("\n  " + line, style="bold")
         if note:
-            body.append(f"   {note}", style=FAINT)
+            body.append(f"   {note}", style=MUTED)
         # boundary(), not gap(): a typed line already has one blank row
         # above it from the composer erasing itself, and a queued one has
         # none, so asking for a single separation made the seam one row on

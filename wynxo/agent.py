@@ -926,7 +926,10 @@ class Agent:
         results = await asyncio.gather(*(one(c) for c in batch),
                                        return_exceptions=True)
 
-        for call, result in zip(batch, results):
+        # strict: gather() returns one result per call, so a length
+        # mismatch means a tool was announced and never answered --
+        # which zip() would otherwise hide by stopping early.
+        for call, result in zip(batch, results, strict=True):
             if isinstance(result, BaseException):
                 if isinstance(result, (asyncio.CancelledError, Interrupted)):
                     raise result
