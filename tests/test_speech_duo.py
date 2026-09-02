@@ -443,49 +443,6 @@ class TestTidy:
         assert _tidy("All done, nya~") == "All done, nya~"
 
 
-class TestEffortMeter:
-    """A gauge that fills as the effort level rises, so the change is
-    visible without reading a word."""
-
-    def test_it_rises_monotonically_across_the_ladder(self):
-        from wynxo.effort import ORDER
-        from wynxo.ui import METER_BLOCKS, effort_meter
-
-        def weight(meter):
-            return sum(METER_BLOCKS.index(c) + 1 for c in meter if c in METER_BLOCKS)
-
-        weights = [weight(effort_meter(name)) for name in ORDER]
-        assert weights == sorted(weights), weights
-        assert weights[0] < weights[-1]
-
-    def test_the_lowest_level_still_shows_something(self):
-        """A blank meter reads as broken rather than as low."""
-        from wynxo.ui import effort_meter
-
-        assert effort_meter("low").strip() != ""
-
-    def test_width_is_fixed_so_the_bar_does_not_shift(self):
-        from rich.cells import cell_len
-
-        from wynxo.effort import ORDER
-        from wynxo.ui import METER_WIDTH, effort_meter
-
-        for name in ORDER:
-            for unicode_ok in (True, False):
-                assert cell_len(effort_meter(name, unicode_ok)) == METER_WIDTH
-
-    def test_ascii_terminals_get_a_one_cell_ramp(self):
-        from wynxo.ui import effort_meter
-
-        assert effort_meter("ultra", False).isascii()
-        assert effort_meter("low", False).isascii()
-
-    def test_an_unknown_level_is_blank_rather_than_an_error(self):
-        from wynxo.ui import METER_WIDTH, effort_meter
-
-        assert effort_meter("nonsense") == " " * METER_WIDTH
-
-
 class TestSakuraPalette:
     def test_it_is_selectable_by_name(self):
         from wynxo.theme import resolve

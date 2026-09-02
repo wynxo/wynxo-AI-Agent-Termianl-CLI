@@ -55,8 +55,21 @@ from .tools.appcatalog import ApplicationCatalog
 from rich.text import Text
 
 from .ui import (ACCENT, BAR_ACCENT, FAINT, MUTED, ActivityBar,
-                 CodeStreamer, ThoughtStreamer, UI, _ansi_of, effort_meter,
-                 plan_steps, sanitise)
+                 CodeStreamer, ThoughtStreamer, UI, _ansi_of, plan_steps, sanitise)
+
+def _first_sentence(text: str) -> str:
+    """The opening sentence of a tool's description.
+
+    A tool description is written for the model and runs to a paragraph --
+    when to use it, when not to, what the arguments mean. /tools is a
+    person asking what exists, and the first sentence is the answer to
+    that. It used to be cut at seventy characters instead, which landed
+    mid-word about half the time.
+    """
+    head = " ".join((text or "").split())
+    stop = head.find(". ")
+    return head[:stop + 1] if stop > 0 else head
+
 
 def _is_a_sentence(text: str) -> bool:
     """Whether a tool's "target" is really prose.
@@ -139,6 +152,11 @@ ALIASES = {
     "/t": "/theme", "/th": "/theme",
     "/mem": "/memory", "/sc": "/scope", "/st": "/stats", "/se": "/sessions",
     "/c": "/clear", "/co": "/compact",
+    # The dispatcher has always answered /status, but the resolver never let
+    # it through: /status is not a command name, not a plural of one, and no
+    # command begins with it, so it came back "unknown command" while the
+    # branch handling it sat there unreachable.
+    "/status": "/session",
 }
 
 
@@ -1097,7 +1115,10 @@ class TerminalCallbacks(Callbacks):
             "edit_file": "edit",
             "shell": "run",
         }.get(name, name)
-        self.ui.console.print(f"  [bold {ACCENT}]{verb}[/] [bold]{summary}[/]")
+        # Flush with the transcript. The question is the one moment the
+        # session stops and waits for you, and it was the one block still
+        # set in two columns from the edge.
+        self.ui.console.print(f"[bold {ACCENT}]{verb}[/] [bold]{summary}[/]")
         if preview:
             self.ui.diff(preview) if preview.lstrip().startswith(("---", "+", "-")) else self.ui.code(preview)
 
@@ -1105,7 +1126,7 @@ class TerminalCallbacks(Callbacks):
         while True:
             try:
                 answer = (await self.prompt_session.prompt_async(
-                    HTML(f'<style fg="{ACCENT}">  {question} </style>')
+                    HTML(f'<style fg="{ACCENT}">{question} </style>')
                 )).strip().lower()
             except (EOFError, KeyboardInterrupt):
                 return Decision.ABORT
@@ -2061,7 +2082,6 @@ class Repl:
         place the activity bar occupies while a turn runs -- so the strip is
         there the whole time and only its contents change.
         """
-        usage = self.agent.session.usage
         used = self.agent.session.token_estimate()
         limit = self.policy.context_budget or self.config.num_ctx
         pieces = []
@@ -2077,20 +2097,24 @@ class Repl:
         # was invisible at the prompt and fired on the next thing typed.
         if waiting := len(self.pending):
             pieces.append(f"\u203a {waiting} queued")
+        # Model, effort, context. Three facts, because this line sits under
+        # the prompt for the whole session and anything on it is something
+        # you look past every time you type.
+        #
+        # The block gauge went with the rest of the decoration: "███ high"
+        # spent four cells of solid block on a word that was already next
+        # to it. So did the rate, the token count and the turn duration --
+        # they are the live numbers of a turn that has finished, and the
+        # strip shows them while it runs, which is when they mean anything.
         pieces += [self.config.model,
-                   f"{effort_meter(self.policy.name, self.ui.g.unicode)} "
-                   f"{self.policy.name}",
+                   self.policy.name,
                    f"ctx {100 * used / max(1, limit):.0f}%"]
-        if usage.completion_tokens:
-            pieces.append(f"{usage.completion_tokens} tok")
-            if speed := usage.tokens_per_second():
-                pieces.append(f"{speed:.0f} tok/s")
-            if self._last_elapsed:
-                pieces.append(f"{self._last_elapsed:.1f}s")
         if self.agent.permissions.mode is not Mode.MANUAL:
+            # Not a statistic: a mode where wynxo stops asking before it
+            # writes is worth saying every time you look down.
             pieces.append(self.agent.permissions.mode.value)
 
-        return f"  {self.ui.g.dot}  ".join(pieces)
+        return f" {self.ui.g.dot} ".join(pieces)
 
     async def _drain_queue(self) -> bool:
         """Run whatever was typed during the turn, oldest first.
@@ -2329,7 +2353,13 @@ class Repl:
         if name == "/tools":
             self.ui.table(
                 ["tool", "writes?", "what it does"],
-                [(t.signature(), "yes" if t.mutating else "", t.description[:70])
+                # "writes", not "yes": the heading is three rows up by the
+                # time you reach the bottom of the list, and a bare "yes"
+                # under nothing is not an answer. And the description is
+                # not pre-cut here -- it used to be sliced at seventy
+                # characters, mid-word, before the renderer ever saw it.
+                [(t.signature(), "writes" if t.mutating else "",
+                  _first_sentence(t.description))
                  for t in self.agent.tools],
                 title=f"{len(self.agent.tools)} tools"
                 + ("" if self.agent.native_tools else "  (Hermes prompted mode)"),

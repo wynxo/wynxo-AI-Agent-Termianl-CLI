@@ -21,10 +21,8 @@ from rich.console import Console, Control, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.padding import Padding
-from rich.panel import Panel
 from rich.rule import Rule
 from rich.syntax import Syntax
-from rich.table import Table
 from rich.text import Text
 
 from .platforms import is_narrow, terminal_width
@@ -874,12 +872,14 @@ class UI:
         text = sanitise(text)
         limit = max(24, self.width - 6) if self.narrow else 10_000
         body = Text()
-        all_lines = text.splitlines()
+        # The ---/+++ header names the file, and the tool line directly
+        # above it just named the file. Two rows to say it a second time,
+        # at the top of every diff.
+        all_lines = [l for l in text.splitlines()
+                     if not l.startswith(("--- ", "+++ "))]
         dropped = max(0, len(all_lines) - self.MAX_DIFF_LINES)
         for line in (l[:limit] for l in all_lines[:self.MAX_DIFF_LINES]):
-            if line.startswith("+++") or line.startswith("---"):
-                body.append(line + "\n", style=MUTED)
-            elif line.startswith("+"):
+            if line.startswith("+"):
                 body.append(line + "\n", style=GOOD)
             elif line.startswith("-"):
                 body.append(line + "\n", style=BAD)
@@ -891,8 +891,29 @@ class UI:
             # Say so. A diff cut off at exactly 120 lines with no mark reads
             # as a diff that ended there, which is a different claim.
             body.append(f"{self.g.ellipsis} {dropped} more line"
-                        f"{'' if dropped == 1 else 's'}\n", style=f"{MUTED} italic")
-        self.console.print(Panel(body, border_style=MUTED, box=self.box, padding=(0, 1)))
+                        f"{'' if dropped == 1 else 's'}\n",
+                        style=f"{MUTED} italic")
+        body.rstrip()
+        if not body.plain.strip():
+            return
+        # Indented, not boxed. A diff is already the most structured thing
+        # in the transcript -- every line begins with +, - or @@, and the
+        # colour says which -- so a border around it draws a shape the
+        # content was drawing anyway, and spends two columns and two rows
+        # doing it. The indent says what every other indent here says: this
+        # belongs to the call above it.
+        #
+        # The indent is written into the text rather than applied with
+        # Padding, which pads each row out to the full console width -- so
+        # every line of a diff you selected and copied came with a tail of
+        # trailing spaces.
+        indented = Text()
+        for index, line in enumerate(body.split("\n")):
+            if index:
+                indented.append("\n")
+            indented.append("  ")
+            indented.append_text(line)
+        self.console.print(indented)
 
     def todos(self, rendered: str) -> None:
         if not rendered.strip():
@@ -974,32 +995,72 @@ class UI:
             return _SaidOnce(self, message)
         return self.console.status(Text(message, style=MUTED), spinner="dots")
 
-    def table(self, columns: Iterable[str], rows: Iterable[Iterable[str]], title: str = "") -> None:
+    def table(self, columns: Iterable[str], rows: Iterable[Iterable[str]],
+              title: str = "") -> None:
+        """A list of things and what they are, as text.
+
+        Not a grid. Every list in the application went through rich's Table
+        and came out as a bordered box with vertical rules between the
+        columns -- /help was two of them stacked, forty rows of box-drawing
+        to say what forty commands do. Borders are for holding a shape that
+        the content cannot hold by itself, and a name beside a description
+        holds its own shape perfectly well: the names are short, they line
+        up in a gutter, and the eye follows the column without needing a
+        line drawn down it.
+
+        It also broke the content. Three columns of prose in eighty
+        characters left about thirty per cell, so /tools rendered tool
+        descriptions cut off mid-word -- "Send the whole list each ti" --
+        with no ellipsis to say anything had been removed. Here the first
+        column is a gutter sized to the longest name, and everything else
+        wraps in the space that is left, which is most of the line.
+        """
         columns = list(columns)
-        rows = [[str(c) for c in row] for row in rows]
-
-        if self.narrow:
-            # Stack each row as a labelled block; a grid this wide would wrap
-            # into unreadable confetti on a phone.
-            if title:
-                self.console.print(Text(title, style=f"bold {ACCENT}"))
-            for row in rows:
-                head, *rest = row
-                self.console.print(Text(head, style="bold"))
-                for label, value in zip(columns[1:], rest):
-                    if value:
-                        self.console.print(
-                            Text(f"  {label}: ", style=MUTED) + Text(value))
-            self.console.print()
+        rows = [[str(cell) for cell in row] for row in rows]
+        if not rows:
             return
+        if title:
+            self.console.gap()
+            self.console.print(Text(title, style=f"bold {ACCENT}"))
 
-        table = Table(title=title or None, border_style=MUTED, box=self.box,
-                      title_style=f"bold {ACCENT}")
-        for column in columns:
-            table.add_column(column)
+        names = [row[0] for row in rows]
+        # The longest name, up to a limit. The limit is what stops one
+        # sixty-character tool signature from indenting every description
+        # in the list; anything past it takes its own row instead. Sizing
+        # to a percentile rather than the maximum was worse: it wrapped
+        # "/sessions" and "Mouse wheel" in a list whose longest name was
+        # eleven characters, to save four columns nobody wanted.
+        gutter = min(max((cell_len(n) for n in names), default=0), 28)
+        room = max(20, self.width - gutter - 3)
+
         for row in rows:
-            table.add_row(*row)
-        self.console.print(table)
+            head, *rest = row
+            # Anything after the first column is description, joined by the
+            # separator and never labelled. A cell reading "yes" under a
+            # column heading three rows up says nothing on its own, so a
+            # caller that wants it understood passes the word: ("write_file",
+            # "writes", "Replaces the file.") rather than a bare "yes".
+            body = f"  {self.g.dot}  ".join(
+                value for value in rest if value)
+            line = Text()
+            if cell_len(head) > gutter:
+                # Its own row rather than a name cut mid-token. Truncating
+                # here is what made /tools unreadable in the first place,
+                # and a signature is the one thing on the line you cannot
+                # guess the rest of.
+                line.append(sanitise(head), style="bold")
+                line.append("\n" + " " * gutter)
+            else:
+                line.append(sanitise(head).ljust(gutter), style="bold")
+            first = True
+            for piece in wrap_cells(sanitise(body), room) or [""]:
+                if not first:
+                    line.append("\n" + " " * gutter)
+                line.append("  " + piece, style=MUTED)
+                first = False
+            self.console.print(line)
+        self.console.print()
+
 
 VERBS = {
     "read_file": "read", "write_file": "write", "edit_file": "edit",
@@ -1615,46 +1676,6 @@ class ThoughtStreamer(CodeStreamer):
         super().__init__(ui, indent=indent, style=MUTED, code=False)
 
 
-METER_BLOCKS = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
-"""Lower-eighth block through full block."""
-
-METER_WIDTH = 3
-
-
-def effort_meter(effort: str, unicode_ok: bool = True) -> str:
-    """A fixed-width gauge for an effort level.
-
-    Fixed width on purpose: a meter that grew with the level would shift
-    everything after it in the bar every time you pressed Ctrl-E.
-    """
-    from .effort import ORDER
-
-    try:
-        rank = ORDER.index(effort)
-    except ValueError:
-        return " " * METER_WIDTH
-    # rank+1 of len(ORDER), so the lowest level still shows something: a
-    # meter that is blank at `low` reads as broken rather than as low.
-    fraction = (rank + 1) / len(ORDER)
-
-    if not unicode_ok:
-        # Three characters that read as increasing intensity, all one cell.
-        step = min(METER_WIDTH, max(1, round(fraction * METER_WIDTH)))
-        return (".:!"[step - 1] * step).ljust(METER_WIDTH)
-
-    filled = fraction * METER_WIDTH
-    out = []
-    for slot in range(METER_WIDTH):
-        share = min(1.0, max(0.0, filled - slot))
-        if share <= 0:
-            out.append(" ")
-        else:
-            index = min(len(METER_BLOCKS) - 1,
-                        max(0, round(share * (len(METER_BLOCKS) - 1))))
-            out.append(METER_BLOCKS[index])
-    return "".join(out)
-
-
 SURGE_FRAMES = (
     "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588",
     "\u2588\u2587\u2586\u2585\u2584\u2583\u2582\u2581",
@@ -1807,15 +1828,6 @@ class ActivityBar:
         seconds = self.elapsed()
         return self.tokens / seconds if seconds > 0.4 and self.tokens else 0.0
 
-    def effort_meter(self) -> str:
-        """A little gauge that fills up as the effort level rises.
-
-        The level already has a name in the bar; this is there so the change
-        is visible at a glance without reading a word -- pick ultra and the
-        strip visibly leans on it.
-        """
-        return effort_meter(self.effort, self.ui.g.unicode)
-
     def _activity_text(self) -> Text:
         """The activity word. Held still, and read rather than watched.
 
@@ -1843,12 +1855,12 @@ class ActivityBar:
         order: how long has it been, is anything still arriving, and how
         fast. Everything else is a setting rather than news.
 
-        The model name, the effort meter and the context percentage used to
-        live here too, and claimed their space *before* the activity did --
-        so on an eighty-column terminal the answer to "what is it doing"
-        was one word adrift at the left while four facts that had not
-        changed since start-up filled the rest. They are all on the idle
-        strip under the prompt, which is where a setting belongs.
+        The model name and the context percentage used to live here too,
+        and claimed their space *before* the activity did -- so on an
+        eighty-column terminal the answer to "what is it doing" was one
+        word adrift at the left while facts that had not changed since
+        start-up filled the rest. They are on the idle strip under the
+        prompt, which is where a setting belongs.
         """
         out: list[tuple[str, str]] = []
         if rate := self.rate():
