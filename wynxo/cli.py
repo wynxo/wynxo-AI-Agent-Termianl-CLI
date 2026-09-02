@@ -58,6 +58,17 @@ from .ui import (ACCENT, BAR_ACCENT, FAINT, MUTED, ActivityBar,
                  CodeStreamer, ThoughtStreamer, UI, _ansi_of, effort_meter,
                  plan_steps, sanitise)
 
+def _is_a_sentence(text: str) -> bool:
+    """Whether a tool's "target" is really prose.
+
+    A target is a thing: a path, a pattern, a count. Three or more words
+    with no path separator in them is a tool describing itself, which
+    belongs under the head rather than on it.
+    """
+    words = text.split()
+    return len(words) >= 3 and "/" not in text and "\\" not in text
+
+
 def _trim_echo(detail: str, tool: str, target: str) -> str:
     """``detail`` with the words the head line already said taken out.
 
@@ -422,9 +433,6 @@ class TerminalCallbacks(Callbacks):
         """When the running tool began, for deciding whether anybody is
         waiting on its output."""
         self._pending_call: tuple[str, str] | None = None
-        self._plan_shape: tuple[str, ...] = ()
-        """The steps of the last plan committed to the transcript, so a
-        todo_write that only ticks one off does not reprint the list."""
         """The call the live region is currently narrating. Held so the block
         printed when it finishes can name what it acted on."""
         self._held_output: list[str] = []
@@ -696,7 +704,7 @@ class TerminalCallbacks(Callbacks):
                 # the screen exists for -- was the one kind of content
                 # starting hard against column zero, so it read as overflow
                 # rather than as the reply to the line above it.
-                self.streamer = CodeStreamer(self.ui, indent="  ")
+                self.streamer = CodeStreamer(self.ui, indent="")
                 self._streaming = True
             if self.bar is not None:
                 self.bar.update(activity="writing", detail="",
@@ -817,13 +825,19 @@ class TerminalCallbacks(Callbacks):
         # reprinting four lines for it is how the plan ended up on screen
         # once per tool call.
         if name == "todo_write" and ok:
+            # One line, like every other call. The full list used to be
+            # committed here whenever the steps changed, which put a
+            # five-row box into the scrollback for a four-step plan -- on a
+            # turn that had not done anything yet. A plan is a state, and a
+            # state belongs in the live region, where it is one line that
+            # changes rather than a panel printed again each time it does.
+            # /todo prints the list when the list is what you want.
             steps = plan_steps(sanitise(display or output))
-            shape = tuple(text for _state, text in steps)
-            if steps and shape != self._plan_shape:
-                self._plan_shape = shape
-                self.ui.console.gap()
-                self.ui.todos(sanitise(display or output))
-                self.ui.console.print()
+            done = sum(1 for state, _ in steps if state == "done")
+            if steps:
+                self.ui.tool_call("todo_write", f"{done}/{len(steps)}",
+                                  next((text for state, text in steps
+                                        if state == "now"), ""))
             return
         # Whatever was held back because the command looked too quick to be
         # worth watching. It worked out is the only reason holding it was
@@ -872,7 +886,7 @@ class TerminalCallbacks(Callbacks):
         if self._coder is None:
             self.ui.console.print()
             self.ui.console.print(Text("  writing", style=f"bold {MUTED}"))
-            self._coder = CodeStreamer(self.ui, indent="    ",
+            self._coder = CodeStreamer(self.ui, indent="  ",
                                        style=MUTED, code=False, literal=True)
         self._coder.feed(text)
 
@@ -911,7 +925,14 @@ class TerminalCallbacks(Callbacks):
             first = first.split("ERROR:", 1)[-1].strip() or first
         rest = len(body.splitlines()) - 1
         if not target:
-            return first[:80], f"+{rest} more lines" if rest else ""
+            return "", first[:110] + (f"  (+{rest} lines)" if rest else "")
+        if _is_a_sentence(target):
+            # Some tools summarise themselves in prose -- run_tests reports
+            # "syntax check passed (compileall)" -- and prose on the head
+            # line reads as a filename that got out of hand. The head is
+            # for what was acted on; anything that is really a sentence
+            # belongs underneath with the rest of the outcome.
+            return "", target[:110]
         return target, (_trim_echo(first, name, target)[:110]
                         + (f"  (+{rest} lines)" if rest else ""))
 
@@ -1953,13 +1974,19 @@ class Repl:
         # which is the least distinctive glyph a prompt can have -- and the
         # queue drain drew its own line with "›", so one concept had two
         # carets and two renderers.
-        body.append(f"  {self.ui.g.caret} ", style=f"bold {ACCENT}")
+        body.append(f"{self.ui.g.caret} ", style=f"bold {ACCENT}")
         first, *rest = text.splitlines() or [""]
         body.append(first, style="bold")
         for line in rest:
-            body.append("\n    " + line, style="bold")
+            body.append("\n  " + line, style="bold")
         if note:
             body.append(f"   {note}", style=FAINT)
+        # boundary(), not gap(): a typed line already has one blank row
+        # above it from the composer erasing itself, and a queued one has
+        # none, so asking for a single separation made the seam one row on
+        # one path and two on the other. Asking for the seam itself makes
+        # both two, which is also the one place in the transcript worth
+        # spending a second row on -- it is where one exchange ends.
         self.ui.console.boundary()
         self.ui.console.print(body, overflow="ellipsis", no_wrap=True)
         self.ui.console.print()

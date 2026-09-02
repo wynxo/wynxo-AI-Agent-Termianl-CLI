@@ -109,9 +109,14 @@ class Config(Schema):
                        "kawaii or mommy.",
                   default="mommy",
                   choices=("plain", "warm", "mentor", "blunt", "kawaii", "mommy"))
-    pet = Field(bool, "Show the companion face in the status bar.", default=True)
+    pet = Field(bool, "Draw the companion beside the live status.",
+                default=False)
+    """Off unless asked for. The companion is flavour, and flavour that
+    arrives switched on is decoration you have to find the setting to turn
+    off. What a coding session needs to show is what the agent is doing;
+    everything else is opt-in, which is what /pet on is for."""
     pet_name = Field(str, "What to call it.", default="wyn")
-    animations = Field(bool, "Animate the face and the startup.", default=True)
+    animations = Field(bool, "Animate the companion.", default=True)
     show_thinking = Field(bool, "Display the model's reasoning. It always "
                                 "thinks; this only controls whether you see it.",
                           default=False)

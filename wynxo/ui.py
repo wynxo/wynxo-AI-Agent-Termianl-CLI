@@ -551,13 +551,20 @@ class UI:
         The facts give way from the least useful end, so a narrow terminal
         keeps the model and loses the server.
         """
-        server = endpoint.split(" (")[0].replace("http://", "").replace("https://", "")
-        facts = [model, effort, self.shorten_path(workspace), server]
+        # Two facts, and neither is a setting. The effort level and the
+        # server used to be here: both are on the status line under the
+        # prompt, both are one keystroke from /status, and neither changes
+        # what you do next. A header is read once, so what belongs in it is
+        # what you need to know once -- which model, and where it is
+        # pointed. The endpoint in particular is nearly always the same
+        # loopback address, which makes it the definition of a fact that
+        # earns nothing by being on screen all session.
+        facts = [model, self.shorten_path(workspace)]
 
-        separator = f"  {self.g.dot}  "
-        # "  wynxo" plus the separator after it, so what is left is what
-        # the facts actually have to fit in.
-        budget = max(12, self.width - 2 - 5 - cell_len(separator) - 1)
+        separator = f" {self.g.dot} "
+        # "wynxo" plus the separator after it, so what is left is what the
+        # facts actually have to fit in.
+        budget = max(12, self.width - 5 - cell_len(separator) - 1)
 
         def room(parts: list[str]) -> int:
             return sum(cell_len(p) for p in parts) \
@@ -573,7 +580,7 @@ class UI:
                 detail.append(separator, style=FAINT)
             detail.append(part, style="" if index == 0 else MUTED)
 
-        line = Text("  ")
+        line = Text()
         line.append("wynxo", style=f"bold {ACCENT}")
         line.append(separator, style=FAINT)
         line.append_text(detail)
@@ -625,14 +632,20 @@ class UI:
 
     # -- messages ----------------------------------------------------------
 
-    def detail_line(self, text: str, style: str, indent: int = 6) -> None:
+    def detail_line(self, text: str, style: str, indent: int = 2) -> None:
         """A secondary line under a block, wrapped inside its own column.
 
-        rich wraps at the console edge and resumes at column zero, so at 40
-        columns "◈ tests  syntax check passed (compileall)" put
-        "(compileall)" hard against the left margin -- the one place in the
-        transcript nothing else ever sits. Every line printed here belongs
-        to the block above it and has to keep saying so on the second row.
+        Two columns, because that is one step in from the heads -- which
+        start at zero. The transcript used to hold every line at column two
+        and put details at six, so nothing was ever flush with the edge and
+        the whole session read as a formatted document rather than as
+        terminal output. Indentation is worth spending where it means
+        something: "this belongs to the line above it". Spent everywhere it
+        means nothing at all.
+
+        rich wraps at the console edge and resumes at column zero, so a
+        detail longer than the terminal would otherwise fall out from under
+        its own block on the second row. Wrapped here instead.
         """
         pad = " " * indent
         room = max(8, self.width - indent - 1)
@@ -659,7 +672,7 @@ class UI:
         the first word rather than under the marker, so the "!" stays the
         only thing in its column and the prose forms a clean block.
         """
-        head = f"  {marker} " if marker else "  "
+        head = f"{marker} " if marker else ""
         hang = " " * cell_len(head)
         width = max(20, self.width - 1)
         room = max(8, width - cell_len(head))
@@ -677,7 +690,6 @@ class UI:
                     # The marker gets the emphasis (bold), the words keep the
                     # status colour, so the "!" reads as a marker and the
                     # prose as the message.
-                    out.append("  ", style=style)
                     out.append(marker, style=f"bold {style}")
                     out.append(" " + piece, style=style)
                 else:
@@ -711,7 +723,7 @@ class UI:
         head, *rest = body.splitlines()
         self.console.gap()
         line = Text()
-        line.append(f"  {self.g.cross} ", style=BAD)
+        line.append(f"{self.g.cross} ", style=BAD)
         line.append(head, style=f"bold {BAD}")
         self.console.print(line)
         for extra in rest:
@@ -720,7 +732,7 @@ class UI:
             # stripping every line to the same column turns the commands
             # into prose.
             depth = len(extra) - len(extra.lstrip())
-            self.detail_line(extra.strip(), BAD, indent=6 + depth)
+            self.detail_line(extra.strip(), BAD, indent=2 + depth)
         self.console.print()
 
     def success(self, message: str) -> None:
@@ -742,13 +754,13 @@ class UI:
         head, *rest = lines
         style = GOOD if head.lstrip().startswith(self.g.tick) else WARN
         self.console.gap()
-        self.console.print(Text(f"  {head.strip()}", style=f"bold {style}"))
+        self.console.print(Text(head.strip(), style=f"bold {style}"))
         for line in rest:
-            # The report indents its own detail by two; the transcript's
-            # detail column is six, so its structure is preserved rather
-            # than flattened or doubled.
+            # The report indents its own detail by two, which is already
+            # the transcript's detail column, so its structure carries
+            # over rather than being flattened or doubled.
             depth = len(line) - len(line.lstrip())
-            self.detail_line(line.strip(), FAINT, indent=4 + depth)
+            self.detail_line(line.strip(), FAINT, indent=max(2, depth))
         self.console.print()
 
     def help_block(self, text: str) -> None:
@@ -768,60 +780,58 @@ class UI:
                 self.console.print()
                 continue
             depth = len(line) - len(line.lstrip())
-            self.detail_line(line.strip(), MUTED, indent=2 + depth)
+            self.detail_line(line.strip(), MUTED, indent=depth)
 
     def assistant_markdown(self, text: str) -> None:
         if not text.strip():
             return
         text = sanitise(text)
         self.console.gap()
-        # Same left margin as every other kind of line in the transcript.
-        self.console.print(Padding(Markdown(text, code_theme=self.code_theme),
-                                   (0, 0, 0, 2)))
+        # Flush with everything else. The answer is the thing the session
+        # is for; it does not need setting in from the edge to be found.
+        self.console.print(Markdown(text, code_theme=self.code_theme))
         self.console.gap()
 
     # -- tools -------------------------------------------------------------
 
     def tool_call(self, name: str, target: str, detail: str = "",
                   ok: bool = True) -> None:
-        """One tool call: what ran, then what came of it.
+        """One tool call: what ran, and what came of it underneath.
 
-            → read_file  calc.py
-            ✓ 5 lines
+            → read src/auth.py
+              214 lines
 
-        Two rows at one indent, not a row and an indented note. The call and
-        its outcome are peers -- you read down a column of arrows to see what
-        the agent did, and down a column of ticks to see whether it worked --
-        and a detail line set six columns in read as a footnote to the arrow
-        rather than as the answer to it.
+            → tests
+              ✗ 2 failed
 
-        It was two rows for a while before that too, but they were the same
-        row twice: one printed when the call started and one when it
-        finished, so the tool was named twice and the file was named twice.
-        What is in flight belongs in the live region, which is redrawable;
-        the conversation is a record, and a record wants the outcome once.
+        One mark, and it means one thing. There was a tick on the result of
+        every call for a while, level with the arrow -- two marks per call,
+        in two columns, on lines that nearly always said the same thing:
+        it worked. A column of ticks carries no information when almost
+        nothing fails, and it costs the one mark that should stop the eye.
+        So success is silent and failure is marked, and scanning a session
+        for what went wrong is scanning for the only ✗ on the page.
 
-        Failure changes the mark, not just the colour. Colour alone was the
-        whole signal for one pass, and in a scrollback of a dozen calls a
-        red arrow and a violet one are the same shape at a glance -- worth
-        nothing with NO_COLOR set, on a monochrome terminal, or to a
-        red-green colourblind reader.
+        The detail sits one step in, under the call it belongs to, rather
+        than level with it. That is the whole hierarchy: what the agent
+        did, and beneath it what happened.
         """
         line = Text()
-        line.append(f"  {self.g.arrow} ", style=ACCENT)
-        line.append(name, style="bold")
+        line.append(f"{self.g.arrow} ", style=ACCENT if ok else BAD)
+        line.append(verb(name), style="bold" if ok else f"bold {BAD}")
         if target:
-            line.append(f"  {sanitise(target)[:120]}", style=MUTED)
+            line.append(f" {sanitise(target)[:120]}", style=MUTED)
         # One row, always. The head is a label -- what ran, on what -- and a
         # label that wraps stops being scannable, so a long target is cut
-        # rather than folded.
+        # rather than folded. The detail underneath is prose and wraps.
         self.console.print(line, overflow="ellipsis", no_wrap=True)
         if detail:
-            mark = self.g.tick if ok else self.g.cross
-            self.detail_line(f"{mark} {detail[:400]}",
-                             GOOD if ok else BAD, indent=2)
+            body = detail[:400]
+            if not ok:
+                body = f"{self.g.cross} {body}"
+            self.detail_line(body, BAD if not ok else MUTED)
         elif not ok:
-            self.detail_line(f"{self.g.cross} failed", BAD, indent=2)
+            self.detail_line(f"{self.g.cross} failed", BAD)
 
     def tool_result(self, name: str, ok: bool, display: str, output: str) -> None:
         if display.startswith(("--- ", "diff --git")) or "\n+++ " in display[:200]:
@@ -851,8 +861,8 @@ class UI:
         text = sanitise(line).rstrip()
         if not text.strip():
             return
-        limit = max(24, self.width - 8)
-        self.console.print(Text("      " + text[:limit], style=MUTED))
+        limit = max(24, self.width - 4)
+        self.console.print(Text("  " + text[:limit], style=MUTED))
 
     MAX_DIFF_LINES = 120
     """Past this a diff stops being something you read and starts being
@@ -901,7 +911,7 @@ class UI:
         self.console.print(
             Padding(Syntax(sanitise(text), language, theme=self.code_theme,
                            word_wrap=True),
-                    (0, 0, 0, 4)))
+                    (0, 0, 0, 2)))
 
     def highlight(self, line: str, language: str = "text") -> Text:
         """One line, syntax-highlighted, with no block chrome.
@@ -931,7 +941,7 @@ class UI:
         return rendered
 
     def code_line(self, line: str, language: str = "text",
-                  indent: str = "  ") -> None:
+                  indent: str = "") -> None:
         self.console.print(Text(indent) + self.highlight(line, language),
                            highlight=False)
 
@@ -990,6 +1000,31 @@ class UI:
         for row in rows:
             table.add_row(*row)
         self.console.print(table)
+
+VERBS = {
+    "read_file": "read", "write_file": "write", "edit_file": "edit",
+    "multi_edit": "edit", "list_dir": "ls", "glob": "find",
+    "grep": "search", "web_search": "search", "web_fetch": "fetch",
+    "run_tests": "tests", "shell": "run", "todo_write": "plan",
+    "github_read": "github", "github_write": "github",
+    "projectmap": "map", "launch_application": "launch",
+    "remember": "remember", "recall": "recall",
+}
+"""What a tool is called on screen, where that is not what it is called in
+the registry.
+
+"read_file" and "write_file" are names for a dispatch table. On a line a
+person reads while waiting, they are two syllables of noise each and they
+all rhyme, so a column of them is harder to scan than a column of verbs --
+which is exactly the job that column has. The registry keeps its names;
+this is the only place they are translated, and anything not listed is
+shown as it is."""
+
+
+def verb(name: str) -> str:
+    """The display name for a tool."""
+    return VERBS.get((name or "").strip().lower(), name)
+
 
 def plan_steps(rendered: str) -> list[tuple[str, str]]:
     """(state, text) for each step. State is "done", "now" or "todo".
@@ -1536,6 +1571,11 @@ class CodeStreamer:
             self._newline()
         self.in_code = False
         if self.started:
+            # A bare print() is already a request for separation rather
+            # than for a newline -- SafeConsole drops it when the
+            # transcript is on a blank row -- so this is gap() by another
+            # name, and it keeps working when a test swaps in a plain rich
+            # Console to capture what was written.
             self.ui.console.print()
         return ""
 
@@ -1831,11 +1871,12 @@ class ActivityBar:
         self._frame += 1
         width = max(20, self.ui.width)
 
-        # Exactly one thing on this line moves, and it is whichever of these
-        # is the sign of life. With the mascot on it is the mascot; with it
-        # off it is the spinner. Never both, and never a third.
+        # Exactly one thing in this region moves, and it is whichever of
+        # these is the sign of life. With the companion drawn it is the
+        # companion; without it -- the default -- it is the spinner here.
+        # Never both, and never a third.
         left = Text(style=BAR_STYLE)
-        if self._has_scene():
+        if self._companion_drawn():
             # The companion is directly above, animating. A second sign of
             # life on the row underneath it is not reassurance, it is two
             # things moving in six rows.
@@ -2097,20 +2138,17 @@ class ActivityBar:
         lines = self._scene_lines()
         if not lines:
             return []
-        if not (self.animate and sprite.fits(self.ui.width, self.ui.g.unicode)):
+        if not self._companion_drawn():
             return lines
         art = sprite.rows(self.state, self._frame // self.SCENE_PACE,
                           self.ui.palette)
         out = []
         for index in range(sprite.HEIGHT):
-            row = Text(" ")
+            row = Text()
             row.append_text(art[index])
             if index < len(lines):
                 row.append("  ")
-                # The lines carry their own two-space margin for when they
-                # are drawn alone; beside the sprite that margin is the
-                # sprite, so it comes off.
-                row.append_text(lines[index][2:])
+                row.append_text(lines[index])
             out.append(row)
         return out
 
@@ -2130,6 +2168,19 @@ class ActivityBar:
         terminal = {"success": self.ui.g.tick, "error": self.ui.g.cross,
                     "cancelled": self.ui.g.cross}
         return terminal.get(self.state, self.ui.g.busy)
+
+    def _companion_drawn(self) -> bool:
+        """Whether the companion is actually on screen this frame.
+
+        The strip asks as well as the scene, because exactly one thing in
+        the region may move. With the companion drawn it is the companion;
+        without it -- which is the default, since the companion is opt-in
+        -- the strip keeps its spinner, or the only thing moving in a
+        six-row region would be the tenths digit of a clock.
+        """
+        return (self.pet is not None and self.pet.enabled
+                and self.animate
+                and sprite.fits(self.ui.width, self.ui.g.unicode))
 
     SCENE_PACE = 4
     """Frames of the bar's clock per frame of the companion. The strip
@@ -2164,7 +2215,7 @@ class ActivityBar:
         doing it to, then how far through the task it is."""
         out = []
         if self.activity:
-            head = Text("  ")
+            head = Text()
             if self.stalled:
                 # Never invented activity. When nothing has arrived for long
                 # enough to notice, the honest line is that we are waiting,
@@ -2178,10 +2229,12 @@ class ActivityBar:
                             style=BAR_DIM)
             out.append(head)
         if self.detail:
-            line = Text("  ")
-            line.append(f"{self.ui.g.arrow} ", style=BAR_ACCENT)
-            line.append(sanitise(self.detail)[:60], style=BAR_DIM)
-            out.append(line)
+            # No arrow. The transcript's arrow means "a call was made", and
+            # putting one here made the live region look like it was
+            # announcing a second call that never got a verb. This is the
+            # thing the activity above is being done to, so it sits under
+            # it and says only that.
+            out.append(Text("  " + sanitise(self.detail)[:60], style=BAR_DIM))
         if (step := self._plan_line()) is not None:
             out.append(step)
         return out

@@ -531,8 +531,14 @@ class TestOnlyOneThingOnTheStripMoves:
 
     def test_the_strip_itself_holds_still_under_the_companion(self):
         """One animation at a time. With the companion moving above it, a
-        spinner on the row beneath is the second."""
-        bar = self.bar()
+        spinner on the row beneath is the second.
+
+        The companion is opt-in, so it has to be asked for here -- with it
+        off, which is the default, the spinner is the only sign of life
+        and the strip is where it belongs."""
+        from wynxo.pet import Pet
+
+        bar = self.bar(pet=Pet(enabled=True))
         bar.state = "searching"
         strips = set()
         for frame in range(24):

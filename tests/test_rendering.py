@@ -466,8 +466,8 @@ class TestHeader:
                     "/tmp/p")
         lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
         assert len(lines) == 1, lines
-        assert lines[0].startswith("  wynxo")
-        assert "qwen3-coder:30b" in lines[0] and "medium" in lines[0]
+        assert lines[0].startswith("wynxo")
+        assert "qwen3-coder:30b" in lines[0] and "/tmp/p" in lines[0]
         assert "─" not in lines[0]
 
     def test_the_companion_is_not_on_the_identity_line(self, capsys):
@@ -500,19 +500,25 @@ class TestHeader:
         UI().banner("m", "http://127.0.0.1:11434", "low", "/tmp/p")
         assert "?[" not in capsys.readouterr().out
 
-    def test_the_header_names_the_effort_without_drawing_a_gauge(self, capsys):
-        """"███   ultra" spent four cells of solid block on a word that was
-        already there, in a header whose job is to be read once and then
-        ignored. The level is a fact, so it is written as one; the gauge
-        belongs to the status strip, where it changes while you watch."""
+    def test_the_header_carries_no_settings_at_all(self, capsys):
+        """Neither the effort level nor the server.
+
+        "███   ultra" spent four cells of solid block on a word that was
+        already beside it. Then the word went too: a header is read once,
+        and a setting you can change at any moment is not something you
+        need told once -- it is on the status line under the prompt, which
+        is where the things that change live. What is left is the pair of
+        facts you cannot get at a glance anywhere else."""
         from wynxo.ui import Glyphs
 
         ui = UI()
         ui.g = Glyphs(True)
         ui.banner("m", "http://127.0.0.1:11434", "ultra", "/tmp/p")
         out = capsys.readouterr().out
-        assert "ultra" in out
+        assert "ultra" not in out
+        assert "127.0.0.1" not in out
         assert "█" not in out
+        assert "m" in out and "/tmp/p" in out
 
 
 class TestAMessageStaysInItsOwnColumn:
@@ -542,10 +548,11 @@ class TestAMessageStaysInItsOwnColumn:
 
     def test_every_line_after_the_first_is_indented(self):
         lines = self._lines("warn", self.LONG)
-        assert lines[0].startswith("  ! ")
+        assert lines[0].startswith("! ")
         for line in lines[1:]:
-            assert line.startswith("    "), line
-            assert not line.startswith("    !"), "the marker belongs on the first line only"
+            assert line.startswith("  "), line
+            assert not line.lstrip().startswith("!"), \
+                "the marker belongs on the first line only"
 
     def test_the_continuation_sits_under_the_first_word(self):
         lines = self._lines("warn", self.LONG)
@@ -572,7 +579,7 @@ class TestAMessageStaysInItsOwnColumn:
                 assert len(line) - len(line.lstrip()) == column, (method, line)
 
     def test_a_short_message_is_left_alone(self):
-        assert self._lines("warn", "not a git checkout") == ["  ! not a git checkout"]
+        assert self._lines("warn", "not a git checkout") == ["! not a git checkout"]
 
     def test_the_marker_gets_the_bold(self):
         """The marker carries the emphasis; the words keep the status

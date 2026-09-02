@@ -287,17 +287,17 @@ class TestMessagesKeepTheirColumn:
         lines = self.warned("設定ファイルが見つかりませんでした。" * 4)
         assert len(lines) > 1, "the fixture did not wrap"
         for line in lines[1:]:
-            assert line.startswith("    "), f"lost its indent: {line!r}"
+            assert line.startswith("  "), f"lost its indent: {line!r}"
 
     def test_ascii_messages_are_unchanged(self):
         lines = self.warned("a normal long warning message " * 4)
-        assert lines[0].startswith("  ! ")
+        assert lines[0].startswith("! ")
         for line in lines[1:]:
-            assert line.startswith("    ")
+            assert line.startswith("  ")
 
     def test_a_message_with_its_own_lines_keeps_them(self):
         lines = self.warned("first\nsecond")
-        assert lines == ["  ! first", "    second"]
+        assert lines == ["! first", "  second"]
 
 
 class TestWrapCells:
@@ -328,9 +328,12 @@ class TestWrapCells:
 
 
 class TestTheBannerKeepsWhatMatters:
-    """"Assembled by priority rather than truncated: on a narrow terminal
-    the server address goes before the project path does, because the path
-    is the one you actually need to see." It did the opposite."""
+    """Assembled by priority rather than truncated.
+
+    The server address is not in it at all now -- it is a setting, it is on
+    the status line, and it is nearly always the same loopback address --
+    so what the priority protects is the path, which is the fact you cannot
+    get anywhere else at a glance. It used to be dropped first."""
 
     def drawn(self, width: int, path: str) -> str:
         ui = UI()
@@ -349,25 +352,28 @@ class TestTheBannerKeepsWhatMatters:
         return [ln.rstrip() for ln in plain(written)
                 if ln.strip() and set(ln.strip()) != {"\u2500"}]
 
-    def test_the_server_is_never_shown_without_the_path(self):
-        """The property, at every width: dropping is by priority, so the
-        server cannot survive something more important than itself."""
+    def test_the_server_is_never_in_the_header(self):
+        """It survived every squeeze at one point, ahead of the path."""
+        for width in (24, 60, 90, 130):
+            assert "homelab" not in "\n".join(
+                self.drawn(width, "/home/you/code/proj"))
+
+    def test_the_model_is_never_dropped_before_the_path(self):
+        """Dropping is by priority: the path goes before the model does,
+        because a session with no model named tells you nothing at all."""
         path = "/home/you/code/some-project-with-a-long-name"
         squeezed = False
         for width in range(24, 130):
             line = "\n".join(self.drawn(width, path))
-            has_path = "long-name" in line
-            if "homelab" in line:
-                assert has_path, (
-                    f"width {width}: the server was kept and the path "
-                    f"dropped, which is backwards -- {line!r}")
-            elif has_path:
+            if "long-name" in line:
+                assert "qwen2.5-coder:32b" in line, f"width {width}: {line!r}"
+            else:
                 squeezed = True
         assert squeezed, "no width actually exercised the choice"
 
     def test_both_fit_when_there_is_room(self):
         block = "\n".join(self.drawn(120, "/home/you/code/proj"))
-        assert "proj" in block and "homelab" in block
+        assert "proj" in block and "qwen2.5-coder:32b" in block
 
     def test_no_row_of_the_banner_runs_past_the_terminal(self):
         for width in range(24, 130, 7):

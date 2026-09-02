@@ -435,7 +435,9 @@ class TestTheCardCatchesTheStream:
         # came of it dimmer underneath. It used to print its own shape --
         # "✓ write_file · calc.py · +6 -2" -- so which of two renderings a
         # call got came down to whether it happened to write a file.
-        heads = [line for line in plain if "write_file" in line]
+        from wynxo.ui import verb
+
+        heads = [line for line in plain if verb("write_file") in line]
         assert len(heads) == 1, heads
         assert "calc.py" in heads[0]
         import re

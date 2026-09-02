@@ -164,7 +164,12 @@ class TestAToolResultClosesWhatWasStreaming:
         await callbacks.on_tool_result("write_file", False, "refused", "refused")
         assert not callbacks.card.live, "the card must not be left streaming"
         written = re.sub(r"\x1b\[[0-9;]*m", "", ui.console.file.getvalue())
-        assert "write_file" in written
+        # "write", not "write_file": the registry keeps its names and the
+        # transcript shows verbs, because a column of them is what you scan
+        # to see what the agent did.
+        from wynxo.ui import verb
+
+        assert verb("write_file") in written
         assert "refused" in written
 
     async def test_a_normal_result_is_unaffected(self):

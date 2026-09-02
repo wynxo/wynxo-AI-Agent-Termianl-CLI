@@ -1,16 +1,21 @@
-"""Everything the conversation contains sits at the same left margin.
+"""Indentation means "this belongs to the line above it", and nothing else.
 
-The user's line, the tool lines, the answer, the diffs and the companion's
-greeting all start a couple of columns in. A block that starts hard against
-column zero reads as something that has escaped the conversation rather than
-as part of it -- and a Syntax block, which draws a filled background band,
-reads that way most of all.
+Every line used to sit two columns in: the user's line, the tool lines, the
+answer, the diffs. Nothing was ever flush with the edge, so the margin said
+nothing -- and a session read as a formatted document rather than as
+terminal output, which is most of what made it feel unlike a command-line
+tool.
 
-Verbose tool output was the one kind of content in the whole transcript with
-no margin. The same call also asked for its tick-or-cross line with empty
-arguments, and that line returns early on empty text -- so verbose mode
-printed a wall of output with no indication of whether the tool had
-succeeded.
+So heads start at column zero and details start at two, under the head they
+belong to. What these pin is that the second kind never becomes the first:
+a detail long enough to wrap, or an error carrying a worked example, must
+not fall out from under its own block on the second row.
+
+Verbose tool output was the one kind of content in the whole transcript
+that had no relationship to its block at all. The same call also asked for
+its outcome line with empty arguments, and that line returns early on empty
+text -- so verbose mode printed a wall of output with no indication of
+whether the tool had succeeded.
 """
 
 from __future__ import annotations
@@ -39,27 +44,31 @@ def _lines(ui) -> list[str]:
 
 
 class TestCodeBlocksAreIndented:
+    """Somebody else's code is not the agent talking, so it is set in."""
+
     def test_a_block_starts_past_column_zero(self):
         ui = _ui()
         ui.code("x = 1\ny = 2\n", "python")
         assert _lines(ui), "nothing was drawn"
         for line in _lines(ui):
-            assert line.startswith("    "), repr(line)
+            assert line.startswith("  "), repr(line)
 
     def test_the_content_is_still_there(self):
         ui = _ui()
         ui.code("alpha = 1\n", "python")
         assert any("alpha" in line for line in _lines(ui))
 
-    def test_it_matches_the_answer_margin(self):
-        """Not a number invented here: the same margin the answer uses."""
+    def test_it_sits_in_from_the_answer(self):
+        """The answer is the agent talking and starts at the edge; a code
+        block is somebody else's text quoted inside it, so it is set in."""
         answer = _ui()
         answer.assistant_markdown("a sentence")
         block = _ui()
         block.code("x = 1\n", "python")
-        indent = min(len(line) - len(line.lstrip())
-                     for line in _lines(answer))
-        assert all(len(line) - len(line.lstrip()) >= indent
+        prose = min(len(line) - len(line.lstrip())
+                    for line in _lines(answer))
+        assert prose == 0
+        assert all(len(line) - len(line.lstrip()) > prose
                    for line in _lines(block))
 
 
@@ -105,16 +114,18 @@ class TestVerboseToolOutputSaysWhetherItWorked:
         assert sum("does not exist" in line for line in _lines(ui)) == 1, \
             _lines(ui)
 
-    def test_nothing_in_it_starts_at_column_zero(self):
+    def test_the_output_stays_under_the_call(self):
+        """The head is the call and everything below it is that call's
+        output, so the output is what carries the indent."""
         for ok in (True, False):
-            for line in _lines(self._run(ok)):
-                assert line.startswith(" "), repr(line)
+            head, *rest = _lines(self._run(ok))
+            assert not head.startswith(" "), repr(head)
+            for line in rest:
+                assert line.startswith("  "), repr(line)
 
 
-class TestTheCompletionReportKeepsTheMargin:
-    """It was the last block still starting hard against column zero, which
-    reads as output that escaped the transcript rather than as the turn's
-    own summing-up."""
+class TestTheCompletionReportKeepsItsShape:
+    """A verdict at the edge, and the evidence for it one step in."""
 
     def _report(self):
         from wynxo.task_state import TaskState, TaskStateMachine
@@ -140,7 +151,9 @@ class TestTheCompletionReportKeepsTheMargin:
         ui.outcome(self._report())
         lines = _lines(ui)
         assert lines
-        for line in lines:
+        head, *rest = lines
+        assert not head.startswith(" "), repr(head)
+        for line in rest:
             assert line.startswith("  "), repr(line)
 
     def test_the_verdict_leads_and_the_evidence_sits_under_it(self):
@@ -152,7 +165,7 @@ class TestTheCompletionReportKeepsTheMargin:
         ui.outcome(self._report())
         lines = _lines(ui)
         head, *rest = lines
-        assert len(head) - len(head.lstrip()) == 2, repr(head)
+        assert len(head) - len(head.lstrip()) == 0, repr(head)
         assert rest, lines
         for line in rest:
-            assert len(line) - len(line.lstrip()) > 2, repr(line)
+            assert len(line) - len(line.lstrip()) >= 2, repr(line)
