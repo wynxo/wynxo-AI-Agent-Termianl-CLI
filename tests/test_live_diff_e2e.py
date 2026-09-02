@@ -438,8 +438,10 @@ class TestTheCardCatchesTheStream:
         heads = [line for line in plain if "write_file" in line]
         assert len(heads) == 1, heads
         assert "calc.py" in heads[0]
-        counts = [line for line in plain if line.strip().startswith("+")
-                  and "-" in line]
+        import re
+
+        counts = [line for line in plain
+                  if re.search(r"\+\d+ -\d+", line)]
         assert len(counts) == 1, counts
         body = "\n".join(plain)
         assert "for value in values" not in body, (

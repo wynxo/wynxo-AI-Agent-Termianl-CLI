@@ -339,17 +339,19 @@ class TestTheLiveRegionCannotContradictTheConversation:
         after = source.split("finally:", 1)[1]
         assert "if interrupted:" in after and "Interrupted." in after
 
-    def test_the_face_says_what_the_tool_is(self):
-        """One mapping, not three. The activity name the tool reports picks
-        the mood, and the mood picks the face -- there is no second table
-        turning the same facts into a second visual."""
-        from wynxo.cli import _ACTIVITY
-        from wynxo.pet import ACTIVITY_MOODS, Mood, Pet
+    def test_the_companion_says_what_the_tool_is(self):
+        """One mapping, not three. The tool name picks the state and the
+        state picks the picture -- there is no second table turning the
+        same facts into a second visual.
 
-        pet = Pet()
-        pet.set_activity(_ACTIVITY["write_file"])
-        assert pet.mood is ACTIVITY_MOODS[_ACTIVITY["write_file"]]
-        assert pet.mood is not Mood.IDLE
+        There were three: the tool name became an activity word for the
+        strip, a mood for the face in pet.py, and a state for a set of
+        scenes nothing drew. Two of those are gone."""
+        from wynxo.companion import State, state_for
+
+        assert state_for("write_file", "executing") is State.CODING
+        assert state_for("read_file", "executing") is State.READING
+        assert state_for("write_file", "executing") is not State.IDLE
 
 class TestAPermissionPromptCanBeAbandoned:
     """Ctrl-C at a blocking permission prompt has to get you out.

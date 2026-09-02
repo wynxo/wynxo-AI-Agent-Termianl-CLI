@@ -1,34 +1,21 @@
-"""One cat, one size, and glyphs a terminal can be trusted with.
+"""One character, one size, and pixels a terminal can be trusted with.
 
-The cat is three rows of line art in the header, and the status strip
-carries a single mark whose colour is the mood. That split is what these
-pin: the drawing has to hold its block so the text beside it does not move
-between moods, and the mark has to measure exactly one cell so the strip --
-which is redrawn a dozen times a second on the bottom row of a live display
--- cannot tear on whichever frame a glyph appears in.
+The companion is a half-block sprite: two pixels to a cell, ``▀`` drawn in
+the top pixel's colour over the bottom pixel's. That buys a silhouette --
+ears, a head that tapers, shoulders, a laptop -- at a size where the face
+before it could only be punctuation.
 
-The drawing itself is ASCII, which is not a limitation but the point. The
-face before it was a kaomoji, and it collected exactly the faults a
-single-line Unicode face collects:
+What these pin is the part that goes wrong silently. A frame a pixel wider
+than the rest shifts the text set beside it; a frame a row shorter makes
+the live region change height between states, which reads as the whole
+screen jumping. Neither shows up in a screenshot of one frame, and both are
+obvious in motion, which is the worst combination to leave untested.
 
-  * Frames were padded to the widest frame of the *current mood*, so idle
-    (7 cells) to running (8) shifted the whole line at every mood change.
-
-  * The eyes were U+2022 BULLET, East Asian Width "Ambiguous" -- one cell in
-    a Western locale, two in a CJK one. So were the breve, the squint, the
-    tears and the multiplication sign; one mood was built from combining
-    accents.
-
-  * The muzzle was U+FECC, an Arabic presentation form, whose bidi class is
-    AL. A terminal implementing the bidirectional algorithm may reorder the
-    neutrals either side of a strong RTL character -- which is to say, the
-    eyes -- and the face comes apart.
-
-Line art has none of those questions to answer, so what is left to check is
-that the block holds and that the one remaining Unicode glyph, the status
-mark, is safe.
+There is no second drawing to keep in step any more. ``pet.py`` had a face,
+``companion.py`` had a full set of staged ASCII scenes nothing ever drew,
+and ``motion.py`` wrapped those a third time for previews. The face and the
+scenes are gone; the previews draw this.
 """
-
 from __future__ import annotations
 
 import unicodedata
@@ -36,214 +23,138 @@ import unicodedata
 import pytest
 from rich.cells import cell_len
 
-from wynxo.pet import (ACTIVITY_MOODS, EARS, FRAMES, HEIGHT, MARKS,
-                       MARKS_ASCII, MOOD_ROLES, Mood, Pet, WIDTH)
+from wynxo import sprite
+from wynxo.companion import State
+from wynxo.theme import PURPLE, names, resolve
 
 
-def _every_row():
-    for mood, frames in FRAMES.items():
-        for index, (eyes, mouth) in enumerate(frames):
-            yield mood, index, eyes
-            yield mood, index, mouth
+def _frames():
+    for state, frames in sprite.FRAMES.items():
+        for index, pixels in enumerate(frames):
+            yield state, index, pixels
 
 
 class TestTheBlockNeverChangesSize:
-    def test_every_row_is_the_same_width(self):
-        widths = {cell_len(row) for _mood, _i, row in _every_row()}
-        assert widths == {WIDTH}, sorted(widths)
-        assert cell_len(EARS) == WIDTH
+    @pytest.mark.parametrize("state,index,pixels", list(_frames()))
+    def test_every_frame_is_the_same_pixel_grid(self, state, index, pixels):
+        assert len(pixels) == sprite.HEIGHT * 2, f"{state.value}[{index}]"
+        for row, line in enumerate(pixels):
+            assert len(line) == sprite.WIDTH, \
+                f"{state.value}[{index}] row {row}: {len(line)}"
 
-    def test_the_drawing_is_the_block_in_every_mood(self):
-        for unicode_ok in (True, False):
-            pet = Pet(unicode=unicode_ok)
-            for mood in Mood:
-                pet.react(mood)
-                for _ in range(8):
-                    rows = pet.rows()
-                    assert len(rows) == HEIGHT, mood.value
-                    assert {cell_len(r) for r in rows} == {WIDTH}, mood.value
+    @pytest.mark.parametrize("state", list(State))
+    def test_every_state_draws_the_same_block(self, state):
+        for frame in range(len(sprite.FRAMES[state])):
+            rows = sprite.rows(state, frame, PURPLE)
+            assert len(rows) == sprite.HEIGHT
+            for row in rows:
+                assert row.cell_len == sprite.WIDTH, \
+                    f"{state.value}[{frame}]: {row.plain!r}"
 
-    def test_the_text_beside_the_mascot_never_moves(self):
-        """The failure this is really about: everything to the right of the
-        cat sitting still while the mood changes."""
-        pet = Pet()
+    def test_the_text_beside_the_companion_never_moves(self):
+        """The failure this is really about: the status lines set to the
+        right of the character sitting still while the state changes."""
         starts = set()
-        for mood in Mood:
-            pet.react(mood)
-            starts |= {cell_len(row + "  wynxo") for row in pet.rows()}
+        for state in State:
+            for row in sprite.rows(state, 0, PURPLE):
+                starts.add(row.cell_len + len("  status"))
         assert len(starts) == 1, starts
 
-    def test_the_status_mark_is_one_cell(self):
-        """The strip is width-exact. A two-cell mark tears it."""
-        for mood in Mood:
-            assert cell_len(MARKS[mood]) == 1, mood.value
-            assert cell_len(MARKS_ASCII[mood]) == 1, mood.value
 
+class TestEveryCellIsSafeInALineOfText:
+    @pytest.mark.parametrize("state", list(State))
+    def test_only_the_four_glyphs_are_drawn(self, state):
+        for frame in range(len(sprite.FRAMES[state])):
+            for row in sprite.rows(state, frame, PURPLE):
+                assert set(row.plain) <= set(sprite.GLYPHS), row.plain
 
-class TestEveryGlyphIsSafeInALineOfText:
-    @pytest.mark.parametrize("mood,index,row", list(_every_row()))
-    def test_the_drawing_is_ascii(self, mood, index, row):
-        """Which settles ambiguous width, combining marks and bidi at once:
-        no ASCII character is any of those things."""
-        row.encode("ascii")     # raises if not
+    def test_the_glyphs_are_one_cell_and_ambiguous(self):
+        """Documenting the constraint the technique comes with.
 
-    @pytest.mark.parametrize("mood", list(Mood))
-    def test_the_status_mark_is_safe(self, mood):
-        mark = MARKS[mood]
-        for ch in mark:
-            assert unicodedata.east_asian_width(ch) not in ("A", "W", "F"), (
-                f"{mood.value}: {ch!r} measures one cell here and draws two "
-                "in a CJK locale")
-            assert not unicodedata.combining(ch), f"{mood.value}: {ch!r}"
-            assert unicodedata.bidirectional(ch) not in ("AL", "R", "AN"), (
-                f"{mood.value}: {ch!r} may reorder what sits beside it")
-        MARKS_ASCII[mood].encode("ascii")
+        ▀ and ▄ are the only characters that split a cell horizontally, and
+        they are East Asian Width Ambiguous, as is █. There is no Neutral
+        alternative to pick instead -- so half-block art cannot be made safe
+        in a locale that draws Ambiguous wide, and the honest answer is to
+        decline to draw it there rather than to pretend otherwise. That is
+        what the locale gate below is for; this pins why it has to exist.
+        """
+        for char in sprite.GLYPHS:
+            assert cell_len(char) == 1, char
+        assert {unicodedata.east_asian_width(c) for c in sprite.GLYPHS.strip()} \
+            == {"A"}
+
+    def test_transparent_pixels_paint_no_background(self):
+        """A shape on the conversation, not a coloured rectangle sitting on
+        it. Only cells where two different opaque colours stack may set a
+        background at all."""
+        for state in State:
+            rows = sprite.rows(state, 0, PURPLE)
+            for row in rows:
+                for span in row.spans:
+                    text = row.plain[span.start:span.end]
+                    if "on " in str(span.style):
+                        assert " " not in text, (state.value, text)
 
 
 class TestItIsOneCharacter:
-    def test_the_voice_does_not_change_the_species(self):
-        pet = Pet()
-        pet.react(Mood.IDLE)
-        base = pet.rows(advance=False)
-        for voice in ("mommy", "kawaii", "plain", "mentor", "blunt", ""):
-            pet.style_name = voice
-            assert pet.rows(advance=False) == base, voice
+    def test_every_frame_keeps_the_ears_and_the_laptop(self):
+        """The silhouette is the character. Written as one base with rows
+        edited, so a state cannot quietly become a different animal."""
+        for state, index, pixels in _frames():
+            assert set(pixels[9]) <= set(".LC"), f"{state.value}[{index}]"
+            assert "F" in pixels[3], f"{state.value}[{index}]: no head"
 
-    def test_the_body_is_identical_in_every_frame(self):
-        """Ears and outline hold still; only the middle three cells of each
-        row change. That is what makes a frame change read as an expression
-        rather than as a different animal: the parentheses that are the
-        cheeks and the > < that is the muzzle are in the same place in
-        every frame of every mood, so what moves is the face inside them.
-        """
-        skeletons = set()
-        for frames in FRAMES.values():
-            for eyes, mouth in frames:
-                blanked = []
-                for row in (eyes, mouth):
-                    chars = list(row)
-                    for slot in (2, 3, 4):
-                        chars[slot] = "_"
-                    blanked.append("".join(chars))
-                skeletons.add(tuple(blanked))
-        assert skeletons == {("( ___ )", " >___< ")}, skeletons
+    def test_success_and_error_do_not_share_a_silhouette(self):
+        """The one pair that must never be confused at a glance, since one
+        of them means stop reading and look. Compared as glyphs, not as
+        colour: a red closed eye and a happy closed eye are the same shape,
+        and that is exactly how they used to be told apart."""
+        good = [r.plain for r in sprite.rows(State.SUCCESS, 0, PURPLE)]
+        bad = [r.plain for r in sprite.rows(State.ERROR, 0, PURPLE)]
+        assert good != bad
 
-    def test_every_mood_is_drawn(self):
-        for mood in Mood:
-            assert FRAMES[mood], mood.value
-            assert MARKS[mood], mood.value
-
-    def test_reading_and_testing_do_not_look_alike(self):
-        """They are different things to be doing and used to share a face."""
-        assert set(FRAMES[Mood.READING]) & set(FRAMES[Mood.TESTING]) == set()
+    def test_a_blink_survives_without_colour(self):
+        """Dimming the eye pixel left the cell's glyph identical, so the
+        character never blinked on a terminal without truecolour."""
+        frames = {tuple(r.plain for r in sprite.rows(State.IDLE, f, PURPLE))
+                  for f in range(len(sprite.FRAMES[State.IDLE]))}
+        assert len(frames) > 1
 
 
 class TestTheColourComesFromTheTheme:
-    def test_every_mood_has_a_role(self):
-        for mood in Mood:
-            assert mood in MOOD_ROLES, mood.value
+    def test_every_ink_is_a_role_not_a_colour(self):
+        for char, role in sprite.INK.items():
+            if not role:
+                continue
+            assert not role.startswith("#"), char
+            assert getattr(PURPLE, role, None), (char, role)
 
-    def test_a_role_is_a_palette_field_not_a_colour(self):
-        from wynxo.theme import PURPLE
-
-        for mood, role in MOOD_ROLES.items():
-            assert hasattr(PURPLE, role), f"{mood.value} -> {role!r}"
-
-    def test_switching_theme_switches_the_mascot(self):
-        """It used to name literal colours -- grey62, bright_cyan -- so the
-        mascot was the one thing /theme could not reach."""
-        from wynxo import theme
-
-        pet = Pet()
-        pet.react(Mood.THINKING)
-        theme.use(theme.resolve("purple"))
-        purple = pet.style()
-        theme.use(theme.resolve("catboy"))
-        assert pet.style() != purple
-        theme.use(theme.resolve("purple"))
-
-    def test_trouble_never_looks_like_ordinary_work(self):
-        """Whatever the theme, a sad cat must not be the busy colour."""
-        from wynxo import theme
-
-        pet = Pet()
-        for name in theme.names():
-            theme.use(theme.resolve(name))
-            pet.react(Mood.SAD)
-            sad = pet.style()
-            pet.react(Mood.THINKING)
-            assert sad != pet.style(), name
-            pet.react(Mood.HAPPY)
-            assert sad != pet.style(), name
-        theme.use(theme.resolve("purple"))
+    @pytest.mark.parametrize("theme", names())
+    def test_switching_theme_switches_the_companion(self, theme):
+        palette = resolve(theme)
+        drawn = sprite.rows(State.CODING, 0, palette)
+        styles = {str(span.style) for row in drawn for span in row.spans}
+        assert any(palette.accent in style for style in styles), theme
 
 
-class TestTheMoodAlwaysHasAFace:
-    def test_every_mapped_activity_lands_somewhere_drawable(self):
-        for activity, mood in ACTIVITY_MOODS.items():
-            assert FRAMES[mood], f"{activity} -> {mood.value}"
+class TestItGivesWayOnASmallTerminal:
+    def test_no_sprite_where_half_blocks_will_not_render(self):
+        assert sprite.fits(120, unicode_ok=False) is False
 
-    def test_an_unknown_activity_is_survivable(self):
-        pet = Pet()
-        pet.set_activity("something nobody has mapped")
-        assert pet.mood is Mood.THINKING
-        assert {cell_len(row) for row in pet.rows()} == {WIDTH}
+    def test_no_sprite_on_a_narrow_terminal(self):
+        assert sprite.fits(40, unicode_ok=True) is False
+        assert sprite.fits(sprite.MIN_COLUMNS, unicode_ok=True) is True
 
+    def test_no_sprite_where_ambiguous_width_draws_wide(self, monkeypatch):
+        """A CJK locale may draw ▀ as two cells, which would double the
+        sprite and shift the text beside it by fourteen columns a frame."""
+        monkeypatch.setenv("LC_ALL", "ja_JP.UTF-8")
+        assert sprite.fits(120, unicode_ok=True) is False
+        monkeypatch.setenv("LC_ALL", "en_GB.UTF-8")
+        assert sprite.fits(120, unicode_ok=True) is True
 
-class TestTheCompanionDoesNotRepeatItself:
-    """Three or four lines per event and two or three uses per session: a
-    plain random choice repeats often enough to be noticed, and a companion
-    that greets you with the identical sentence every time you open it reads
-    as a string constant rather than as a character."""
-
-    def _pet(self, voice="mommy"):
-        pet = Pet()
-        pet.style_name = voice
-        return pet
-
-    def test_never_the_same_line_twice_running(self):
-        for voice in ("default", "kawaii", "mommy"):
-            pet = self._pet(voice)
-            for event in ("greet", "done", "error", "bye", "proud"):
-                seen = [pet.remark(event) for _ in range(20)]
-                pairs = list(zip(seen, seen[1:]))
-                assert all(a != b for a, b in pairs), (voice, event)
-
-    def test_it_still_uses_the_whole_set(self):
-        """Avoiding a repeat must not collapse to alternating two lines."""
-        pet = self._pet()
-        from wynxo.pet import REMARKS_MOMMY
-
-        seen = {pet.remark("greet") for _ in range(200)}
-        assert seen == set(REMARKS_MOMMY["greet"])
-
-    def test_a_single_option_is_survivable(self):
-        pet = self._pet()
-        pet.style_name = "default"
-        from wynxo import pet as pet_module
-
-        pet_module.REMARKS["solo"] = ["only one"]
-        try:
-            assert pet.remark("solo") == "only one"
-            assert pet.remark("solo") == "only one"
-        finally:
-            del pet_module.REMARKS["solo"]
-
-    def test_an_unknown_event_is_silent(self):
-        assert self._pet().remark("nothing-maps-to-this") == ""
-
-    def test_a_disabled_pet_says_nothing(self):
-        pet = self._pet()
-        pet.enabled = False
-        assert pet.remark("greet") == ""
-
-    def test_the_companion_is_not_chatty(self):
-        """It speaks at three moments in a whole session -- hello, goodbye,
-        and a commit worth being pleased about. Anything that comments on
-        every tool stops being charming after ten minutes."""
-        import inspect
-
-        from wynxo import cli
-
-        source = inspect.getsource(cli)
-        assert source.count(".remark(") <= 3, "the companion gained a voice"
+    def test_it_leaves_room_for_the_words_beside_it(self):
+        """The companion is seventh in the hierarchy and the status lines
+        are third and fourth, so the threshold has to leave the words a
+        usable column rather than just fitting the picture."""
+        assert sprite.MIN_COLUMNS >= sprite.WIDTH * 2

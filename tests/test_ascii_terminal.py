@@ -388,8 +388,13 @@ class TestPinnedPlan:
         bar.set_plan(self.PLAN)
         rendered = bar._renderable()
         assert isinstance(rendered, Group)
-        assert rendered.renderables[0] is not None
-        assert len(rendered.renderables) == 2
+        # The strip is the thing anchored to the prompt, so it is last.
+        # What sits above it grew from one plan panel to the scene rows, so
+        # the count is not the invariant -- the order is.
+        assert len(rendered.renderables) >= 2
+        assert "0.0s" in rendered.renderables[-1].plain
+        above = " ".join(r.plain for r in rendered.renderables[:-1])
+        assert "1/3" in above, above
 
     def test_it_draws_in_ascii_too(self):
         bar = self.bar(unicode_ok=False)
@@ -486,10 +491,16 @@ class TestOnlyOneThingOnTheStripMoves:
         return b
 
     def _frames(self, bar, count=24):
+        """The whole pinned region per frame, not just the strip.
+
+        The one animation moved: it is the companion in the scene above the
+        strip now, and the strip holds still underneath it. Sampling only
+        the strip answers "nothing moves" for a region that is moving."""
         out = []
         for frame in range(count):
             bar._frame = frame
-            out.append(bar._render().plain)
+            out.append("\n".join([t.plain for t in bar._scene()]
+                                  + [bar._render().plain]))
         return out
 
     def test_the_word_never_moves(self):
@@ -513,16 +524,27 @@ class TestOnlyOneThingOnTheStripMoves:
     def test_an_empty_activity_is_survivable(self):
         assert self.bar(activity="")._activity_text().plain == ""
 
-    def test_the_spinner_is_the_one_animation_without_a_mascot(self):
-        """Something has to say the session is alive."""
-        assert len(set(self._frames(self.bar()))) > 1
+    def test_something_always_says_the_session_is_alive(self):
+        bar = self.bar()
+        bar.state = "searching"
+        assert len(set(self._frames(bar))) > 1
 
-    def test_the_mascot_is_the_one_animation_with_a_mascot(self):
-        from wynxo.pet import Mood, Pet
+    def test_the_strip_itself_holds_still_under_the_companion(self):
+        """One animation at a time. With the companion moving above it, a
+        spinner on the row beneath is the second."""
+        bar = self.bar()
+        bar.state = "searching"
+        strips = set()
+        for frame in range(24):
+            bar._frame = frame
+            strips.add(bar._render().plain)
+        assert len(strips) == 1, strips
 
-        pet = Pet()
-        pet.react(Mood.SEARCHING)
-        bar = self.bar(pet=pet)
+    def test_the_strip_animates_when_it_is_the_only_row(self):
+        """Below the scene threshold the strip is all there is, so the
+        spinner comes back to it."""
+        bar = self.bar()
+        bar.ui.width = 40
         assert len(set(self._frames(bar))) > 1
 
     def test_no_second_animation_rides_along_on_any_theme(self):
@@ -538,25 +560,28 @@ class TestOnlyOneThingOnTheStripMoves:
             assert len(set(self._frames(bar))) == 1, name
 
     def test_reduced_motion_holds_everything_still(self):
-        from wynxo.pet import Mood, Pet
-
-        pet = Pet(animate=False)
-        pet.react(Mood.THINKING)
-        bar = self.bar(animate=False, pet=pet)
+        bar = self.bar(animate=False)
+        bar.state = "searching"
         assert len(set(self._frames(bar))) == 1
 
     def test_reduced_motion_still_says_what_is_happening(self):
-        """Nothing moving must not mean nothing shown."""
-        bar = self.bar(animate=False)
-        drawn = bar._render().plain
-        assert "thinking" in drawn
-        assert bar.STILL_MARK in drawn
+        """Nothing moving must not mean nothing shown.
 
-    def test_ascii_terminals_get_a_still_mark_they_can_draw(self):
+        Reduced motion drops the companion -- it is the moving part, and a
+        still picture of a cat is decoration -- and keeps the words, which
+        carry the same fact."""
+        bar = self.bar(animate=False)
+        drawn = "\n".join(t.plain for t in bar._scene())
+        assert "thinking" in drawn
+        assert bar.ui.g.busy in drawn
+        assert not set(drawn) & set("▀▄█"), "the sprite is still moving"
+
+    def test_ascii_terminals_get_a_mark_they_can_draw(self):
         bar = self.bar(unicode_ok=False, animate=False)
-        drawn = bar._render().plain
-        assert bar.STILL_MARK_ASCII in drawn
+        drawn = "\n".join(t.plain for t in bar._scene())
+        assert bar.ui.g.busy in drawn
         drawn.encode("ascii")
+        bar._render().plain.encode("ascii")
 
 
 

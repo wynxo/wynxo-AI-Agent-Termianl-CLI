@@ -28,6 +28,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .platforms import is_narrow, terminal_width
+from . import sprite
 
 from . import theme as _theme
 from .theme import Palette, resolve as resolve_theme
@@ -377,13 +378,6 @@ def _scrubbed(buffer):
             yield segment
 
 
-def pet_width(pet) -> int:
-    """Cells the mascot occupies, or zero when it is switched off."""
-    from .pet import WIDTH
-
-    return WIDTH if getattr(pet, "enabled", False) else 0
-
-
 def _supports_unicode() -> bool:
     encoding = (getattr(sys.stdout, "encoding", "") or "").lower()
     if "utf" in encoding:
@@ -436,6 +430,12 @@ class Glyphs:
             self.step_done, self.step_now, self.step_todo = "✓", "●", "○"
             self.spark = "✦"
             self.tool = "◈"
+            self.task = "✦"
+            # A ring, not a disc: the activity mark reads as "in progress"
+            # rather than as a bullet in a list. U+25CC is Neutral width,
+            # unlike the filled circles it resembles.
+            self.busy = "◌"
+            self.warn_mark = "⚠"
             # Rounded box corners, for the input field the prompt sits in.
             self.tl, self.tr, self.bl, self.br = "╭", "╮", "╰", "╯"
             self.hbar, self.vbar, self.ellipsis = "─", "│", "…"
@@ -446,6 +446,9 @@ class Glyphs:
             self.step_done, self.step_now, self.step_todo = "+", ">", "-"
             self.spark = "*"
             self.tool = "*"
+            self.task = "*"
+            self.busy = "o"
+            self.warn_mark = "!"
             self.tl, self.tr, self.bl, self.br = "+", "+", "+", "+"
             self.hbar, self.vbar, self.ellipsis = "-", "|", "..."
 
@@ -531,26 +534,30 @@ class UI:
 
     def banner(self, model: str, endpoint: str, effort: str, workspace: str,
                pet=None, greeting: str = "") -> None:
-        """The identity block: the mascot, the name, the session, a hello.
+        """One line: who this is, what it is running, and where.
 
-        Three rows, and the whole start-up. It replaces five rows of block
-        art, two rows of dotted metadata, a full-width rule and a separate
-        greeting line -- nine rows of chrome before the first prompt, whose
-        largest element degraded into unreadable mush at forty columns.
+        Start-up should cost the screen a single row. It used to cost nine
+        -- five of block art, two of dotted metadata, a rule and a greeting
+        -- and then three, with the character standing beside a stacked
+        identity. Three is not nine, but it is still a title card, and a
+        title card is something you read once and then scroll past forever.
 
-        The character carries the identity; the name is the only bold thing;
-        the session facts sit under it in muted text and give way from the
-        least useful end. No rule: the blank line after it is the divider,
-        and a solid eighty-cell bar is a heavier one than this needs.
+        The character is not here any more. It belongs to the work: it
+        appears while a task runs, in the live region, and goes when the
+        task does. A mascot on the identity line is a mascot you are
+        looking at during every minute the agent is idle, which is most of
+        them.
+
+        The facts give way from the least useful end, so a narrow terminal
+        keeps the model and loses the server.
         """
         server = endpoint.split(" (")[0].replace("http://", "").replace("https://", "")
         facts = [model, effort, self.shorten_path(workspace), server]
 
         separator = f"  {self.g.dot}  "
-        # The mascot's own width plus its margins, so the text beside it is
-        # measured against what is actually left.
-        gutter = 2 + (pet_width(pet) if pet is not None else 0) + 3
-        budget = max(12, self.width - gutter - 1)
+        # "  wynxo" plus the separator after it, so what is left is what
+        # the facts actually have to fit in.
+        budget = max(12, self.width - 2 - 5 - cell_len(separator) - 1)
 
         def room(parts: list[str]) -> int:
             return sum(cell_len(p) for p in parts) \
@@ -566,25 +573,12 @@ class UI:
                 detail.append(separator, style=FAINT)
             detail.append(part, style="" if index == 0 else MUTED)
 
-        beside = [Text("wynxo", style=f"bold {ACCENT}"), detail]
-        if greeting:
-            # Trimmed to the same budget the facts get, rather than left for
-            # rich to cut at the console edge: at forty columns a long
-            # remark ran to the last cell, so the block had a two-cell
-            # margin down its left and none at all on the right.
-            hello = Text(greeting, style=FAINT)
-            hello.truncate(budget, overflow="ellipsis")
-            beside.append(hello)
-
+        line = Text("  ")
+        line.append("wynxo", style=f"bold {ACCENT}")
+        line.append(separator, style=FAINT)
+        line.append_text(detail)
         self.console.print()
-        if pet is not None and pet.enabled:
-            self.console.print(pet.block(beside), overflow="ellipsis",
-                               no_wrap=True)
-        else:
-            for line in beside:
-                row = Text("  ")
-                row.append_text(line)
-                self.console.print(row, overflow="ellipsis", no_wrap=True)
+        self.console.print(line, overflow="ellipsis", no_wrap=True)
         self.console.print()
 
     def clear(self) -> None:
@@ -598,52 +592,6 @@ class UI:
         self.console.clear()
         self.console.file.write("\x1b[3J")   # erase saved lines
         self.console.file.flush()
-
-    WAKE = (("sleepy", 0.10), ("sleepy", 0.06), ("idle", 0.10),
-            ("happy", 0.14), ("idle", 0.0))
-    """Eyes shut, a blink, open, pleased, settle. Four tenths of a second.
-
-    It used to open on the SAD face -- the ✕✕ eyes -- so the first thing the
-    session showed was a distressed cat, which is not what waking up looks
-    like. An animation wants a start state, a transition and an end state,
-    and this one now has all three in the order a person would draw them.
-    """
-
-    async def wake(self, pet, name: str) -> None:
-        """A short wake-up before the header.
-
-        Under half a second, once per session, and skipped entirely when
-        animation is off or nothing is watching. Anything longer is a thing
-        you wait through rather than enjoy.
-
-        Async, and awaiting rather than sleeping. It is called from the
-        start-up coroutine, so a ``time.sleep`` here stopped the event loop
-        for the length of the animation -- harmless in practice, since
-        nothing else is pending four tenths of a second into a session, and
-        exactly the habit that is not harmless anywhere else.
-        """
-        if not (pet and pet.enabled and pet.animate and self.console.is_terminal):
-            return
-        if not self.live_ok:
-            # Where the live region cannot repaint (a captured stream, a
-            # forced-off live flag), a Live would write cursor moves and
-            # carriage returns into the output as literal "?25l" and "^M".
-            # One still frame instead.
-            self.console.print()
-            self.console.print(pet.block(), style=pet.style())
-            return
-        from .pet import Mood
-
-        sequence = [(Mood(name), pause) for name, pause in self.WAKE]
-        self.console.print()
-        with Live("", console=self.console, refresh_per_second=20,
-                  transient=True) as live:
-            for mood, pause in sequence:
-                pet.react(mood)
-                live.update(pet.block([None, Text(name, style=MUTED)]))
-                if pause:
-                    await asyncio.sleep(pause)
-        pet.rest()
 
     def shorten_path(self, path: str) -> str:
         """~/code/proj rather than /home/you/code/proj, and never the full
@@ -767,7 +715,12 @@ class UI:
         line.append(head, style=f"bold {BAD}")
         self.console.print(line)
         for extra in rest:
-            self.detail_line(extra.strip(), BAD)
+            # Relative indentation kept. An error can carry a worked
+            # example -- the Ollama one is four lines of shell -- and
+            # stripping every line to the same column turns the commands
+            # into prose.
+            depth = len(extra) - len(extra.lstrip())
+            self.detail_line(extra.strip(), BAD, indent=6 + depth)
         self.console.print()
 
     def success(self, message: str) -> None:
@@ -798,6 +751,25 @@ class UI:
             self.detail_line(line.strip(), FAINT, indent=4 + depth)
         self.console.print()
 
+    def help_block(self, text: str) -> None:
+        """A block of guidance, in the transcript's column.
+
+        Printed raw, a multi-line help string starts at column zero while
+        everything else in the transcript sits at column two -- and the
+        longest, most carefully written text in the session was the one
+        thing that looked like it had escaped the conversation. Its own
+        indentation is kept, because the shell commands in it are indented
+        on purpose.
+        """
+        if not text.strip():
+            return
+        for line in sanitise(text).splitlines():
+            if not line.strip():
+                self.console.print()
+                continue
+            depth = len(line) - len(line.lstrip())
+            self.detail_line(line.strip(), MUTED, indent=2 + depth)
+
     def assistant_markdown(self, text: str) -> None:
         if not text.strip():
             return
@@ -812,45 +784,44 @@ class UI:
 
     def tool_call(self, name: str, target: str, detail: str = "",
                   ok: bool = True) -> None:
-        """One tool call, as one block.
+        """One tool call: what ran, then what came of it.
 
-            ◈ read_file  calc.py
-                5 lines
+            → read_file  calc.py
+            ✓ 5 lines
 
-        It used to be two, and they said the same thing:
+        Two rows at one indent, not a row and an indented note. The call and
+        its outcome are peers -- you read down a column of arrows to see what
+        the agent did, and down a column of ticks to see whether it worked --
+        and a detail line set six columns in read as a footnote to the arrow
+        rather than as the answer to it.
 
-            ● read_file  calc.py
-                ✓ read calc.py (5 lines)
+        It was two rows for a while before that too, but they were the same
+        row twice: one printed when the call started and one when it
+        finished, so the tool was named twice and the file was named twice.
+        What is in flight belongs in the live region, which is redrawable;
+        the conversation is a record, and a record wants the outcome once.
 
-        -- the tool named twice, the file named twice, and a tick beside a
-        line that already read as success. The split was structural rather
-        than deliberate: one line was printed when the call started and the
-        other when it finished. What is in flight belongs in the live
-        region, which is redrawable; the conversation is a record, and a
-        record wants the outcome once.
-
-        The name is the prominent part, the target is muted beside it, and
-        anything further is dimmer again on its own line.
-
-        Failure changes the mark as well as the colour. Colour alone was
-        the whole signal for one pass, and in a scrollback of a dozen calls
-        a red diamond and a violet one are the same shape at a glance --
-        worth nothing at all with NO_COLOR set, on a monochrome terminal,
-        or to a red-green colourblind reader. The cross carries the fact
-        without needing the palette to survive.
+        Failure changes the mark, not just the colour. Colour alone was the
+        whole signal for one pass, and in a scrollback of a dozen calls a
+        red arrow and a violet one are the same shape at a glance -- worth
+        nothing with NO_COLOR set, on a monochrome terminal, or to a
+        red-green colourblind reader.
         """
         line = Text()
-        line.append(f"  {self.g.tool if ok else self.g.cross} ",
-                    style=ACCENT if ok else BAD)
+        line.append(f"  {self.g.arrow} ", style=ACCENT)
         line.append(name, style="bold")
         if target:
             line.append(f"  {sanitise(target)[:120]}", style=MUTED)
         # One row, always. The head is a label -- what ran, on what -- and a
         # label that wraps stops being scannable, so a long target is cut
-        # rather than folded. The detail underneath is prose and wraps.
+        # rather than folded.
         self.console.print(line, overflow="ellipsis", no_wrap=True)
         if detail:
-            self.detail_line(detail[:400], BAD if not ok else FAINT)
+            mark = self.g.tick if ok else self.g.cross
+            self.detail_line(f"{mark} {detail[:400]}",
+                             GOOD if ok else BAD, indent=2)
+        elif not ok:
+            self.detail_line(f"{self.g.cross} failed", BAD, indent=2)
 
     def tool_result(self, name: str, ok: bool, display: str, output: str) -> None:
         if display.startswith(("--- ", "diff --git")) or "\n+++ " in display[:200]:
@@ -1725,12 +1696,27 @@ class ActivityBar:
     def __init__(self, ui: "UI", effort: str, hint: str = "", model: str = "",
                  pet=None):
         self.ui = ui
+        self.state = "idle"
+        """The companion's state, set from the tool and the task state. A
+        name rather than an enum so nothing here has to import the state
+        machine to draw."""
+        self.step_started = 0.0
+        """When the current activity began -- not the turn.
+
+        Two clocks, because there are two questions. The strip's elapsed is
+        how long this turn has taken, which is what you want at the end; the
+        scene's is how long *this step* has been running, which is what you
+        want while it runs. Sharing one made every step read "· 41.2s" and
+        say nothing about the step it was attached to."""
+        self.stalled = False
+        """Set when nothing has arrived for long enough to be worth saying
+        so. Never used to invent activity -- only to stop claiming it."""
         self.effort = effort
         self.hint = hint
         self.model = model
         self.pet = pet
-        """When present it replaces the spinner: the face carries the same
-        information -- something is happening, and roughly what."""
+        """The voice, for the lines it says. It no longer draws: the
+        companion is the sprite in the scene above the strip."""
         self.activity = "thinking"
         self.detail = ""
         self.tokens = 0
@@ -1761,6 +1747,10 @@ class ActivityBar:
         inside the live region instead lets the answer arrive a word at a
         time without fighting the bar for the same cells."""
         self.started = time.monotonic()
+        self.step_started = self.started
+        self._seen = self.started
+        """When an event last arrived. Only ever used to stop claiming
+        activity, never to invent it."""
         self._live: Live | None = None
         self._frame = 0
         self._essential_width = MIN_ACTIVITY_WIDTH
@@ -1845,14 +1835,11 @@ class ActivityBar:
         # is the sign of life. With the mascot on it is the mascot; with it
         # off it is the spinner. Never both, and never a third.
         left = Text(style=BAR_STYLE)
-        if self.pet is not None and self.pet.enabled:
-            # One mark, not the whole character. Three rows of cat will not
-            # fit on a status line, and a one-line cat is the kaomoji this
-            # design replaced -- so the mascot lives in the header and the
-            # strip carries a mark whose colour says the mood and whose
-            # weight breathes while something is running.
-            left.append(f" {self.pet.mark(advance=self.animate)}  ",
-                        style=f"bold {self.pet.style()}")
+        if self._has_scene():
+            # The companion is directly above, animating. A second sign of
+            # life on the row underneath it is not reassurance, it is two
+            # things moving in six rows.
+            left.append(" ")
         elif self.animate:
             frames = self.SPINNER if self.ui.g.unicode else self.SPINNER_ASCII
             left.append(f" {frames[self._frame % len(frames)]}  ",
@@ -1863,7 +1850,14 @@ class ActivityBar:
             # nothing.
             mark = self.STILL_MARK if self.ui.g.unicode else self.STILL_MARK_ASCII
             left.append(f" {mark}  ", style=f"bold {BAR_ACCENT}")
-        left.append_text(self._activity_text())
+        if not self._has_scene():
+            # The activity word lives one row up, beside the companion,
+            # with the seconds it has been running. Repeating it here put
+            # "writing" on screen twice, six cells apart, which is the
+            # duplicate status this strip is supposed to be free of. It
+            # comes back when there is no scene to carry it -- a terminal
+            # too narrow for one, or a turn with nothing to say yet.
+            left.append_text(self._activity_text())
         # Everything up to here has to survive: the sign of life, and the
         # word saying what is happening.
         self._essential_width = left.cell_len + 2
@@ -1874,7 +1868,7 @@ class ActivityBar:
             left.append("  ")
             left.append(f"\u203a {self.queued}", style=f"bold {BAR_ACCENT}")
             self._essential_width = left.cell_len + 2
-        elif self.detail:
+        elif self.detail and not self._has_scene():
             # The detail is the flexible part: a long path may lose its tail.
             left.append("  ")
             left.append(self.detail, style=BAR_DIM)
@@ -1954,19 +1948,39 @@ class ActivityBar:
                           refresh_per_second=12, transient=True)
         self._live.start()
 
+    STALL_AFTER = 20.0
+    """Seconds of silence before saying so.
+
+    Long enough that a model thinking hard about a large prompt is not
+    accused of being stuck -- prompt evaluation alone can run past ten
+    seconds on a big context -- and short enough that a genuinely dead
+    connection does not sit there looking busy for a minute."""
+
     def update(self, activity: str | None = None, detail: str | None = None,
-               tokens: int | None = None, context_pct: float | None = None) -> None:
+               tokens: int | None = None, context_pct: float | None = None,
+               state: str | None = None) -> None:
         if activity is not None:
+            if activity != self.activity:
+                self.step_started = time.monotonic()
             self.activity = activity
-            if self.pet is not None:
-                self.pet.set_activity(activity)
         if detail is not None:
             self.detail = detail
         if tokens is not None:
             self.tokens = tokens
         if context_pct is not None:
             self.context_pct = context_pct
+        if state is not None:
+            self.state = state
+        self._seen = time.monotonic()
         self.refresh()
+
+    def tick(self) -> None:
+        """Advance the clocks. Called once per frame, by the frame.
+
+        The elapsed count and the stall check are read from the wall clock
+        rather than counted in frames, so a terminal that throttles repaints
+        does not slow time down."""
+        self.stalled = (time.monotonic() - self._seen) > self.STALL_AFTER
 
     def add_token(self, count: int = 1) -> None:
         """One streamed chunk is one token, near enough, for a live counter.
@@ -2058,12 +2072,135 @@ class ActivityBar:
                 body.append(line + "\n", style=BAR_DIM)
             body.rstrip()
             parts.append(body)
-        if (panel := self._plan_panel()) is not None:
-            parts.append(panel)
+        parts.extend(self._scene())
         if self.lead is not None and self.lead.plain:
             parts.append(self.lead)
         parts.append(self._render())
         return parts[0] if len(parts) == 1 else Group(*parts)
+
+    def _scene(self) -> list[Text]:
+        """The companion, with what it is doing written beside it.
+
+        Two columns sharing five rows rather than two stacked blocks. The
+        plan used to be a list pinned here in full, four or five rows of its
+        own that said the same thing on every frame; it is committed to the
+        transcript when the steps change and shows here as the one line that
+        does not -- which step, and how far along.
+
+        The character is the first thing dropped. It is seventh in the
+        hierarchy and the words beside it are third and fourth, so on a
+        narrow terminal, with animation off, or where half-blocks will not
+        render, the same three lines are drawn without it.
+        """
+        if not self._has_scene():
+            return []
+        lines = self._scene_lines()
+        if not lines:
+            return []
+        if not (self.animate and sprite.fits(self.ui.width, self.ui.g.unicode)):
+            return lines
+        art = sprite.rows(self.state, self._frame // self.SCENE_PACE,
+                          self.ui.palette)
+        out = []
+        for index in range(sprite.HEIGHT):
+            row = Text(" ")
+            row.append_text(art[index])
+            if index < len(lines):
+                row.append("  ")
+                # The lines carry their own two-space margin for when they
+                # are drawn alone; beside the sprite that margin is the
+                # sprite, so it comes off.
+                row.append_text(lines[index][2:])
+            out.append(row)
+        return out
+
+    def _step_clock(self) -> str:
+        """How long the current step has run, at the strip's precision."""
+        seconds = time.monotonic() - (self.step_started or self.started)
+        return f"{seconds:.1f}s" if seconds < 10 else f"{seconds:.0f}s"
+
+    def _mark(self) -> str:
+        """The one-cell mark in front of the activity word.
+
+        A ring while something is running, and the outcome once it is not.
+        It does not spin: the elapsed count beside it already moves, the
+        companion beside that already moves, and a third moving thing in
+        one six-row region is how a status area becomes a slot machine.
+        """
+        terminal = {"success": self.ui.g.tick, "error": self.ui.g.cross,
+                    "cancelled": self.ui.g.cross}
+        return terminal.get(self.state, self.ui.g.busy)
+
+    SCENE_PACE = 4
+    """Frames of the bar's clock per frame of the companion. The strip
+    repaints twelve times a second, which is right for a token counter and
+    far too fast for a blink."""
+
+    SCENE_MIN_COLUMNS = 60
+    """Below this the live state goes back into the strip, on one row.
+
+    The scene costs three rows and the sprite five. That is a fair trade on
+    a terminal with room and a bad one at forty columns, where five rows is
+    a third of the screen and the thing being pushed off the top is the
+    answer. Under pressure the order is conversation, composer, strip --
+    and the strip can say "reading  auth.py" perfectly well by itself."""
+
+    def _has_scene(self) -> bool:
+        """Whether the rows above the strip are carrying the live state.
+
+        A predicate rather than ``if self._scene_lines()``: the strip asks
+        this three times per frame to decide what it must not repeat, and
+        building three throwaway Texts a dozen times a second to answer a
+        yes-or-no question is work nobody sees.
+        """
+        if self.ui.width < self.SCENE_MIN_COLUMNS:
+            return False
+        return bool(self.activity or self.detail or self.plan)
+
+    def _scene_lines(self) -> list[Text]:
+        """What is happening, in words: at most three lines.
+
+        Ordered by the hierarchy -- what the agent is doing, what it is
+        doing it to, then how far through the task it is."""
+        out = []
+        if self.activity:
+            head = Text("  ")
+            if self.stalled:
+                # Never invented activity. When nothing has arrived for long
+                # enough to notice, the honest line is that we are waiting,
+                # not a spinner implying progress that is not happening.
+                head.append(f"{self.ui.g.warn_mark} waiting for model",
+                            style=f"bold {WARN}")
+            else:
+                head.append(f"{self._mark()} ", style=f"bold {BAR_ACCENT}")
+                head.append(self.activity, style="bold")
+                head.append(f"  {self.ui.g.dot}  {self._step_clock()}",
+                            style=BAR_DIM)
+            out.append(head)
+        if self.detail:
+            line = Text("  ")
+            line.append(f"{self.ui.g.arrow} ", style=BAR_ACCENT)
+            line.append(sanitise(self.detail)[:60], style=BAR_DIM)
+            out.append(line)
+        if (step := self._plan_line()) is not None:
+            out.append(step)
+        return out
+
+    def _plan_line(self) -> "Text | None":
+        """The plan as one line: how far, and which step is running."""
+        steps = plan_steps(self.plan) if self.plan else []
+        if not steps:
+            return None
+        done = sum(1 for state, _ in steps if state == "done")
+        if self.plan_done_frame:
+            done = len(steps)
+        line = Text("  ")
+        line.append(f"{self.ui.g.task} ", style=BAR_ACCENT)
+        line.append(f"{done}/{len(steps)}", style="bold")
+        current = next((text for state, text in steps if state == "now"), "")
+        if current:
+            line.append(f"  {current[:44]}", style=BAR_DIM)
+        return line
 
     def __rich_console__(self, console, options):
         """One frame. Measure the terminal, then draw against that width.
@@ -2086,6 +2223,7 @@ class ActivityBar:
         recompute.
         """
         self.ui.refresh_size()
+        self.tick()
         yield self._renderable()
 
     def stop(self) -> None:

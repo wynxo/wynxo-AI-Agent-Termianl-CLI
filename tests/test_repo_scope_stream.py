@@ -2,7 +2,7 @@
 
 import pytest
 
-from wynxo.pet import FRAMES, Mood, Pet
+from wynxo.companion import State
 from wynxo.prompts import VOICES, build_system_prompt
 from wynxo.repo import parse
 from wynxo.scope import Scope
@@ -151,34 +151,34 @@ class TestKawaii:
     def test_the_voice_does_not_change_the_species(self):
         """The kawaii voice used to get its own face set, so what the mascot
         *was* depended on a personality setting -- a kawaii user and a
-        default user were looking at two different animals. The voice
-        changes what it says, not what it is."""
-        pet = Pet()
-        pet.react(Mood.HAPPY)
-        default = pet.rows(advance=False)
-        for voice in ("kawaii", "mommy", "plain", "mentor"):
-            pet.style_name = voice
-            assert pet.rows(advance=False) == default, voice
+        default user were looking at two different animals.
 
-    def test_ascii_terminals_get_the_same_cat(self):
-        """There is no second drawing to fall back to any more.
+        It cannot now: the drawing is a different module from the voice and
+        is never handed one. What a voice changes is the words."""
+        import inspect
 
-        The cat is line art, so it renders on a terminal that has nothing
-        but ASCII -- which is why the parallel FACES_ASCII table could be
-        deleted rather than maintained. Only the one-cell status mark still
-        has a fallback, because that one really is a Unicode glyph.
+        from wynxo import sprite
+
+        source = inspect.getsource(sprite)
+        # The couplings that would let a voice reach the picture, not the
+        # voice names themselves: "plainly" contains "plain", and a
+        # substring check reported a comment as a dependency.
+        for coupling in ("style_name", "REMARKS", "from .pet", "Pet"):
+            assert coupling not in source, coupling
+
+    def test_a_terminal_without_half_blocks_gets_the_words(self):
+        """No second drawing to fall back to, and none wanted.
+
+        The fallback used to be a worse version of the same face in
+        punctuation, which is exactly what this design replaced. Where the
+        picture cannot render, the state is written out instead -- the
+        status lines beside the companion say the same thing.
         """
-        plain, fancy = Pet(unicode=False), Pet(unicode=True)
-        plain.style_name = "kawaii"
-        for mood in FRAMES:
-            plain.react(mood)
-            fancy.react(mood)
-            assert plain.rows(advance=False) == fancy.rows(advance=False), mood
-            for row in plain.rows(advance=False):
-                row.encode("ascii")     # raises if not
-        # The one-cell status mark is the only thing that still has a
-        # fallback, because that one really is a Unicode glyph.
-        plain.mark().encode("ascii")
+        from wynxo import sprite
+
+        assert sprite.fits(120, unicode_ok=False) is False
+        assert sprite.fits(120, unicode_ok=True) is True
+        assert State.CODING in sprite.FRAMES
 
 
 class TestARepoNameIsNotAPath:

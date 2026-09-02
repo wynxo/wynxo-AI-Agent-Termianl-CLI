@@ -486,41 +486,6 @@ class TestEffortMeter:
         assert effort_meter("nonsense") == " " * METER_WIDTH
 
 
-class TestPetPace:
-    """More effort, more visible energy."""
-
-    def test_higher_effort_animates_faster(self):
-        from wynxo.effort import ORDER
-        from wynxo.pet import Pet
-
-        pet = Pet()
-        paces = []
-        for name in ORDER:
-            pet.set_pace(name)
-            paces.append(pet.pace)
-        assert paces == sorted(paces, reverse=True), paces
-        assert paces[-1] < paces[0]
-
-    def test_pace_never_reaches_zero(self):
-        """It divides the frame counter."""
-        from wynxo.effort import ORDER
-        from wynxo.pet import Pet
-
-        pet = Pet()
-        for name in ORDER:
-            pet.set_pace(name)
-            assert pet.pace >= 1
-
-    def test_an_unknown_level_leaves_the_pace_alone(self):
-        from wynxo.pet import Pet
-
-        pet = Pet()
-        pet.set_pace("ultra")
-        before = pet.pace
-        pet.set_pace("nonsense")
-        assert pet.pace == before
-
-
 class TestSakuraPalette:
     def test_it_is_selectable_by_name(self):
         from wynxo.theme import resolve

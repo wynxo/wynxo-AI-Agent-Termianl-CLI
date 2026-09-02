@@ -158,13 +158,21 @@ class TestTheLiveRegionStaysTransient:
             "the status strip would be committed to the scrollback on every "
             "repaint")
 
-    def test_it_is_silent_when_the_pet_is_off(self):
-        import inspect
+    def test_it_is_silent_when_the_companion_is_off(self):
+        """Reduced motion drops the picture and keeps the words.
 
-        from wynxo.ui import ActivityBar
+        Asked of the drawing rather than of the strip's source: the pet's
+        enabled flag used to gate a face on the strip, and the strip does
+        not draw a companion any more."""
+        from wynxo.ui import ActivityBar, UI
 
-        source = inspect.getsource(ActivityBar._render)
-        assert "self.pet.enabled" in source
+        bar = ActivityBar(UI(), "medium")
+        bar.ui.width = 100
+        bar.activity = "editing"
+        bar.animate = False
+        drawn = "".join(t.plain for t in bar._scene())
+        assert not set(drawn) & set("▀▄█")
+        assert "editing" in drawn
 
     def test_there_is_exactly_one_live_region(self):
         """Two rich Live displays on one console fight for the same rows."""

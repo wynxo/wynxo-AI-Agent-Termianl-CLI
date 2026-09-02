@@ -1,147 +1,140 @@
-"""Wyn: the companion, its staging, and where its state comes from.
+"""What the companion is doing, and where that answer comes from.
 
-What this replaced was a face in the status bar -- two lines and a pair of
-eyes -- which could not read as a character doing anything because there was
-nowhere for it to be. The tests that matter here are therefore about
-staging and about provenance: that the frames hold their shape so the panel
-cannot tear, and that every state comes from something the agent actually
-did rather than from a clock.
+The state is not a thing the presentation layer decides. It is read from
+the agent -- which tool is running, what the task state machine says -- so
+there is one answer to "what is happening" and the strip, the mark and the
+character all draw from it. Keeping a second opinion in the UI is how a
+companion ends up cheerfully typing through a turn that failed a minute
+ago, and it is what these pin shut.
+
+The pictures live in ``sprite.py`` and are tested in ``test_mascot.py``.
+This module used to hold a set of staged ASCII scenes as well, which no
+session ever rendered while a smaller face from ``pet.py`` was what
+actually appeared; both are gone.
 """
-
 from __future__ import annotations
 
+import inspect
+import pathlib
+
 import pytest
-from rich.cells import cell_len
 
 from wynxo import companion
-from wynxo.companion import HEIGHT, WIDTH, SCENES, State
+from wynxo.companion import State, state_for
 
 
-class TestTheStagingHoldsItsShape:
-    """A frame of the wrong size tears the box it is drawn in, and it does
-    so on somebody else's terminal rather than here."""
+class TestTheStateComesFromTheWork:
+    @pytest.mark.parametrize("tool,expected", [
+        ("read_file", State.READING),
+        ("list_dir", State.READING),
+        ("edit_file", State.CODING),
+        ("write_file", State.CODING),
+        ("grep", State.SEARCHING),
+        ("web_search", State.SEARCHING),
+        ("run_tests", State.TESTING),
+    ])
+    def test_the_running_tool_decides_while_a_task_runs(self, tool, expected):
+        """"executing" is equally true of reading a file and of writing one,
+        and those must not look alike: watching the companion should tell
+        you which is happening without reading the transcript."""
+        assert state_for(tool, "executing") is expected
 
-    def test_every_state_has_a_scene(self):
-        for state in State:
-            assert state in SCENES, state
+    @pytest.mark.parametrize("task,expected", [
+        ("completed", State.SUCCESS),
+        ("failed", State.ERROR),
+        ("cancelled", State.CANCELLED),
+        ("idle", State.IDLE),
+    ])
+    def test_a_finished_turn_beats_a_leftover_tool(self, task, expected):
+        """A tool name lingers after its call returns. A finished turn that
+        went on drawing "reading" would be the companion claiming work that
+        had stopped."""
+        assert state_for("read_file", task) is expected
 
-    @pytest.mark.parametrize("state", list(State))
-    def test_every_frame_is_the_same_height(self, state):
-        for frame in SCENES[state].frames:
-            assert len(frame.split("\n")) == HEIGHT
+    def test_an_unknown_tool_falls_back_to_the_task(self):
+        assert state_for("something_new", "testing") is State.TESTING
 
-    @pytest.mark.parametrize("state", list(State))
-    def test_no_row_is_wider_than_the_panel(self, state):
-        for frame in SCENES[state].frames + SCENES[state].ascii:
-            for row in frame.split("\n"):
-                assert cell_len(row) <= WIDTH, repr(row)
+    def test_nothing_at_all_is_idle(self):
+        assert state_for("", "") is State.IDLE
 
-    @pytest.mark.parametrize("state", list(State))
-    def test_nothing_uses_a_double_width_glyph(self, state):
-        """A two-cell character inside a bordered panel pushes the right
-        border out by one and the box stops being a box. CJK, kana and
-        emoji are all excluded for this reason."""
-        for frame in SCENES[state].frames:
-            for char in frame:
-                if char == "\n":
-                    continue
-                assert cell_len(char) == 1, f"{char!r} is {cell_len(char)} cells"
+    def test_every_mapped_tool_lands_on_a_drawable_state(self):
+        from wynxo import sprite
 
-    @pytest.mark.parametrize("state", list(State))
-    def test_the_ascii_tier_is_actually_ascii(self, state):
-        """The fallback exists for a console that cannot render the rest --
-        a Windows code page that is not UTF-8, most obviously. One stray
-        box-drawing character in it defeats the whole point."""
-        for frame in SCENES[state].ascii:
-            assert frame.isascii(), repr(
-                [c for c in frame if not c.isascii()])
-
-    def test_every_state_has_an_ascii_tier(self):
-        for state in State:
-            assert SCENES[state].ascii, f"{state.value} has no ASCII frames"
-
-    @pytest.mark.parametrize("state", list(State))
-    def test_the_character_keeps_its_proportions(self, state):
-        """One character, not several. The head is the same width and sits
-        on the same row in every scene -- a companion whose proportions
-        change between states looks like a different companion each time."""
-        head = SCENES[state].frames[0].split("\n")[1]
-        assert head.count("(") == 1 and head.count(")") == 1, head
-        assert 8 <= len(head.strip()) <= 14, f"head row {head!r}"
-
-    @pytest.mark.parametrize("state", list(State))
-    def test_the_desk_is_the_floor_and_does_not_move(self, state):
-        """It is what makes the character look seated rather than floating,
-        so it is identical across the frames of a scene."""
-        rows = [frame.split("\n")[4] for frame in SCENES[state].frames]
-        assert len(set(rows)) == 1, f"the desk moves in {state.value}: {rows}"
-
-    @pytest.mark.parametrize("state", list(State))
-    def test_only_one_thing_moves_between_frames(self, state):
-        """Two is a twitch; one is a breath."""
-        frames = SCENES[state].frames
-        for before, after in zip(frames, frames[1:]):
-            rows_before = before.split("\n")
-            rows_after = after.split("\n")
-            changed = sum(1 for a, b in zip(rows_before, rows_after) if a != b)
-            assert changed <= 2, (
-                f"{state.value}: {changed} rows change at once")
+        for state in companion._BY_TOOL.values():
+            assert sprite.FRAMES[state], state
+        for state in companion._BY_TASK.values():
+            assert sprite.FRAMES[state], state
 
 
 class TestThereIsOnlyOneCharacter:
-    def test_the_showcase_draws_the_same_art(self):
-        """/animate used to show a different drawing from the one the
-        running application displayed, because the character existed twice
-        and the two drifted."""
-        from wynxo import motion
+    def test_the_gallery_draws_what_the_session_draws(self):
+        """/animate used to show a different drawing from the one a running
+        session displayed, because the character existed twice and the two
+        drifted. The gallery calls the same renderer now."""
+        from wynxo.cli import Repl
 
-        assert motion.scene_for("coding").frames == \
-            companion.frames_for(State.CODING)
-        assert motion.scene_for("idle").frames == \
-            companion.frames_for(State.IDLE)
+        source = inspect.getsource(Repl._show_states)
+        assert "sprite.rows(" in source
+        assert "from .motion" not in source
 
-    def test_the_running_session_draws_the_companion_exactly_once(self):
-        """Three renderings of the same character were on screen at once:
-        the greeting line, the status strip, and a panel in the corner. Two
-        faces for one companion reads as two companions.
+    def test_the_old_presentation_layers_are_gone(self):
+        for name in ("motion", "logo"):
+            with pytest.raises(ImportError):
+                __import__(f"wynxo.{name}")
 
-        The live rendering is the activity bar's face, and nothing else in
-        a running session draws one."""
-        import inspect
+    def test_the_voice_module_does_not_draw(self):
+        """pet.py is the name and the lines it says. Nothing else.
 
-        from wynxo import cli
+        Matched on whole words: REMARKS contains MARKS, and a substring
+        check here reported the voice tables as a leftover drawing table.
+        """
+        import re
 
-        source = inspect.getsource(cli)
-        assert "companion.panel" not in source, (
-            "a second live rendering of the companion is back")
-        assert "companion.state_for" not in source
+        from wynxo import pet
 
-    def test_the_bar_is_where_the_face_lives(self):
-        import inspect
+        source = pathlib.Path(pet.__file__).read_text()
+        for gone in ("FRAMES", "MARKS", "MOOD_ROLES", "Mood",
+                     "ACTIVITY_MOODS"):
+            assert not re.search(rf"\b{gone}\b", source), \
+                f"{gone} is back in pet.py"
+        for gone in ("def rows", "def mark", "def block", "def style",
+                     "def react", "def set_activity"):
+            assert gone not in source, f"{gone} is back in pet.py"
 
-        from wynxo.ui import ActivityBar
+    def test_only_one_thing_draws_the_companion_during_a_turn(self):
+        """The gallery may call the renderer -- that is the point of it,
+        and drawing the same pixels is what stops it from drifting. What
+        must not come back is a second live rendering: two companions on
+        screen at once was the state this replaced.
+        """
+        from wynxo import cli, ui
 
-        source = inspect.getsource(ActivityBar._render)
-        assert "self.pet.mark(" in source
+        session = inspect.getsource(cli.TerminalCallbacks)
+        assert "sprite." not in session, \
+            "a second live rendering of the companion is back"
+        assert hasattr(ui.ActivityBar, "_scene")
 
-    def test_nothing_advances_the_frame_but_a_repaint(self):
-        """A scheduler would keep animating through a stall, showing typing
-        while nothing is being written. The frame is stepped by the draw
-        itself -- ``face(advance=True)`` -- so it moves exactly while the
-        bar repaints and stops the instant it stops."""
-        import inspect
 
-        from wynxo.ui import ActivityBar
-
-        source = inspect.getsource(ActivityBar._render)
-        for clock in ("time.monotonic", "time.time", "asyncio.sleep",
-                      "time.sleep", "perf_counter", "Thread", "Timer"):
-            assert clock not in source, f"{clock} drives the companion"
-
-    def test_the_companion_module_has_no_clock_at_all(self):
-        source = (companion.__file__ and
-                  __import__("pathlib").Path(companion.__file__).read_text())
+class TestNothingAnimatesOnAClockOfItsOwn:
+    def test_the_state_module_has_no_clock_at_all(self):
+        source = pathlib.Path(companion.__file__).read_text()
         for forbidden in ("import time", "import threading", "asyncio",
                           "Thread(", "Timer("):
             assert forbidden not in source, f"{forbidden} in companion.py"
 
+    def test_the_sprite_module_has_no_clock_at_all(self):
+        from wynxo import sprite
+
+        source = pathlib.Path(sprite.__file__).read_text()
+        for forbidden in ("import time", "import threading", "asyncio",
+                          "Thread(", "Timer(", "sleep("):
+            assert forbidden not in source, f"{forbidden} in sprite.py"
+
+    def test_the_frame_is_the_callers_to_advance(self):
+        """A scheduler would keep animating through a stall, showing typing
+        while nothing is being written. The frame is a parameter, so it
+        moves exactly while the bar repaints and stops when it stops."""
+        from wynxo import sprite
+
+        signature = inspect.signature(sprite.rows)
+        assert "frame" in signature.parameters

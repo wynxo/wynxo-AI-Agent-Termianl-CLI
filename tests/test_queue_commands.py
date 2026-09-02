@@ -108,7 +108,9 @@ class TestBarShowsTyping:
         ui.width = 92
         bar = ActivityBar(ui, "medium", pet=Pet())
         bar.update(activity="writing", detail="src/transfer.py", tokens=50)
-        assert "src/transfer.py" in bar._render().plain
+        live = "\n".join([t.plain for t in bar._scene()]
+                         + [bar._render().plain])
+        assert "src/transfer.py" in live
         bar.queued = "next question"
         rendered = bar._render().plain
         assert "next question" in rendered

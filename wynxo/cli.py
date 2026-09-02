@@ -33,6 +33,7 @@ from .events import ToolEvent
 from .task_state import TaskState
 from .discovery import Discovery
 from .config import Config, Endpoint, data_dir, is_configured, load, normalise_url
+from . import companion
 from . import livediff
 from .doctor import run_doctor
 from .effort import ORDER, resolve
@@ -43,7 +44,7 @@ from .session import Session
 from .keys import KeyWatcher
 from .journal import Journal, recent as recent_logs
 from .memory import Memory
-from .pet import Mood, Pet
+from .pet import Pet
 from .select import (
     HINT, HINT_ASCII, Choice, choose, silence_cpr_warning,
     supported as arrows_supported)
@@ -408,6 +409,13 @@ class TerminalCallbacks(Callbacks):
         """The tool running right now, or "". The companion's scene is chosen
         from this and the task state together: "executing" is equally true of
         reading a file and of writing one, and those must not look alike."""
+        self.task_state = None
+        """The agent's task state machine, handed over by the Repl.
+
+        Read, never written. The companion is a view of work the agent is
+        already tracking -- giving the presentation layer its own idea of
+        what is happening is how a character ends up animating through a
+        turn that finished a minute ago."""
         self.streamer: CodeStreamer | None = None
         self.verbose_tools = False
         self._tool_started = 0.0
@@ -651,7 +659,8 @@ class TerminalCallbacks(Callbacks):
             self._thinking_words += text.count(" ")
             if self.bar is not None:
                 self.bar.update(activity="thinking", tokens=self.tokens,
-                                detail=self._thinking_note())
+                                detail=self._thinking_note(),
+                                state=self._companion_state())
 
             if not self.ui.show_thinking:
                 # Held for when the panel opens. Nothing is fed to a thinker
@@ -690,7 +699,9 @@ class TerminalCallbacks(Callbacks):
                 self.streamer = CodeStreamer(self.ui, indent="  ")
                 self._streaming = True
             if self.bar is not None:
-                self.bar.update(activity="writing", detail="", tokens=self.tokens)
+                self.bar.update(activity="writing", detail="",
+                                tokens=self.tokens,
+                                state=self._companion_state())
             self.streamer.feed(text)
 
     async def on_stage(self, name: str, detail: str = "") -> None:
@@ -701,11 +712,6 @@ class TerminalCallbacks(Callbacks):
         if self.journal is not None:
             self.journal.stage(name, detail)
         self._end_stream()
-        # The pet is a visualisation of the agent state: the stage change
-        # is the state, and the face/scene follows it. One source of truth.
-        pet = getattr(self, "pet", None)
-        if pet is not None:
-            pet.set_activity(name)
         if self.bar is not None:
             # The live strip owns this. A stage is a state, not an event: it
             # is true for a while and then stops being true, which is what a
@@ -761,11 +767,9 @@ class TerminalCallbacks(Callbacks):
         if self.journal is not None:
             self.journal.tool(name, {"summary": summary})
         self._end_stream()
-        pet = getattr(self, "pet", None)
-        if pet is not None:
-            pet.set_activity(_ACTIVITY.get(name, name))
         if self.bar is not None:
-            self.bar.update(activity=_ACTIVITY.get(name, name), detail=summary)
+            self.bar.update(activity=_ACTIVITY.get(name, name), detail=summary,
+                            state=self._companion_state(name))
         # Nothing is committed here. What is in flight is the live region's
         # job -- it says "reading calc.py" for as long as that is true -- and
         # the conversation gets one block when the call finishes. Printing
@@ -871,6 +875,19 @@ class TerminalCallbacks(Callbacks):
             self._coder = CodeStreamer(self.ui, indent="    ",
                                        style=MUTED, code=False, literal=True)
         self._coder.feed(text)
+
+    def _companion_state(self, tool: str | None = None) -> str:
+        """What the companion should be doing, from what the agent is doing.
+
+        Read from the running tool and the task state machine rather than
+        set by hand at each call site, so the character cannot drift out of
+        step with the work: there is one answer to "what is happening", and
+        the strip, the mark and the companion all read it.
+        """
+        task = getattr(self.task_state, "state", None)
+        running = self.active_tool if tool is None else tool
+        return companion.state_for(
+            running or "", getattr(task, "value", "") or "").value
 
     def _call_summary(self, name: str, ok: bool, display: str,
                       output: str) -> tuple[str, str]:
@@ -1013,13 +1030,6 @@ class TerminalCallbacks(Callbacks):
 
         self.bar.set_plan(rendered)
         if self.bar.plan_is_complete():
-            # Every step ticked is the one moment in a turn worth a face of
-            # its own: HAPPY is the reaction to a single good step, this is
-            # the end of the work. The pet hangs off the bar rather than off
-            # the callbacks, which never owned one.
-            pet = self.bar.pet
-            if pet is not None and pet.enabled:
-                pet.react(Mood.CELEBRATING)
             await self.bar.finish_plan()
 
     async def on_warning(self, message: str) -> None:
@@ -1144,7 +1154,6 @@ class Repl:
         self.pet.style_name = ("kawaii" if config.voice == "kawaii"
                                 else "mommy" if config.voice == "mommy"
                                 else "default")
-        self.pet.set_pace(self.policy.name)
         self._last_elapsed = 0.0
 
         # The talker speaks; the coder works. Constructed here so /talker can
@@ -1244,6 +1253,11 @@ class Repl:
         self.project_info = self.discovery.scan()
         self.agent = Agent(self.client, config, self.policy, workspace, self.callbacks,
                            boundary=self.boundary, memory=self.memory)
+        # The companion is a view of the agent's own task state, so the
+        # presentation layer reads it rather than keeping a second copy.
+        # Assigned here rather than beside the other callback wiring above,
+        # which runs before the agent exists.
+        self.callbacks.task_state = self.agent.task_state
         launcher = self.agent.tools.get("launch_application")
         self._app_catalog = launcher.catalog if launcher else ApplicationCatalog()
         """The one application scan this session shares: /apps and the
@@ -1333,14 +1347,14 @@ class Repl:
             # own LAN address, and the network -- and let the user pick.
             picked = await self._offer_endpoint_discovery()
             if picked is None:
-                self.ui.console.print(server_help())
+                self.ui.help_block(server_help())
                 return False
             self._adopt_endpoint(picked)
             try:
                 version = await self.client.ping()
             except ProviderError as exc2:
                 self.ui.error(str(exc2))
-                self.ui.console.print(server_help())
+                self.ui.help_block(server_help())
                 return False
 
         info = None
@@ -1379,14 +1393,14 @@ class Repl:
                 status.line(state, message, detail)
         status.close()
 
-        await self.ui.wake(self.pet, self.pet.name)
+        # No wake-up animation and no greeting line. Start-up is one row,
+        # and then the prompt: the companion belongs to the work, and a
+        # character waving before the first question is a splash screen.
         self.ui.banner(
             self.config.model,
             f"{self.client.base_url} (ollama {version})",
             self.policy.name,
             str(self.workspace),
-            pet=self.pet,
-            greeting=self.pet.remark("greet") if self.pet.enabled else "",
         )
         return True
 
@@ -1711,10 +1725,9 @@ class Repl:
             self.ui.bar = None
             self.callbacks.watcher = None
             self._task = None
-            # Stages are transient. Never leave a terminal-level status or
-            # pet activity behind after the live bar is disposed.
+            # Stages are transient. Never leave a terminal-level status
+            # behind after the live bar is disposed.
             self.callbacks._status_message = ""
-            self.pet.react(Mood.IDLE)
 
         if interrupted:
             self.ui.console.print()
@@ -1723,14 +1736,13 @@ class Repl:
             return False
 
         if result.errors:
-            self.pet.react(Mood.SAD)
             for message in result.errors:
                 self.journal.error(message)
             self.ui.error("\n".join(result.errors))
             return False
         self.journal.assistant(result.content, tokens=self.callbacks.tokens,
                                seconds=result.elapsed)
-        self.pet.react(Mood.HAPPY if not result.interrupted else Mood.IDLE)
+
 
         if result.content and not self.config.stream:
             self.ui.assistant_markdown(result.content)
@@ -1896,8 +1908,8 @@ class Repl:
             return
         self.ui.console.print()
         self.ui.console.print(
-            Text(f"  {self.pet.mark()}  ",
-                 style=f"bold {self.pet.style()}") + Text(line, style=ACCENT))
+            Text(f"  {self.pet.name}  ", style=f"bold {ACCENT}")
+            + Text(line, style=ACCENT))
         await self.speaker.say_async(line)
 
     def _prompt_message(self) -> HTML:
@@ -2038,8 +2050,6 @@ class Repl:
         # was invisible at the prompt and fired on the next thing typed.
         if waiting := len(self.pending):
             pieces.append(f"\u203a {waiting} queued")
-        if self.pet.enabled:
-            pieces.append(f"{self.pet.mark()} {self.pet.name}")
         pieces += [self.config.model,
                    f"{effort_meter(self.policy.name, self.ui.g.unicode)} "
                    f"{self.policy.name}",
@@ -2101,7 +2111,6 @@ class Repl:
         self.config.effort = policy.name
         self.agent.set_effort(policy)
         self.policy = self.agent.policy
-        self.pet.set_pace(self.policy.name)
         self._prompt_note = (f"effort: {self.policy.name} -- "
                              f"{self.policy.headline}", time.monotonic() + 3)
 
@@ -2825,7 +2834,6 @@ class Repl:
         self.policy = self.agent.policy
         self.config.effort = self.policy.name
         self.config.save()
-        self.pet.set_pace(self.policy.name)
         await self._effort_surge(previous, self.policy.name)
         self.ui.success(f"effort: {self.policy.name} -- {self.policy.describe()}")
         return True
@@ -3914,46 +3922,34 @@ class Repl:
         return True
 
     async def cmd_animate(self, args: list[str]) -> bool:
-        """Preview the animation scenes, or toggle motion on and off.
+        """Turn motion on or off, or show the companion's states.
 
-        Deterministic by design: previews are frame strips printed once, not
-        live loops, so the command never owns the screen or needs a timer.
+        Deterministic by design: the gallery is one still frame per state
+        printed once, not a live loop, so the command never owns the screen
+        or needs a timer of its own.
+
+        There used to be a separate list of "scenes" here with their own
+        names, frame rates and loop flags -- a vocabulary that existed only
+        for this command, describing pictures the session never drew. The
+        states the companion actually has are the only ones worth showing.
         """
-        from .motion import SCENES, preview
-
         if args and args[0].lower() in ("on", "off"):
             on = args[0].lower() == "on"
             self.config.animations = on
             self.config.save()
             self.pet.animate = on
+            if self.bar is not None:
+                self.bar.animate = on
             self.ui.success(f"animations {'on' if on else 'off'}"
                             + ("  (reduced motion)" if not on else ""))
             return True
 
-        if args:
-            name = args[0].lower()
-            if name not in SCENES:
-                self.ui.warn(f"unknown scene; pick one of {', '.join(SCENES)}")
-                return True
-            self.ui.console.print(
-                Text(f"  {name}", style="bold")
-                + Text(f"  {SCENES[name].label}", style=MUTED))
-            self.ui.console.print(
-                Text(preview(name, unicode=self.ui.g.unicode),
-                     style=f"bold {self.pet.style()}"))
-            self.ui.console.print()
-            return True
-
-        self.ui.table(
-            ["scene", "what it shows", "speed", "plays"],
-            [(n, s.label, f"{s.fps:.0f} fps",
-              "loop" if s.loops else "once") for n, s in SCENES.items()],
-            title="animations",
-        )
+        self._show_states(args[0].lower() if args else "")
         self.ui.info(
-            f"preview one: /animate <scene>   motion: "
+            f"one state: /animate <state>   motion: "
             f"{'on' if self.config.animations else 'off'}"
-            + ("  (/animate off for reduced motion)" if self.config.animations else ""))
+            + ("  (/animate off for reduced motion)"
+               if self.config.animations else ""))
         return True
 
     async def cmd_todo(self, args: list[str]) -> bool:
@@ -4233,31 +4229,46 @@ class Repl:
                      f"/log list  {dot}  /log off")
         return True
 
-    MOOD_COLUMNS = 4
-    """Expressions shown side by side. The mascot is three rows tall, so a
-    row per mood would be thirty-six lines to show twelve faces."""
+    STATE_COLUMNS = 4
+    """States shown side by side. The companion is five rows tall, so a row
+    per state would be sixty lines to show twelve of them."""
 
-    def _show_moods(self) -> None:
-        """Every expression, in columns, so the set reads as one character
-        in different moods rather than as a list of drawings."""
-        from .pet import FRAMES, EARS, WIDTH
+    def _show_states(self, only: str = "") -> None:
+        """Every state the companion has, drawn by the renderer that draws
+        it during a turn.
 
-        moods = list(Mood)
+        Deliberately not a preview built from its own copy of the frames.
+        There used to be one of those -- a whole module wrapping the scene
+        tables a second time so /animate could show them -- and a gallery
+        that renders differently from the real thing is worse than none,
+        because it is the one you check when the real thing looks wrong.
+        """
+        from . import sprite
+        from .companion import State
+
+        states = [s for s in State if not only or s.value == only]
+        if not states:
+            self.ui.warn(f"no such state: {only}")
+            self.ui.info("states: "
+                         + " | ".join(s.value for s in State))
+            return
         gap = "   "
-        for start in range(0, len(moods), self.MOOD_COLUMNS):
-            group = moods[start:start + self.MOOD_COLUMNS]
-            for row in range(3):
+        for start in range(0, len(states), self.STATE_COLUMNS):
+            group = states[start:start + self.STATE_COLUMNS]
+            # The second frame, where there is one. Several states differ
+            # from idle only in the part that moves -- the paws come up to
+            # the keyboard, the progress bar starts filling -- so a gallery
+            # of first frames shows three identical cats.
+            art = [sprite.rows(state, 1, self.ui.palette) for state in group]
+            for row in range(sprite.HEIGHT):
                 line = Text("  ")
-                for mood in group:
-                    eyes, mouth = FRAMES[mood][0]
-                    self.pet.react(mood)
-                    line.append((EARS, eyes, mouth)[row],
-                                style=f"bold {self.pet.style()}")
+                for block in art:
+                    line.append_text(block[row])
                     line.append(gap)
                 self.ui.console.print(line)
             labels = Text("  ")
-            for mood in group:
-                labels.append(f"{mood.value:<{WIDTH}}", style=MUTED)
+            for state in group:
+                labels.append(f"{state.value:<{sprite.WIDTH}}", style=MUTED)
                 labels.append(gap)
             self.ui.console.print(labels)
             self.ui.console.print()
@@ -4267,9 +4278,8 @@ class Repl:
 
         if not args:
             self.ui.console.print()
-            self._show_moods()
-            self.pet.rest()
-            # The moods are worth seeing, so they stay. What used to follow
+            self._show_states()
+            # The states are worth seeing, so they stay. What used to follow
             # them was a line of usage text -- it told you what you could
             # type and left you to type it. The picker acts instead.
             chosen = await self._pick(
@@ -4310,21 +4320,8 @@ class Repl:
             return True
 
         if action == "show":
-            from .motion import preview, scene_for
-            moods = [m.value for m in Mood]
-            if len(args) > 1 and args[1].lower() in moods:
-                moods = [args[1].lower()]
-            self.ui.console.print()
-            for mood in moods:
-                scene = scene_for(mood)
-                self.ui.console.print(
-                    Text(f"  {mood}", style="bold")
-                    + Text(f"  {scene.label}", style=MUTED))
-                self.ui.console.print(
-                    Text(preview(mood, unicode=self.ui.g.unicode),
-                         style=f"bold {self.pet.style()}"))
-            self.ui.console.print()
-            self.ui.info("moods: " + " | ".join(m.value for m in Mood))
+            wanted = args[1].lower() if len(args) > 1 else ""
+            self._show_states(wanted)
             return True
 
         if action == "name" and len(args) == 1:
@@ -4338,7 +4335,7 @@ class Repl:
             self.pet.name = " ".join(args[1:])[:24]
             self.config.pet_name = self.pet.name
             self.config.save()
-            self.ui.success(f"{self.pet.mark()}  hello, {self.pet.name}")
+            self.ui.success(f"hello, {self.pet.name}")
             return True
 
         if action == "voice":

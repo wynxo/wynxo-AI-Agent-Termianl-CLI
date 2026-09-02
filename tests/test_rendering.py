@@ -465,23 +465,27 @@ class TestHeader:
         UI().banner("qwen3-coder:30b", "http://127.0.0.1:11434", "medium",
                     "/tmp/p")
         lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
-        assert len(lines) == 2, lines
-        assert "wynxo" in lines[0] and "qwen3-coder:30b" not in lines[0]
-        assert "medium" in lines[1] and "wynxo" not in lines[1]
-        assert "─" not in "".join(lines)
+        assert len(lines) == 1, lines
+        assert lines[0].startswith("  wynxo")
+        assert "qwen3-coder:30b" in lines[0] and "medium" in lines[0]
+        assert "─" not in lines[0]
 
-    def test_the_mascot_stands_beside_the_name(self, capsys):
-        """The header is where the cat lives: identity, drawn once, with the
-        name beside it rather than a widget somewhere in the chrome."""
-        from wynxo.pet import EARS, Pet
+    def test_the_companion_is_not_on_the_identity_line(self, capsys):
+        """The character belongs to the work, not to the title.
 
-        pet = Pet()
+        It stood here for a pass -- three rows, the cat beside a stacked
+        identity -- which meant you were looking at a mascot during every
+        minute the agent was idle, which is most of them. It appears in the
+        live region while a task runs and goes when the task does.
+        """
+        from wynxo.pet import Pet
+
         UI().banner("m", "http://127.0.0.1:11434", "medium", "/tmp/p",
-                    pet=pet, greeting="hello")
+                    pet=Pet(), greeting="hello")
         lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
-        assert len(lines) == 3, lines
-        assert EARS.strip() in lines[0] and "wynxo" in lines[0]
-        assert "hello" in lines[2]
+        assert len(lines) == 1, lines
+        assert "hello" not in lines[0]
+        assert set(lines[0]) & set("▀▄█") == set()
 
     def test_narrow_header_drops_parts_rather_than_truncating(self, capsys):
         ui = UI()

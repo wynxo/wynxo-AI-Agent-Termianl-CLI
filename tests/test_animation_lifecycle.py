@@ -14,12 +14,12 @@ region drawing over the prompt.
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import threading
 
 
-from wynxo.pet import Mood, Pet
+from wynxo.companion import State
+from wynxo.pet import Pet
 from wynxo.ui import ActivityBar, UI
 
 
@@ -37,27 +37,36 @@ class TestOneClockDrivesEverything:
         source = inspect.getsource(ActivityBar)
         assert source.count("Live(") == 1
 
-    def test_the_mascot_has_no_clock_of_its_own(self):
-        from wynxo import pet as pet_module
+    def test_the_companion_has_no_clock_of_its_own(self):
+        from wynxo import sprite as sprite_module
 
-        source = inspect.getsource(pet_module)
+        source = inspect.getsource(sprite_module)
         for clock in ("import time", "asyncio", "threading", "Timer(",
                       "Thread(", "perf_counter", "sleep("):
-            assert clock not in source, f"{clock} drives the mascot"
+            assert clock not in source, f"{clock} drives the companion"
 
-    def test_the_frame_advances_only_when_something_draws(self):
-        pet = Pet()
-        pet.react(Mood.SEARCHING)
-        before = tuple(pet.rows(advance=False))
+    def test_the_frame_is_the_callers_and_only_the_callers(self):
+        """A scheduler would keep animating through a stall, drawing typing
+        while nothing is being written. The frame is an argument, so the
+        picture moves exactly while the bar repaints."""
+        from wynxo import sprite
+        from wynxo.theme import PURPLE
+
+        held = [r.plain for r in sprite.rows(State.SEARCHING, 0, PURPLE)]
         for _ in range(50):
-            assert tuple(pet.rows(advance=False)) == before
-        moved = {tuple(pet.rows()) for _ in range(12)}
-        assert len(moved) > 1, "drawing never advances the frame"
+            assert [r.plain for r in
+                    sprite.rows(State.SEARCHING, 0, PURPLE)] == held
+        moved = {tuple(r.plain for r in sprite.rows(State.SEARCHING, f, PURPLE))
+                 for f in range(len(sprite.FRAMES[State.SEARCHING]))}
+        assert len(moved) > 1, "the frame argument changes nothing"
 
     def test_reduced_motion_holds_the_frame_even_when_drawn(self):
-        pet = Pet(animate=False)
-        pet.react(Mood.SEARCHING)
-        assert len({tuple(pet.rows()) for _ in range(20)}) == 1
+        bar = ActivityBar(_ui(), "medium")
+        bar.animate = False
+        bar.state = "searching"
+        bar.activity = "searching"
+        assert len({tuple(t.plain for t in bar._scene())
+                    for _ in range(20)}) == 1
 
 
 class TestNothingKeepsRunningAfterwards:
@@ -103,59 +112,27 @@ class TestNothingKeepsRunningAfterwards:
 
 
 class TestStartupAnimationsAreBounded:
-    def test_the_wake_is_under_half_a_second(self):
-        assert sum(pause for _, pause in UI.WAKE) <= 0.5
-
-    def test_the_wake_starts_asleep_and_ends_settled(self):
-        """It used to open on the ✕✕ face, so the first thing a session
-        showed was a distressed cat."""
-        moods = [name for name, _ in UI.WAKE]
-        assert moods[0] == "sleepy"
-        assert moods[-1] == "idle"
-        assert "sad" not in moods
-
-    def test_nothing_at_start_up_blocks_the_event_loop(self):
-        """Both start-up animations run from the start-up coroutine. A
-        blocking sleep there stops the loop for the length of the
-        animation -- harmless four tenths of a second into a session, and
-        exactly the habit that is not harmless anywhere else."""
-        import ast
-        import textwrap
-
-        assert inspect.iscoroutinefunction(UI.wake)
-        for func in (UI.wake,):
-            tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
-            # The calls themselves, not a docstring that mentions one.
-            called = {ast.unparse(node.func) for node in ast.walk(tree)
-                      if isinstance(node, ast.Call)}
-            blocking = [name for name in called
-                        if name.endswith("sleep") and "asyncio" not in name]
-            assert blocking == [], f"{func.__name__}: {blocking}"
-
-    def test_the_whole_startup_animation_is_short(self):
-        """One animation at start-up, not two. The block-art logo that used
-        to play before it is gone, so this is the whole of it."""
-        total = sum(p for _, p in UI.WAKE)
-        assert total < 1.0, f"{total:.2f}s of animation before the prompt"
+    def test_there_is_no_startup_animation_left_to_wait_through(self):
+        """Start-up is one line and then the prompt. The block-art logo went
+        first, then the wake-up the companion used to play before the
+        header -- both were things you sat through before you could type."""
+        assert not hasattr(UI, "WAKE")
+        assert not hasattr(UI, "wake")
 
     def test_nothing_animates_without_a_terminal(self):
         """A Live where nothing can repaint writes its cursor moves into the
         output as literal text."""
-        ui = _ui()
-        pet = Pet()
-        asyncio.run(ui.wake(pet, "wyn"))   # live_ok is False: the still path
-        bar = ActivityBar(ui, "medium")
+        bar = ActivityBar(_ui(), "medium")
         bar.start()
         assert bar._live is None
         bar.stop()
 
 class TestReducedMotionIsRealAndStillReadable:
     def _bar(self):
-        pet = Pet(animate=False)
-        pet.react(Mood.THINKING)
-        bar = ActivityBar(_ui(), "medium", "^C stop", pet=pet)
+        bar = ActivityBar(_ui(), "medium", "^C stop", pet=Pet(animate=False))
         bar.animate = False
         bar.activity = "thinking"
+        bar.state = "thinking"
         return bar
 
     def test_nothing_changes_between_frames(self):
@@ -163,16 +140,22 @@ class TestReducedMotionIsRealAndStillReadable:
         assert len({bar._render().plain for _ in range(30)}) == 1
 
     def test_it_still_says_what_is_happening(self):
-        assert "thinking" in self._bar()._render().plain
+        """In the scene, not the strip. The activity word moved up beside
+        the companion; repeating it on the row underneath was the duplicate
+        status the strip is meant to be free of."""
+        bar = self._bar()
+        assert "thinking" in "".join(t.plain for t in bar._scene())
+        assert "thinking" not in bar._render().plain
 
-    def test_the_mascot_is_still_drawn(self):
+    def test_what_is_happening_is_still_said(self):
         """Reduced motion means nothing moves, not that nothing is there.
 
-        The strip carries the pet's one-cell mark rather than the drawing:
-        the cat itself is three rows tall and belongs to the header, where
-        it is identity rather than a status widget."""
+        The companion is what goes: it is the moving part, and the words
+        beside it carry the same fact. Turning motion off leaves the state
+        written out rather than leaving a still picture of it."""
         bar = self._bar()
-        assert bar.pet.mark() in bar._render().plain
+        assert bar._scene() == bar._scene_lines()
+        assert "thinking" in bar._scene()[0].plain
 
     def test_the_layout_does_not_shift_when_motion_is_turned_off(self):
         """Animation off must not move anything: the still mark occupies the

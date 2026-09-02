@@ -84,7 +84,7 @@ class TestVerboseToolOutputSaysWhetherItWorked:
         says "a tool ran"; the cross says "and it did not work"."""
         ui = self._run(ok=True)
         lines = _lines(ui)
-        assert any(ui.g.tool in line for line in lines), lines
+        assert any(ui.g.arrow in line for line in lines), lines
         assert not any(ui.g.cross in line for line in lines), lines
 
     def test_the_whole_output_is_still_shown(self):

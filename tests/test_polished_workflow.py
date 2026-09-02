@@ -43,6 +43,7 @@ def test_the_activity_bar_keeps_no_history_of_finished_calls():
     event.start()
     event.finish(True, display="read file0.py")
     assert event.state is ExecutionState.SUCCESS
-    # What it does show is the call in flight, once.
+    # What it does show is the call in flight, once -- in the scene above
+    # the strip, where the activity moved when the companion arrived.
     bar.update(activity="reading", detail="file0.py")
-    assert "reading" in bar._render().plain
+    assert "reading" in "".join(t.plain for t in bar._scene())

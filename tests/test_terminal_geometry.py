@@ -123,7 +123,12 @@ class TestEveryDrawMeasures:
             return {len(line) for line
                     in console.file.getvalue().rstrip("\n").split("\n")}
 
-        assert widths(120) == {120}
+        # No row may exceed the terminal; a row shorter than it is fine.
+        # The strip is padded to the full width because it is a band with a
+        # background; the scene rows above it are transparent, so padding
+        # them would paint over the conversation showing through.
+        assert max(widths(120)) <= 120
+        assert 120 in widths(120), "the strip is no longer a full-width band"
         assert max(widths(48)) <= 48, (
             "the strip is still padded to the old width, so it wraps")
 

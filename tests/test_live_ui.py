@@ -50,7 +50,11 @@ class TestActivityBar:
         still arriving."""
         bar = ActivityBar(UI(), "high", "^O thinking")
         bar.update(activity="editing", detail="src/auth.py", tokens=120)
-        text = bar._render().plain
+        # The whole pinned region: the activity and the file it is acting on
+        # sit in the scene above the strip where there is room for one, and
+        # in the strip itself where there is not.
+        text = "\n".join([t.plain for t in bar._scene()]
+                         + [bar._render().plain])
         assert "editing" in text
         assert "src/auth.py" in text
         assert "120 tok" in text
@@ -105,7 +109,13 @@ class TestActivityBar:
         bar.stop()
 
     def test_spinner_advances(self):
-        bar = ActivityBar(UI(), "low")
+        """The strip's own sign of life, for when it is the only row.
+
+        With a scene above it the companion is what moves, and a second
+        moving thing six rows from the first is not reassurance."""
+        ui = UI()
+        ui.width = 40          # too narrow for a scene: the strip owns it
+        bar = ActivityBar(ui, "low")
         first = bar._render().plain[:6]
         second = bar._render().plain[:6]
         assert first != second
@@ -153,4 +163,6 @@ class TestActivityBar:
             bar = ActivityBar(ui, "low", "^O thinking  ^T detail",
                               model="qwen3-coder:30b")
             bar.update(activity="editing", detail="src/a.py", tokens=812)
-            assert "editing" in bar._render().plain, width
+            live = "\n".join([t.plain for t in bar._scene()]
+                             + [bar._render().plain])
+            assert "editing" in live, width

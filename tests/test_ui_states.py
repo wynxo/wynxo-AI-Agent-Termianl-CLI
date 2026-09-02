@@ -292,11 +292,24 @@ class TestTheStripsHierarchy:
             setattr(bar, key, value)
         return bar
 
+    @staticmethod
+    def _live(bar):
+        """Everything the pinned region shows: the scene and the strip.
+
+        The activity word moved off the strip and up beside the companion
+        on a terminal with room for one, so asking only the strip started
+        answering "it was dropped" for a word that was on screen one row
+        higher. What must never be dropped is the answer to "what is it
+        doing", wherever the region chooses to put it.
+        """
+        return "\n".join([t.plain for t in bar._scene()]
+                          + [bar._render().plain])
+
     @pytest.mark.parametrize("width", [30, 40, 50, 60, 80, 100, 140])
     def test_the_activity_is_never_dropped(self, width):
         bar = self._bar(width, detail="a/very/long/path/to/some/file.py",
                         tokens=4096)
-        assert "editing" in bar._render().plain, width
+        assert "editing" in self._live(bar), width
 
     @pytest.mark.parametrize("width", [40, 50, 60, 80, 100, 140])
     def test_the_clock_is_never_dropped(self, width):
