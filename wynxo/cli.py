@@ -1360,10 +1360,6 @@ class Repl:
         silence_cpr_warning(session.app)
         return session
 
-    def _pet_mood(self) -> str:
-        """The pet's current mood, for the top-right scene."""
-        return self.pet.mood.value if self.pet.enabled else ""
-
     def agent_session_id(self) -> str:
         import uuid
 
@@ -4345,10 +4341,10 @@ class Repl:
             # type and left you to type it. The picker acts instead.
             chosen = await self._pick(
                 "companion",
-                [("on", "she reacts as the work goes"),
-                 ("off", "no companion"),
-                 ("animate", "let the faces move"),
-                 ("still", "one face, held"),
+                [("on", "draw her beside the live status"),
+                 ("off", "the words alone (the default)"),
+                 ("animate", "let her move"),
+                 ("still", "one frame, held"),
                  ("name", f"what to call her (now: {self.pet.name})"),
                  ("voice", f"how she writes (now: {self.config.voice})")],
                 ("on" if self.pet.enabled else "off"),

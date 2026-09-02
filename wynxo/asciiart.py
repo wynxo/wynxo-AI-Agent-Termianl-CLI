@@ -159,52 +159,6 @@ def weigh(char: str) -> float:
     return 0.0 if char.isspace() else 0.55
 
 
-def from_text(art: str, width: int, height: int | None = None) -> list[list[float]]:
-    """A piece of ASCII art as a brightness grid, so it can be resized.
-
-    Art arrives at whatever size it was drawn, which is routinely wider than
-    the terminal it has to fit. Reading the characters back to ink and
-    resampling is the only way to shrink it that keeps the picture; cropping
-    loses half of it and dropping every other line loses the shading.
-
-    No aspect correction here: the source is already in character cells, so
-    its proportions are right and must simply be preserved.
-    """
-    rows = art.split("\n")
-    while rows and not rows[0].strip():
-        rows.pop(0)
-    while rows and not rows[-1].strip():
-        rows.pop()
-    if not rows:
-        return []
-    source_w = max(len(r) for r in rows)
-    source_h = len(rows)
-    width = max(1, width)
-    if height is None:
-        height = max(1, round(width * source_h / source_w))
-
-    padded = [r.ljust(source_w) for r in rows]
-    grid = []
-    for y in range(height):
-        y0, y1 = y * source_h // height, max((y + 1) * source_h // height,
-                                             y * source_h // height + 1)
-        row = []
-        for x in range(width):
-            x0, x1 = x * source_w // width, max((x + 1) * source_w // width,
-                                                x * source_w // width + 1)
-            # Averaged over the block it stands for, so shading survives the
-            # shrink rather than being decided by whichever pixel was landed on.
-            total = count = 0.0
-            for sy in range(y0, min(y1, source_h)):
-                line = padded[sy]
-                for sx in range(x0, min(x1, source_w)):
-                    total += weigh(line[sx])
-                    count += 1
-            row.append(total / count if count else 0.0)
-        grid.append(row)
-    return grid
-
-
 class ImageSupportMissing(RuntimeError):
     """Raised when a format needs a library that is not installed."""
 

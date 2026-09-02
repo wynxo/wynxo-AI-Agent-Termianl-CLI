@@ -8,34 +8,29 @@ Runs on **Linux, macOS, Windows and Termux**. Pure Python, no compiled
 dependencies, no toolchain required.
 
 ```
-╭──────────────────────────────────────────────────╮
-│  wynxo  a local coding agent                     │
-│                                                  │
-│  model    qwen3-coder:30b                        │
-│  server   http://192.168.1.50:11434              │
-│  effort   high                                   │
-│  project  ~/code/myproject                       │
-╰──────────────────────────────────────────────────╯
+wynxo · qwen3-coder:30b · ~/code/myproject
 
-high > add a retry to the upload path
+❯ add a retry to the upload path
 
-  → planning
-  ● grep  upload  in *.py
-    ✓ 3 matches
-  ● read_file  src/transfer.py
-    ✓ read src/transfer.py (140 lines)
+◌ thinking · 1.2s
 
-  edit  src/transfer.py
-╭──────────────────────────────────────────────╮
-│ @@ -88,6 +88,12 @@                           │
-│ -    return client.put(url, data)            │
-│ +    for attempt in range(3):                │
-│ +        try:                                │
-│ +            return client.put(url, data)    │
-│ +        except TransientError:              │
-│ +            time.sleep(2 ** attempt)        │
-╰──────────────────────────────────────────────╯
-  [y] yes  [a] always  [n] no  [q] stop
+→ search "upload"
+  3 matches
+
+→ read src/transfer.py
+  140 lines
+
+→ edit src/transfer.py
+  @@ -88,6 +88,12 @@
+  -    return client.put(url, data)
+  +    for attempt in range(3):
+  +        try:
+  +            return client.put(url, data)
+  +        except TransientError:
+  +            time.sleep(2 ** attempt)
+
+write to src/transfer.py
+[y] yes  [a] always  [n] no  [q] stop:
 ```
 
 ---
@@ -691,28 +686,41 @@ whole thing, top border and bottom border together.
 
 ---
 
-## The pet
+## The companion
 
-There is a small face at the left of the status bar. It is not decoration —
-it changes with what the agent is doing, so a glance tells you the state
-without reading the words.
+Off by default. It is flavour, and flavour that arrives switched on is
+decoration you have to find the setting to disable.
 
-```
- (◐ᴗ◐) thinking                       12 tok  ·  2s  ·  medium
- (◉ᴗ◉) reading   src/auth.py         147 tok  ·  33 tok/s  ·  4s  ·  medium
- (¬ᴗ¬) editing   src/transfer.py     812 tok  ·  51 tok/s  ·  9s  ·  medium
- (•ᴗ•)╭ running  pytest -q          1290 tok  ·  64 tok/s  ·  14s  ·  medium
- (≧ᴗ≦) done                         1503 tok  ·  63 tok/s  ·  18s  ·  medium
- (×ᴗ×) something broke
-```
-
-It blinks, and it falls back to `(o_o)` / `(^_^)` where the terminal cannot
-render the rest.
+Turned on, it draws a small character beside the live status while a task
+is running — and only while one is running. It is a half-block sprite:
+two pixels to a terminal cell, which is what buys a silhouette at a size
+where a face made of punctuation is just punctuation.
 
 ```
-/pet                     see every mood, and the current settings
-/pet off                 no face; the spinner comes back
-/pet still               keep the face, stop the animation
+❯ add a retry to the upload path
+
+ ▄█▄    ▄█▄    ◌ coding · 2.1s
+ ▄████████▄      src/transfer.py
+ ▀█▀▀██▀▀█▀      ✦ 2/4  add the retry path
+▀▀▀▀▀▀▀▀▀▀▀▀
+▄▀▀▀▀▀▀▀▀▀▀▄
+```
+
+What it is doing is read from the agent — which tool is running, what the
+task state machine says — so it cannot cheerfully type through a turn that
+failed a minute ago. It has twelve states: idle, thinking, searching,
+reading, coding, testing, recovering, success, error, listening, speaking,
+cancelled. Coding puts its paws on the keyboard; success brings out a mug.
+
+It gives way before anything else does. Below sixty columns, with
+animation off, or on a terminal that cannot render half-blocks, the same
+three lines of status are drawn without it — and the strip keeps its
+spinner, so exactly one thing is still moving either way.
+
+```
+/pet on                  draw it
+/pet off                 back to the words alone
+/pet show                every state, side by side
 /pet name ada            call it what you like
 /pet voice warm          how the agent talks -- see below
 ```
@@ -820,13 +828,14 @@ wynxo --talker qwen3:0.6b --coder qwen3-coder:30b
 ```
 
 ```
-> make out.txt with hi in it
+❯ make out.txt with hi in it
 
-  (•ᴗ•)  Okay, let me get that file made for you~
-  ● write_file  out.txt
-    ✓ created out.txt (1 lines)
+wyn  Okay, let me get that file made for you~
 
-  (≧ᴗ≦)  All done! I made out.txt with 'hi' inside~
+→ write out.txt
+  created out.txt (1 line)
+
+wyn  All done! I made out.txt with 'hi' inside~
 ```
 
 The talker speaks first — a small model is quick enough that the
@@ -1073,13 +1082,11 @@ the occasional spurious entry from a comment or a string.
 **Reads are free. Writes ask**, and show you the diff before you answer:
 
 ```
-  edit  src/auth.py
-╭────────────────────────────────╮
-│ @@ -12,3 +12,3 @@              │
-│ -    if user.token:            │
-│ +    if user.token is not None:│
-╰────────────────────────────────╯
-  [y] yes  [a] always  [n] no  [q] stop
+edit src/auth.py
+  @@ -12,3 +12,3 @@
+  -    if user.token:
+  +    if user.token is not None:
+[y] yes  [a] always  [n] no  [q] stop:
 ```
 
 `a` remembers — per tool, and for `shell` per **exact command**, so approving

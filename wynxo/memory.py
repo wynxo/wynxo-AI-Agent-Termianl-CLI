@@ -21,7 +21,6 @@ dropped rather than allowed to grow into the context budget.
 from __future__ import annotations
 
 import re
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -275,14 +274,3 @@ class Memory:
             "memory with the `remember` tool.\n\n"
             + "\n\n".join(parts) + "\n"
         )
-
-    def touched_recently(self, seconds: float = 5.0) -> bool:
-        """Whether either file changed just now, so the caller can reload."""
-        now = time.time()
-        for memory_file in (self.project, self.user):
-            try:
-                if memory_file.exists() and now - memory_file.path.stat().st_mtime < seconds:
-                    return True
-            except OSError:
-                continue
-        return False
