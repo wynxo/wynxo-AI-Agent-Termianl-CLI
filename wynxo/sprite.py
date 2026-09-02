@@ -61,6 +61,7 @@ INK: dict[str, str] = {
     "S": "bar_accent",   # what is on the laptop screen
     "s": "accent_dim",   # the screen, dimmer
     "L": "muted",        # the laptop case
+    "K": "bar_bg",       # the screen panel, dark, so it reads as a screen
     "C": "warn",         # the mug
     "W": "faint",        # steam, and the question mark while thinking
     "G": "good",
@@ -76,15 +77,15 @@ touch for most of this project's life."""
 
 _BODY = [
     "...F......F...",   # ear tips
-    "..FFF....FFF..",   # ears
+    "...FF....FF...",   # ears, rising from the head's corners
     "...FFFFFFFF...",   # the crown, narrower than the head
     "..FFFFFFFFFF..",
-    "..FFEEFFEEFF..",   # eyes
+    "..FEEFFFFEEF..",   # eyes, set wide
+    "..FFFFffFFFF..",   # muzzle
     "...FFFFFFFF...",   # jaw
-    ".FFFFFFFFFFFF.",   # shoulders
-    "..SSSSSSSSSS..",   # the screen, in front of the chest
-    "..SSSSSSSSSS..",
-    ".LLLLLLLLLLLL.",   # the case
+    "..LKKKKKKKKL..",   # the laptop: pale case, dark screen
+    "..LKKKKKKKKL..",
+    ".LLLLLLLLLLLL.",   # the deck
 ]
 """Every frame starts here and edits rows.
 
@@ -92,13 +93,25 @@ Written as one base rather than as twelve independent pictures because the
 silhouette is the character: if the ears move a pixel between idle and
 thinking, it stops reading as the same animal and starts reading as an
 animation glitch. Only the rows a state has a reason to change are
-replaced, so nothing can drift by accident."""
+replaced, so nothing can drift by accident.
 
-EYES_OPEN = "FFEEFFEEFF"
+The proportions were arrived at by drawing them and looking. The first
+version had a head ten pixels wide and four tall with the ears splayed out
+at its corners, which reads as a bat -- correct in a character grid, wrong
+the moment it is pixels. Upright ears rising from the corners of a squarer
+head, a crown a shade narrower than the jaw, and a two-pixel muzzle are
+what make it read as a cat.
+
+The laptop is the other half. Drawn in one pale tone it was a plinth the
+head sat on; a dark screen inset into a pale case is what makes it an
+object in front of the character rather than part of it.
+"""
+
+EYES_OPEN = "FEEFFFFEEF"
 EYES_SHUT = "FFFFFFFFFF"     # nothing: at two pixels an eye either is or isn't
 EYES_GLAD = "FffFFFFffF"     # the corners lift, in the shadow colour
-EYES_LEFT = "FEEFFEEFFF"     # both eyes together -- one eye moving is a squint
-EYES_RIGHT = "FFFEEFFEEF"
+EYES_LEFT = "EEFFFFEEFF"     # both eyes together -- one eye moving is a squint
+EYES_RIGHT = "FFEEFFFFEE"
 EYES_SHUT_R = "FRRFFFFRRF"   # shut, and the wrong colour
 
 _EYE_NOTE = """Why a blink closes the eyes rather than dimming them.
@@ -108,8 +121,7 @@ changes that survive are present, absent, and moved. Dimming the pixel
 looked right in a screenshot and vanished in motion, because it left the
 cell's glyph identical and only the colour moved -- so on a terminal
 without truecolour, or to anyone reading shape before hue, the character
-never blinked at all. Closing them changes ▀█▀▀██▀▀█▀ to ▀████████▀,
-which reads at a glance and reads without colour."""
+never blinked at all."""
 
 
 def _frame(**rows: str) -> list[str]:
@@ -122,7 +134,7 @@ def _frame(**rows: str) -> list[str]:
     return out
 
 
-def _eyes(pattern: str, row: int = 4) -> str:
+def _eyes(pattern: str) -> str:
     assert len(pattern) == 10, pattern
     return ".." + pattern + ".."
 
@@ -132,22 +144,16 @@ def _screen(pattern: str) -> str:
     return ".." + pattern + ".."
 
 
-# The screen's contents, as two rows of ten pixels. Bright cells are the
-# "text" on it; they move while something is actually being written.
-_DARK = "ssssssssss"
+# The laptop's two screen rows, as ten pixels each. K is the dark panel; S
+# is something lit on it. Only these change while the agent works, because
+# the screen is where the meaning is -- the character is watching it too.
+_DARK = "LKKKKKKKKL"
 
 
-def _typing(step: int) -> list[str]:
-    """A caret running along a line of text, and a line already written.
-
-    Four frames, and the only thing that moves. The eye is drawn to motion,
-    so the motion is put where the meaning is: while the agent is editing a
-    file, the thing that moves is the writing on the screen."""
-    top = list("SSSSSsssss")
-    caret = 5 + step % 5
-    row = list(_DARK)
-    row[:caret - 5] = "S" * (caret - 5)
-    return [_screen("".join(top)), _screen("".join(row))]
+def _lit(cells: str) -> str:
+    """A screen row with the given inner eight pixels."""
+    assert len(cells) == 8, cells
+    return _screen("L" + cells + "L")
 
 
 FRAMES: dict[State, list[list[str]]] = {
@@ -158,12 +164,13 @@ FRAMES: dict[State, list[list[str]]] = {
         _frame(r4=_eyes(EYES_OPEN)),
         _frame(r4=_eyes(EYES_SHUT)),
     ],
-    # Eyes up and away from the screen, and a mark floating beside the ear.
+    # Eyes up and away from the screen: the one state where the character
+    # is not looking at the work.
     State.THINKING: [
-        _frame(r3=_eyes(EYES_OPEN), r4=_eyes("FFFFFFFFFF")),
-        _frame(r3=_eyes(EYES_OPEN), r4=_eyes("FFFFFFFFFF")),
-        _frame(r3=_eyes(EYES_LEFT), r4=_eyes("FFFFFFFFFF")),
-        _frame(r3=_eyes(EYES_OPEN), r4=_eyes("FFFFFFFFFF")),
+        _frame(r3=_eyes(EYES_OPEN), r4=_eyes(EYES_SHUT)),
+        _frame(r3=_eyes(EYES_OPEN), r4=_eyes(EYES_SHUT)),
+        _frame(r3=_eyes(EYES_LEFT), r4=_eyes(EYES_SHUT)),
+        _frame(r3=_eyes(EYES_OPEN), r4=_eyes(EYES_SHUT)),
     ],
     # Looking left, then right. Searching is the one state where the eyes
     # sweep rather than settle.
@@ -173,76 +180,69 @@ FRAMES: dict[State, list[list[str]]] = {
         _frame(r4=_eyes(EYES_RIGHT)),
         _frame(r4=_eyes(EYES_RIGHT)),
     ],
-    # Eyes down on the screen, which is lit but still.
+    # Eyes down on a lit screen, and a blink. Nothing else moves: reading
+    # is the state where the character is still and the page is not.
     State.READING: [
-        _frame(r4=_eyes("FFEEFFEEFF"), r5="...FFFFFFFF...",
-               r7=_screen("SSSSSSssss")),
-        _frame(r4=_eyes(EYES_SHUT), r7=_screen("SSSSSSssss")),
-        _frame(r4=_eyes("FFEEFFEEFF"), r7=_screen("SSSSSSssss")),
-        _frame(r4=_eyes("FFEEFFEEFF"), r7=_screen("SSSSSSssss")),
+        _frame(r7=_lit("SSSSSSKK")),
+        _frame(r7=_lit("SSSSSSKK"), r4=_eyes(EYES_SHUT)),
+        _frame(r7=_lit("SSSSSSKK")),
+        _frame(r7=_lit("SSSSSSKK")),
     ],
-    # Paws up at the keyboard and the caret running. The flagship state.
+    # Paws up at the keyboard and a caret running along the line. The
+    # flagship state, and the only one where two things move.
     State.CODING: [
-        _frame(r4=_eyes(EYES_OPEN), r6=".fFFFFFFFFFFf.",
-               r7=_typing(0)[0], r8=_typing(0)[1]),
-        _frame(r4=_eyes(EYES_OPEN), r6="ffFFFFFFFFFFff",
-               r7=_typing(1)[0], r8=_typing(1)[1]),
-        _frame(r4=_eyes(EYES_OPEN), r6=".fFFFFFFFFFFf.",
-               r7=_typing(2)[0], r8=_typing(2)[1]),
-        _frame(r4=_eyes(EYES_OPEN), r6="ffFFFFFFFFFFff",
-               r7=_typing(3)[0], r8=_typing(3)[1]),
+        _frame(r6="..fFFFFFFFFf..", r7=_lit("SSKKKKKK")),
+        _frame(r6=".ffFFFFFFFFff.", r7=_lit("SSSSKKKK")),
+        _frame(r6="..fFFFFFFFFf..", r7=_lit("SSSSSSKK")),
+        _frame(r6=".ffFFFFFFFFff.", r7=_lit("SSSSSSSS")),
     ],
-    # Watching. Hands off the keyboard, a bar filling on the screen.
+    # Watching. Hands off the keyboard, a bar filling underneath.
     State.TESTING: [
-        _frame(r4=_eyes(EYES_OPEN), r7=_screen("SSssssssss")),
-        _frame(r4=_eyes(EYES_OPEN), r7=_screen("SSSSssssss")),
-        _frame(r4=_eyes(EYES_OPEN), r7=_screen("SSSSSSssss")),
-        _frame(r4=_eyes(EYES_OPEN), r7=_screen("SSSSSSSSss")),
+        _frame(r8=_lit("SKKKKKKK")),
+        _frame(r8=_lit("SSSKKKKK")),
+        _frame(r8=_lit("SSSSSKKK")),
+        _frame(r8=_lit("SSSSSSSK")),
     ],
-    # Something failed and is being worked out: thinking, with the screen
-    # still showing the damage.
+    # Something failed and is being worked out: eyes up, and the damage
+    # still on the screen.
     State.RECOVERING: [
-        _frame(r3=_eyes(EYES_OPEN), r4=_eyes("FFFFFFFFFF"),
-               r7=_screen("RRssssssss")),
-        _frame(r3=_eyes(EYES_LEFT), r4=_eyes("FFFFFFFFFF"),
-               r7=_screen("RRssssssss")),
+        _frame(r3=_eyes(EYES_OPEN), r4=_eyes(EYES_SHUT), r7=_lit("RRKKKKKK")),
+        _frame(r3=_eyes(EYES_LEFT), r4=_eyes(EYES_SHUT), r7=_lit("RRKKKKKK")),
     ],
     # Done, and it is the mug that says so. The one state with a prop.
     State.SUCCESS: [
-        _frame(r4=_eyes(EYES_GLAD), r6=".FFFFFFFFFF.W.",
-               r7="..SSSSSSSS.CC.", r8="..SSSSSSSS.CC.",
+        _frame(r4=_eyes(EYES_GLAD), r6="...FFFFFFFF.W.",
+               r7="..LKKKKKKL.CC.", r8="..LKKKKKKL.CC.",
                r9=".LLLLLLLLLL.CC"),
-        _frame(r4=_eyes(EYES_GLAD), r6=".FFFFFFFFFF.W.",
-               r7="..SSSSSSSS.CC.", r8="..SSSSSSSS.CC.",
+        _frame(r4=_eyes(EYES_GLAD), r6="...FFFFFFFF...",
+               r7="..LKKKKKKL.CC.", r8="..LKKKKKKL.CC.",
                r9=".LLLLLLLLLL.CC"),
-        _frame(r4=_eyes(EYES_SHUT), r6=".FFFFFFFFFF.W.",
-               r7="..SSSSSSSS.CC.", r8="..SSSSSSSS.CC.",
+        _frame(r4=_eyes(EYES_SHUT), r6="...FFFFFFFF...",
+               r7="..LKKKKKKL.CC.", r8="..LKKKKKKL.CC.",
                r9=".LLLLLLLLLL.CC"),
     ],
-    # The ears go down. Colour alone had error and success drawing the
-    # same silhouette -- both are "eyes not plainly open" -- and those two
-    # are the pair that must never be confused at a glance, since one of
-    # them means stop reading and look. The ears are the biggest shape the
+    # The ears go down. Colour alone had error and success drawing the same
+    # silhouette -- both are "eyes not plainly open" -- and those two are
+    # the pair that must never be confused at a glance, since one of them
+    # means stop reading and look. The ears are the biggest shape the
     # character has, so they are what changes.
     State.ERROR: [
         _frame(r0="..............", r1="..FF......FF..",
-               r4=_eyes(EYES_SHUT_R), r7=_screen("RRRRssssss")),
+               r4=_eyes(EYES_SHUT_R), r7=_lit("RRRRKKKK")),
     ],
     State.CANCELLED: [
         _frame(r0="..............", r1="..FF......FF..",
-               r4=_eyes(EYES_SHUT), r7=_screen(_DARK), r8=_screen(_DARK)),
+               r4=_eyes(EYES_SHUT), r7=_screen(_DARK)),
     ],
     # One ear up. Listening is the only thing an ear can say that a face
     # this size cannot.
     State.LISTENING: [
-        _frame(r0="...F.....FFF..", r1="..FFF....FFF..",
-               r4=_eyes(EYES_OPEN)),
-        _frame(r0="...F......F...", r1="..FFF....FFF..",
-               r4=_eyes(EYES_OPEN)),
+        _frame(r0="...F.....FF...", r1="...FF....FF..."),
+        _frame(r0="...F......F...", r1="...FF....FF..."),
     ],
     State.SPEAKING: [
-        _frame(r4=_eyes(EYES_OPEN), r5="...FFFWWFFFF.."),
-        _frame(r4=_eyes(EYES_OPEN), r5="...FFFFFFFF..."),
+        _frame(r5="..FFFFWWFFFF.."),
+        _frame(r5="..FFFFffFFFF.."),
     ],
 }
 

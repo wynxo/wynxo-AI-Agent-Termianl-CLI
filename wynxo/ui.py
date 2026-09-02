@@ -169,6 +169,18 @@ def _chunks(word: str, room: int):
         yield piece
 
 
+MEASURE = 84
+"""The widest a line of prose is allowed to get.
+
+Typography's rule of thumb is sixty to eighty characters: past that the eye
+has to hunt for the start of the next line and reading slows measurably.
+Terminals are routinely a hundred and sixty columns wide, and filling that
+with a paragraph is the difference between an answer you read and one you
+scan. Applied to prose only -- code, diffs and tool output are structured,
+scanned by shape rather than read as sentences, and truncating those to
+make them pretty would lose information."""
+
+
 def wrap_cells(text: str, room: int) -> list[str]:
     """Wrap to a width in display cells rather than in characters.
 
@@ -275,6 +287,14 @@ class SafeConsole(Console):
 
 
     def print(self, *args, **kwargs):
+        # print() with no arguments is how the whole interface asks for a
+        # separation. There was a gap() alias saying the same thing more
+        # readably, and it kept breaking: it exists only on this subclass,
+        # so any test or tool that swapped in a plain rich Console to
+        # capture output raised AttributeError from inside a UI helper.
+        # One method that every Console has beats a nicer name that only
+        # this one does.
+        #
         # A blank line is a request for separation, not for a newline, and
         # asking twice does not buy more of it. Thirty-four call sites each
         # decided their own spacing -- the prose block put one after itself,
@@ -306,15 +326,6 @@ class SafeConsole(Console):
         """How many empty rows the transcript currently ends with."""
         trailing = len(self._tail) - len(self._tail.rstrip("\n"))
         return max(0, trailing - 1)
-
-    def gap(self) -> None:
-        """One empty row between two blocks. Never doubles.
-
-        The same thing ``print()`` with no arguments does; named, for call
-        sites where asking for a separation reads better than asking for a
-        blank line.
-        """
-        self.print()
 
     def boundary(self) -> None:
         """Two empty rows: the seam between one exchange and the next.
@@ -719,7 +730,7 @@ class UI:
         if not body:
             return
         head, *rest = body.splitlines()
-        self.console.gap()
+        self.console.print()
         line = Text()
         line.append(f"{self.g.cross} ", style=BAD)
         line.append(head, style=f"bold {BAD}")
@@ -731,7 +742,6 @@ class UI:
             # into prose.
             depth = len(extra) - len(extra.lstrip())
             self.detail_line(extra.strip(), BAD, indent=2 + depth)
-        self.console.print()
 
     def success(self, message: str) -> None:
         self._marked(self.g.tick, message, GOOD)
@@ -751,7 +761,7 @@ class UI:
             return
         head, *rest = lines
         style = GOOD if head.lstrip().startswith(self.g.tick) else WARN
-        self.console.gap()
+        self.console.print()
         self.console.print(Text(head.strip(), style=f"bold {style}"))
         for line in rest:
             # The report indents its own detail by two, which is already
@@ -759,7 +769,6 @@ class UI:
             # over rather than being flattened or doubled.
             depth = len(line) - len(line.lstrip())
             self.detail_line(line.strip(), MUTED, indent=max(2, depth))
-        self.console.print()
 
     def help_block(self, text: str) -> None:
         """A block of guidance, in the transcript's column.
@@ -784,11 +793,13 @@ class UI:
         if not text.strip():
             return
         text = sanitise(text)
-        self.console.gap()
+        self.console.print()
         # Flush with everything else. The answer is the thing the session
-        # is for; it does not need setting in from the edge to be found.
-        self.console.print(Markdown(text, code_theme=self.code_theme))
-        self.console.gap()
+        # is for; it does not need setting in from the edge to be found --
+        # but it does want a measure, for the same reason a book has one.
+        self.console.print(Markdown(text, code_theme=self.code_theme),
+                           width=min(self.width, MEASURE))
+        self.console.print()
 
     # -- tools -------------------------------------------------------------
 
@@ -814,6 +825,10 @@ class UI:
         than level with it. That is the whole hierarchy: what the agent
         did, and beneath it what happened.
         """
+        # Every committed block opens by separating itself from whatever
+        # came before, rather than each block closing with a blank of its
+        # own. One rule, applied by the thing that knows it is starting.
+        self.console.print()
         line = Text()
         line.append(f"{self.g.arrow} ", style=ACCENT if ok else BAD)
         line.append(verb(name), style="bold" if ok else f"bold {BAD}")
@@ -1037,8 +1052,8 @@ class UI:
         rows = [[str(cell) for cell in row] for row in rows]
         if not rows:
             return
+        self.console.print()
         if title:
-            self.console.gap()
             self.console.print(Text(title, style=f"bold {ACCENT}"))
 
         names = [row[0] for row in rows]
@@ -1077,7 +1092,6 @@ class UI:
                 line.append("  " + piece, style=MUTED)
                 first = False
             self.console.print(line)
-        self.console.print()
 
 
 VERBS = {
@@ -1230,8 +1244,14 @@ class CodeStreamer:
         streamer lives for a whole turn, so widening the window mid-answer
         left the rest of the reply wrapped to the old, narrower column and
         narrowing it ran every line off the edge.
+
+        Capped at the measure, because prose is the one thing here that is
+        read rather than scanned. A line of a hundred and sixty characters
+        makes the eye lose its place coming back to the left margin -- the
+        reason books are not printed the width of the paper.
         """
-        return max(30, self.ui.width - cell_len(self.indent) - 1)
+        room = self.ui.width - cell_len(self.indent) - 1
+        return max(30, min(room, MEASURE))
 
     # -- entry point -------------------------------------------------------
 
@@ -2172,13 +2192,20 @@ class ActivityBar:
             return lines
         art = sprite.rows(self.state, self._frame // self.SCENE_PACE,
                           self.ui.palette)
+        # The words sit against the middle of the character rather than
+        # its top. Aligned to the first row they landed level with the ear
+        # tips, with three empty rows beside the face -- which reads as two
+        # things that happen to be next to each other rather than as one
+        # block. One or two lines against a five-row drawing want centring.
+        top = max(0, (sprite.HEIGHT - len(lines)) // 2)
         out = []
         for index in range(sprite.HEIGHT):
             row = Text()
             row.append_text(art[index])
-            if index < len(lines):
+            beside = index - top
+            if 0 <= beside < len(lines):
                 row.append("  ")
-                row.append_text(lines[index])
+                row.append_text(lines[beside])
             out.append(row)
         return out
 

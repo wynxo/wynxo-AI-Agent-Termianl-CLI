@@ -125,7 +125,7 @@ class TestInputBox:
         ui.width = 40
         stream = capture(ui)
         repl = self._repl(ui)
-        assert repl._prompt_message().value == "<b>&gt;</b> "
+        assert ui.g.caret in repl._prompt_message().value
         repl._echo_prompt("hello")
         assert stream.getvalue() == ""
 
@@ -146,10 +146,15 @@ class TestInputBox:
                 border = self._repl(ui)._border_plain()
                 assert cell_len(border) == width, (unicode_ok, width, border)
 
-    def test_prompt_edge_is_ascii(self, monkeypatch):
+    def test_the_prompt_is_the_caret_and_nothing_else(self, monkeypatch):
+        """At column zero, which is where the echoed line puts it too, so
+        what you type sits in the column it will land in."""
         monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
         ui = ascii_ui()
-        assert "|" in self._repl(ui)._prompt_message().value
+        value = self._repl(ui)._prompt_message().value
+        assert "|" not in value and "-" not in value
+        assert ui.g.caret in value
+        assert value.isascii()
 
     def test_prompt_edge_uses_the_palette_accent(self, monkeypatch):
         """The caret matches the frame around it: one hue, not a cyan
@@ -198,17 +203,20 @@ class TestInputBox:
         ui.width = 30
         assert "^C stop" not in repl._border_plain()
 
-    def test_the_bottom_edge_turns_one_corner_and_runs_out_flush(self):
-        """It closes the left edge coming down the input and then stops
-        being a box. With no top border there is nothing above the
-        right-hand end for a corner to meet, and a ╯ with nothing over it
-        is the half-drawn frame this design is trying not to be."""
+    def test_the_bottom_edge_is_a_rule_with_no_corners(self):
+        """There is no box left for it to be the bottom of.
+
+        It closed a left edge coming down the composer once. That edge went
+        -- a single │ beside the caret with nothing above it reads as a
+        stray mark -- so the corner had nothing to turn from. What is left
+        is a rule: the seam between the transcript and what you are
+        typing, with the status set into it."""
         ui = UI()
         ui.g = Glyphs(True)
         ui.width = 60
         border = self._repl(ui)._border_plain()
-        assert border.startswith("╰")
-        assert border.endswith("─") and not border.endswith("╯")
+        assert border.startswith("─") and border.endswith("─")
+        assert not set(border) & set("╰╯╭╮│")
 
 
 class TestPanelsAndRules:

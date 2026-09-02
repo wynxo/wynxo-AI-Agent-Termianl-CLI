@@ -1955,29 +1955,25 @@ class Repl:
         await self.speaker.say_async(line)
 
     def _prompt_message(self) -> HTML:
-        """The composer's left edge and its caret.
+        """Just the caret, in the transcript's own column.
 
-        No top border. It was a full width of ─ drawn above every prompt,
-        carrying nothing: the edge below already closes the region and has
-        the status set into it, so the line above was chrome answering
-        chrome. What is left is an L -- the left edge down the input, the
-        bottom edge under it -- which brackets the composer without boxing
-        it, and costs one row less of the screen per prompt.
+        This was a full box once: a top border, a left edge, and a bottom
+        edge with the status set into it. The top went first -- a full
+        width of ─ above every prompt, chrome answering chrome. The left
+        edge outlived it, and on screen a single ─ hanging beside the caret
+        with nothing above it reads as a stray mark rather than as the side
+        of anything.
 
-        The caret is the transcript's caret. It was a bare ">" here while
-        the echoed line used "❯", so the line you typed and the line it
-        became were different shapes, and the composer's own docstring
-        claimed they matched.
+        What is left is the caret alone, at column zero, which is exactly
+        where the echoed line puts it. So what you are typing sits in the
+        same column as what it becomes, and the status edge below is the
+        only rule on the screen.
 
         Re-evaluated on every redraw, so a mid-prompt Ctrl-E shows up at
         once.
         """
-        g = self.ui.g
-        if is_dumb_terminal():
-            return HTML("<b>%s</b> " % escape(g.caret))
-        return HTML(
-            '<style fg="%s">%s</style> <b><style fg="%s">%s</style></b> '
-            % (ACCENT, escape(g.vbar), ACCENT, escape(g.caret)))
+        return HTML('<b><style fg="%s">%s</style></b> '
+                    % (ACCENT, escape(self.ui.g.caret)))
 
     def _echo_prompt(self, text: str, note: str = "") -> None:
         """Put what was asked into the transcript, compactly.
@@ -2008,9 +2004,11 @@ class Repl:
         # one path and two on the other. Asking for the seam itself makes
         # both two, which is also the one place in the transcript worth
         # spending a second row on -- it is where one exchange ends.
+        # No trailing blank. Every block that follows opens with its own
+        # gap, so adding one here made two: the question and the answer had
+        # two rows between them where every other pair of blocks has one.
         self.ui.console.boundary()
         self.ui.console.print(body, overflow="ellipsis", no_wrap=True)
-        self.ui.console.print()
 
     def _bottom_toolbar(self):
         """The closing edge of the input box, with the status set into it.
@@ -2058,7 +2056,12 @@ class Repl:
         status_style = _ansi_of(MUTED)
         hint_style = _ansi_of(FAINT)
         reset = "\x1b[0m"
-        line = f"{frame}{g.bl}{g.hbar}{reset} {status_style}{left}{reset} " \
+        # A rule, not a corner. ╰ turned a corner off the composer's left
+        # edge, and that edge is gone -- so the corner had nothing above it
+        # to turn from and read as a stray mark. Both ends run out flush
+        # now, and the line is simply the seam between the transcript and
+        # what you are typing.
+        line = f"{frame}{g.hbar}{g.hbar}{reset} {status_style}{left}{reset} " \
             f"{frame}" + g.hbar * fill
         if hint:
             line += f"{reset} {hint_style}{hint}{reset} {frame}{g.hbar}"
