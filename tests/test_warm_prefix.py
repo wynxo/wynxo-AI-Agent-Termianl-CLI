@@ -132,3 +132,29 @@ class TestAWarmUpCannotFailAStartUp:
         agent.backend.client._client = httpx.AsyncClient(
             transport=httpx.MockTransport(die), base_url="http://fake:11434")
         assert await agent.backend.client.warm(agent.config.model) is False
+
+
+class TestEveryProviderAnswersTheSameCall:
+    """Start-up warms without knowing which provider it is holding. A
+    signature that does not match is a TypeError on the first line of every
+    session against that server -- which no test of the Ollama path can
+    catch, because the Ollama path is the one that was changed."""
+
+    def test_the_signatures_agree(self):
+        import inspect
+
+        from wynxo.provider import OllamaClient, OpenAIClient
+
+        ollama = inspect.signature(OllamaClient.warm).parameters
+        openai = inspect.signature(OpenAIClient.warm).parameters
+        assert set(ollama) == set(openai)
+
+    async def test_an_openai_server_declines_without_raising(self, tmp_path):
+        from wynxo.config import Config, Endpoint
+        from wynxo.provider import OpenAIClient
+
+        client = OpenAIClient(Config(
+            endpoints=[Endpoint(name="t", url="http://fake:8000/v1")],
+            active_endpoint="t", model="gpt-oss"))
+        assert await client.warm("gpt-oss", messages=[{"role": "user"}],
+                                 tools=[{"x": 1}]) is False

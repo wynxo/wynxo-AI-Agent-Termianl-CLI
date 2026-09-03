@@ -762,8 +762,17 @@ class OpenAIClient:
         """
         return []
 
-    async def warm(self, model: str = "", num_ctx: int = 0) -> bool:
-        """Nothing to warm. Loading is the server's business, not ours."""
+    async def warm(self, model: str = "", num_ctx: int = 0,
+                   messages: list[dict] | None = None,
+                   tools: list[dict] | None = None) -> bool:
+        """Nothing to warm. Loading is the server's business, not ours.
+
+        The arguments are the Ollama client's and are ignored, but they
+        have to be accepted: start-up calls this without knowing which
+        provider it is holding, and a signature that does not match is a
+        TypeError on the first line of every session against an
+        OpenAI-compatible server.
+        """
         return False
 
     async def ping(self) -> str:
