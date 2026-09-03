@@ -22,6 +22,23 @@ from wynxo.cli import (ALIASES, COMMAND_LIST, COMMANDS, REGISTRY, Command,
                        Repl, resolve_command, suggest_commands)
 
 
+def _advertised(does: str) -> set[str]:
+    """The options a description offers, from its "subject: a | b | c" part.
+
+    Every description that lists alternatives is written that way, which is
+    what makes this readable by a test at all.
+    """
+    body = does.split(":", 1)[1] if ":" in does else does
+    if "|" not in body:
+        return set()
+    words = set()
+    for piece in body.split("|"):
+        word = piece.strip().strip(",.").split(" ")[0].strip()
+        if word and word.isalpha():
+            words.add(word)
+    return words
+
+
 class TestTheTableIsWellFormed:
     def test_every_command_has_a_handler_on_the_repl(self):
         missing = [c.name for c in COMMAND_LIST
@@ -87,6 +104,24 @@ class TestTheDerivedTablesCannotDrift:
         for command in COMMAND_LIST:
             for value in command.values:
                 assert value and value == value.strip(), command.name
+
+    def test_what_a_description_offers_is_what_completion_offers(self):
+        """Argument-level drift, which is the same bug one level down.
+
+        /queue advertised "show | run | clear" and rejected "show" -- the
+        one word of its own three it did not accept. /animate advertised
+        "list" and passed it through as a companion state, where it matched
+        none of them, so the documented spelling was the one that failed.
+        And /endpoint, /secrets, /speak and /talker each named options that
+        Tab had never heard of.
+        """
+        for command in COMMAND_LIST:
+            offered = _advertised(command.does)
+            if not offered:
+                continue
+            assert offered == set(command.values), (
+                f"{command.name}: says {sorted(offered)}, "
+                f"completes {sorted(command.values)}")
 
 
 class TestEveryAdvertisedCommandCanBeReached:

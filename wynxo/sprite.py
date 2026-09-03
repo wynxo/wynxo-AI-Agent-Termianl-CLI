@@ -59,13 +59,12 @@ INK: dict[str, str] = {
     "f": "accent_dim",   # fur in shadow: paws, the underside of the jaw
     "E": "bar_bg",       # eye -- the palette's darkest, whatever the theme
     "S": "bar_accent",   # what is on the laptop screen
-    "s": "accent_dim",   # the screen, dimmer
     "L": "muted",        # the laptop case
     "K": "bar_bg",       # the screen panel, dark, so it reads as a screen
     "C": "warn",         # the mug
-    "W": "faint",        # steam, and the question mark while thinking
-    "G": "good",
-    "R": "bad",
+    "W": "faint",        # steam, and the thought drifting off the ear
+    "G": "good",         # the screen when the work came out right
+    "R": "bad",          # the screen when it did not
     ".": "",             # nothing: leave the terminal's own background
 }
 """Pixel character to palette role. Roles rather than colours, so /theme
@@ -164,12 +163,16 @@ FRAMES: dict[State, list[list[str]]] = {
         _frame(r4=_eyes(EYES_OPEN)),
         _frame(r4=_eyes(EYES_SHUT)),
     ],
-    # Eyes up and away from the screen: the one state where the character
-    # is not looking at the work.
+    # Eyes up and away from the screen, and a thought drifting off the
+    # ear. The eyes alone moved by one pixel row -- half a terminal row --
+    # which is the smallest change this sprite can make, and it left
+    # thinking and idle looking like the same picture at the size anyone
+    # actually sees them. The mark is the signal; the eyes are the detail
+    # you notice second.
     State.THINKING: [
-        _frame(r3=_eyes(EYES_OPEN), r4=_eyes(EYES_SHUT)),
-        _frame(r3=_eyes(EYES_OPEN), r4=_eyes(EYES_SHUT)),
-        _frame(r3=_eyes(EYES_LEFT), r4=_eyes(EYES_SHUT)),
+        _frame(r1="...FF....FF.W.", r3=_eyes(EYES_OPEN), r4=_eyes(EYES_SHUT)),
+        _frame(r0="...F......F.W.", r3=_eyes(EYES_OPEN), r4=_eyes(EYES_SHUT)),
+        _frame(r0="...F......F.WW", r3=_eyes(EYES_LEFT), r4=_eyes(EYES_SHUT)),
         _frame(r3=_eyes(EYES_OPEN), r4=_eyes(EYES_SHUT)),
     ],
     # Looking left, then right. Searching is the one state where the eyes
@@ -209,16 +212,20 @@ FRAMES: dict[State, list[list[str]]] = {
         _frame(r3=_eyes(EYES_OPEN), r4=_eyes(EYES_SHUT), r7=_lit("RRKKKKKK")),
         _frame(r3=_eyes(EYES_LEFT), r4=_eyes(EYES_SHUT), r7=_lit("RRKKKKKK")),
     ],
-    # Done, and it is the mug that says so. The one state with a prop.
+    # Done, and it is the mug that says so. The one state with a prop --
+    # and the screen goes green, because "it worked" is the one thing on
+    # this character worth spending the good colour on. That role was
+    # declared in the ink map and drawn nowhere, so success and a warning
+    # were sharing the amber of the mug.
     State.SUCCESS: [
         _frame(r4=_eyes(EYES_GLAD), r6="...FFFFFFFF.W.",
-               r7="..LKKKKKKL.CC.", r8="..LKKKKKKL.CC.",
+               r7="..LGGGGGGL.CC.", r8="..LKKKKKKL.CC.",
                r9=".LLLLLLLLLL.CC"),
         _frame(r4=_eyes(EYES_GLAD), r6="...FFFFFFFF...",
-               r7="..LKKKKKKL.CC.", r8="..LKKKKKKL.CC.",
+               r7="..LGGGGGGL.CC.", r8="..LKKKKKKL.CC.",
                r9=".LLLLLLLLLL.CC"),
         _frame(r4=_eyes(EYES_SHUT), r6="...FFFFFFFF...",
-               r7="..LKKKKKKL.CC.", r8="..LKKKKKKL.CC.",
+               r7="..LGGGGGGL.CC.", r8="..LKKKKKKL.CC.",
                r9=".LLLLLLLLLL.CC"),
     ],
     # The ears go down. Colour alone had error and success drawing the same
@@ -234,15 +241,26 @@ FRAMES: dict[State, list[list[str]]] = {
         _frame(r0="..............", r1="..FF......FF..",
                r4=_eyes(EYES_SHUT), r7=_screen(_DARK)),
     ],
-    # One ear up. Listening is the only thing an ear can say that a face
-    # this size cannot.
+    # One ear up, and something arriving at it. The ear alone was one pixel
+    # of difference from the base body -- technically distinct, and not
+    # legible at the size anyone sees this. So listening borrows the device
+    # that made thinking readable, mirrored: a mark, on the left, moving
+    # toward the ear rather than drifting away from it.
+    #
+    # The second frame also used to be the base body exactly, so for half
+    # of every cycle "listening" was pixel-for-pixel the idle picture. A
+    # state has to be legible in every frame it is in; it is the motion
+    # that may vary.
     State.LISTENING: [
-        _frame(r0="...F.....FF...", r1="...FF....FF..."),
-        _frame(r0="...F......F...", r1="...FF....FF..."),
+        _frame(r0=".W.F.....FF...", r1="...FF....FF..."),
+        _frame(r0="W..F.....FF...", r1=".W.FF....FF..."),
     ],
+    # The mouth opens and closes, and neither frame is the closed mouth of
+    # the base body -- the same bug: the second frame was the base, so
+    # speaking spent half its time drawn as idle.
     State.SPEAKING: [
         _frame(r5="..FFFFWWFFFF.."),
-        _frame(r5="..FFFFffFFFF.."),
+        _frame(r5="..FFFWWWWFFF.."),
     ],
 }
 

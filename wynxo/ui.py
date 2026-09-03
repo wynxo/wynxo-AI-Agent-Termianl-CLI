@@ -1011,6 +1011,16 @@ class UI:
             return
         self.console.print(plan_block(rendered, self.g))
 
+    MAX_TABLE_ROWS = 60
+    """The ceiling on a listing, for the reason a block of code has one.
+
+    /apps on an ordinary Linux box found four hundred and ninety-two
+    applications and printed all of them: five hundred rows of scrollback to
+    answer "what is installed", past the point where anyone was still
+    reading and taking the rest of the session with it. What is cut is
+    counted, never dropped in silence -- and every list that can grow gets
+    the rule, not just the one that grew."""
+
     MAX_CODE_LINES = 120
     """The same ceiling a diff gets, for the same reason.
 
@@ -1165,6 +1175,8 @@ class UI:
         rows = [[str(cell) for cell in row] for row in rows]
         if not rows:
             return
+        dropped = max(0, len(rows) - self.MAX_TABLE_ROWS)
+        rows = rows[:self.MAX_TABLE_ROWS]
         self.console.print()
         if title:
             self.console.print(Text(title, style=f"bold {ACCENT}"))
@@ -1205,6 +1217,9 @@ class UI:
                 line.append("  " + piece, style=MUTED)
                 first = False
             self.console.print(line)
+        if dropped:
+            self.detail_line(f"{self.g.ellipsis} {dropped:,} more, not shown",
+                             FAINT, indent=0)
 
 
 VERBS = {

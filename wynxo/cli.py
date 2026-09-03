@@ -374,45 +374,43 @@ class Command:
 
 COMMAND_LIST: tuple[Command, ...] = (
     Command("/help", "show this", "cmd_help"),
-    Command("/effort", "change effort level (low|medium|high|xhigh|max|ultra)",
-            "cmd_effort",
+    Command("/effort", "how hard it works: low | medium | high | xhigh | max "
+                       "| ultra", "cmd_effort",
             ("low", "medium", "high", "xhigh", "max", "ultra")),
     Command("/model", "switch model, or list what the server has", "cmd_model"),
-    Command("/endpoint",
-            "list | use <name> | add <url> | test -- where Ollama serves",
-            "cmd_endpoint"),
+    Command("/endpoint", "where Ollama serves: list | use | add | test",
+            "cmd_endpoint", ("list", "use", "add", "test")),
     Command("/ctx", "show or set the context window (num_ctx)", "cmd_ctx"),
     Command("/tools", "list the tools the agent can call", "cmd_tools"),
-    Command("/apps",
-            "list the applications discovered on this machine "
-            "(add refresh to rescan)", "cmd_apps"),
-    Command("/pet", "the companion: on | off | name <x> | voice <x> | show <mood>",
-            "cmd_pet", ("on", "off", "still", "name", "voice")),
-    Command("/mommy", "mommy-style talking: on | off (no argument toggles)",
+    Command("/apps", "applications on this machine: <word> | refresh",
+            "cmd_apps", ("refresh",)),
+    Command("/pet", "the companion: on | off | still | name | voice | show",
+            "cmd_pet", ("on", "off", "still", "name", "voice", "show")),
+    Command("/mommy", "mommy-style talking: on | off",
             "cmd_mommy", ("on", "off")),
-    Command("/animate", "preview the animations: list, or <name> for a scene",
-            "cmd_animate"),
+    Command("/animate", "the companion's states: list | on | off | <state>",
+            "cmd_animate", ("list", "on", "off")),
     Command("/todo", "show the current plan", "cmd_todo"),
     Command("/queue", "what you typed while it was working: show | run | clear",
-            "cmd_queue"),
+            "cmd_queue", ("show", "run", "clear")),
     Command("/dictate", "record one spoken message onto the prompt (Ctrl-R)",
             "cmd_dictate"),
     Command("/theme",
-            "colour palette: purple | sakura | midnight | ember | plain | minimal",
-            "cmd_theme",
+            "colour palette: purple | sakura | kawaii | midnight | ember | "
+            "catboy | plain | minimal", "cmd_theme",
             ("purple", "sakura", "kawaii", "midnight", "ember", "catboy",
              "plain", "minimal")),
-    Command("/secrets", "credential protection: on | off | allow <path>",
-            "cmd_secrets"),
-    Command("/speak", "read answers out loud: on | off | test | engine <name>",
-            "cmd_speak"),
-    Command("/talker", "small model that does the talking: <model> | off",
-            "cmd_talker"),
-    Command("/log", "where this session is being recorded", "cmd_log",
+    Command("/secrets", "credential protection: on | off | allow",
+            "cmd_secrets", ("on", "off", "allow")),
+    Command("/speak", "read answers out loud: on | off | test | engine | voice",
+            "cmd_speak", ("on", "off", "test", "engine", "voice")),
+    Command("/talker", "small model that does the talking: off | <model>",
+            "cmd_talker", ("off",)),
+    Command("/log", "the session recording: tail | list | off", "cmd_log",
             ("tail", "list", "off")),
-    Command("/mode", "plan | manual | auto | yolo -- how much it asks first",
+    Command("/mode", "how much it asks first: plan | manual | auto | yolo",
             "cmd_mode", ("plan", "manual", "auto", "yolo")),
-    Command("/scope", "folder | repo | machine, or a path to work in",
+    Command("/scope", "where it may work: folder | repo | machine | <path>",
             "cmd_scope", ("folder", "repo", "machine")),
     Command("/cd", "work in another directory", "cmd_cd"),
     Command("/repo", "clone a GitHub repo and work in it", "cmd_repo"),
@@ -427,8 +425,8 @@ COMMAND_LIST: tuple[Command, ...] = (
             "pick up an earlier conversation, from this project or another",
             "cmd_resume"),
     Command("/gh",
-            "work on a GitHub repo in the cloud: status | open | ls | cat | "
-            "edit | branch | pr | close", "cmd_gh",
+            "work on a GitHub repo in the cloud: status | login | open | ls | "
+            "cat | edit | branch | pr | close", "cmd_gh",
             ("status", "login", "open", "ls", "cat", "edit", "branch", "pr",
              "close")),
     Command("/commit", "write a commit message from the staged diff, then commit",
@@ -3431,20 +3429,41 @@ class Repl:
         the platform equivalents -- never from a code-level list, so what is
         shown is exactly what launch_application can launch.
         """
+        wanted = ""
         if args and args[0].lower() in ("refresh", "rescan", "again"):
             with self.ui.status("scanning for installed applications..."):
                 entries = self._app_catalog.refresh()
+            args = args[1:]
         else:
             entries = self._app_catalog.entries()
         if not entries:
             self.ui.info("no applications discovered on this machine")
             return True
+
+        total = len(entries)
+        if args:
+            # Nearly five hundred applications is the ordinary case on
+            # Linux, and a list that long answers nothing. A word narrows
+            # it, which is what you came to do: /apps code, /apps firefox.
+            wanted = " ".join(args).lower()
+            entries = [e for e in entries
+                       if wanted in e.name.lower()
+                       or wanted in str(e.path).lower()]
+            if not entries:
+                self.ui.info(f"no application matching {wanted!r} "
+                             f"among the {total:,} found")
+                return True
+
         self.ui.table(
             ["application", "found in", "target"],
-            [(e.name, e.where, self.ui.shorten_path(str(e.path))) for e in entries],
-            title=f"{len(entries)} applications",
+            [(e.name, e.where, self.ui.shorten_path(str(e.path)))
+             for e in entries],
+            title=(f"{len(entries):,} of {total:,} applications match "
+                   f"{wanted!r}" if wanted else f"{total:,} applications"),
         )
-        self.ui.info("launched by name via launch_application; /apps refresh to rescan")
+        self.ui.hint("/apps <word> to narrow it  "
+                     f"{self.ui.g.dot}  /apps refresh to rescan  "
+                     f"{self.ui.g.dot}  the agent launches them by name")
         return True
 
     def cmd_map(self, args: list[str]) -> bool:
@@ -4250,7 +4269,14 @@ class Repl:
                             + ("  (reduced motion)" if not on else ""))
             return True
 
-        self._show_states(args[0].lower() if args else "")
+        # "list" is the whole gallery, which is also what no argument
+        # means -- and it is the word the command's own description offers.
+        # Passed through as a state name it matched none of them, so the
+        # documented spelling was the one that failed.
+        wanted = args[0].lower() if args else ""
+        if wanted in ("list", "states", "all"):
+            wanted = ""
+        self._show_states(wanted)
         self.ui.info(
             f"one state: /animate <state>   motion: "
             f"{'on' if self.config.animations else 'off'}"
@@ -4283,8 +4309,11 @@ class Repl:
                 self.ui.info("nothing queued")
                 return True
             return await self._drain_queue()
-        if args:
-            self.ui.warn("/queue shows what is waiting; run or clear decides")
+        # "show" is what /queue advertises and what a person types when they
+        # want the listing rather than a decision about it. It was the one
+        # word of the three in its own description that this rejected.
+        if args and want not in ("show", "list", "what"):
+            self.ui.warn(f"/queue takes show, run or clear -- not {args[0]!r}")
             return True
         waiting = self.pending.summary()
         if not waiting:

@@ -138,3 +138,86 @@ class TestNothingAnimatesOnAClockOfItsOwn:
 
         signature = inspect.signature(sprite.rows)
         assert "frame" in signature.parameters
+
+
+class TestEveryStateLooksLikeADifferentState:
+    """A state indicator whose states look alike indicates nothing.
+
+    Thinking moved the eyes by one pixel row -- half a terminal row, the
+    smallest change this sprite can make -- so at the size anyone actually
+    sees it, thinking and idle were the same picture.
+    """
+
+    def _rendered(self, state, frame=1):
+        from wynxo import sprite
+        from wynxo.theme import resolve
+
+        palette = resolve("purple")
+        return tuple(
+            (row.plain, tuple(sorted({str(s.style) for s in row.spans})))
+            for row in sprite.rows(state, frame, palette))
+
+    def test_no_two_states_draw_the_same_picture(self):
+        """Checked on every frame, not just the first.
+
+        listening and speaking each animated back onto the base body, so
+        for half of every cycle they were pixel-for-pixel the idle picture
+        -- and the state gallery, which draws frame one, showed idle for
+        both of them."""
+        from wynxo.companion import State
+        from wynxo.sprite import FRAMES
+
+        clashes = []
+        for frame in range(4):
+            seen = {}
+            for state in State:
+                picture = self._rendered(state, frame)
+                if picture in seen and seen[picture] != state.value:
+                    clashes.append(
+                        f"frame {frame}: {state.value} == {seen[picture]}")
+                seen.setdefault(picture, state.value)
+        assert clashes == [], clashes
+        assert FRAMES, "no frames at all"
+
+    def test_thinking_differs_from_idle_in_shape_not_only_in_colour(self):
+        """Colour alone is lost on a terminal without truecolour, and to
+        anyone reading shape before hue."""
+        from wynxo.companion import State
+
+        idle = [row for row, _ in self._rendered(State.IDLE)]
+        thinking = [row for row, _ in self._rendered(State.THINKING)]
+        assert idle != thinking
+
+    def test_success_and_error_never_share_a_silhouette(self):
+        """The pair that must not be confused at a glance: one of them
+        means stop reading and look."""
+        from wynxo.companion import State
+
+        good = [row for row, _ in self._rendered(State.SUCCESS)]
+        bad = [row for row, _ in self._rendered(State.ERROR)]
+        assert good != bad
+
+
+class TestTheInkMapIsAllUsed:
+    def test_every_declared_colour_is_drawn_somewhere(self):
+        """A role in the map that no frame uses is a colour the character
+        does not have. Two were sitting there: the good green, which meant
+        success and a warning shared the amber of the mug, and a second
+        screen tone nothing ever drew."""
+        from wynxo.sprite import FRAMES, INK
+
+        used = set()
+        for frames in FRAMES.values():
+            for frame in frames:
+                for row in frame:
+                    used |= set(row)
+        assert sorted(set(INK) - used - {"."}) == []
+
+    def test_every_pixel_drawn_has_a_colour(self):
+        from wynxo.sprite import FRAMES, INK
+
+        for state, frames in FRAMES.items():
+            for frame in frames:
+                for row in frame:
+                    unknown = set(row) - set(INK)
+                    assert not unknown, f"{state.value}: {unknown}"
