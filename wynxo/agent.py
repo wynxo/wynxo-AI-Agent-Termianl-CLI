@@ -907,8 +907,17 @@ class Agent:
                               elapsed=time.monotonic() - started)
 
         outcomes = []
-        for target in decision.targets or (request,):
-            result = await launcher.invoke({"query": target})
+        targets = list(decision.targets or (request,))
+        for index, target in enumerate(targets):
+            args = {"query": target}
+            # The command goes to the last target, which is where the
+            # sentence puts it: "kcalc, then firefox, then konsole running
+            # main.py".
+            if decision.command and index == len(targets) - 1:
+                args["command"] = decision.command
+                if not await self._may_launch(launcher, args):
+                    break
+            result = await launcher.invoke(args)
             self._note_terminal(result)
             await self.cb.on_tool_result(
                 launcher.name, result.ok, result.display or target,
@@ -916,7 +925,14 @@ class Agent:
             self.session.add_tool_result(launcher.name, result.output)
             outcomes.append(result)
 
-        content = "\n".join(r.output for r in outcomes if r.output).strip()
+        # What the tool told the *model* is not what the user should read.
+        # launch_application's output ends with an instruction to reply and
+        # stop -- scaffolding, aimed at the model -- and this content is
+        # shown verbatim. Three applications meant three copies of it as
+        # the answer to "open kcalc, firefox and konsole".
+        content = "\n".join(
+            r.metadata.get("said") or r.output for r in outcomes
+            if (r.metadata.get("said") or r.output)).strip()
         self.session.add_assistant(content)
         self.session.save()
         result = TurnResult(content=content, iterations=1,
@@ -934,6 +950,35 @@ class Agent:
             follow.content = f"{content}\n\n{follow.content}".strip()
             return follow
         return result
+
+    async def _may_launch(self, launcher, args: dict) -> bool:
+        """Ask before a launch that carries a command. True to go ahead.
+
+        This path does not go through the tool loop, so it does not get the
+        tool loop's permission check for free -- and a launch carrying a
+        command is a command. It runs outside every guard the shell tool
+        has, in a window wynxo does not own, so it is asked about on the
+        same terms rather than waved through as "just opening an
+        application".
+        """
+        from .permissions import summarise_call
+
+        if not self.permissions.needs_prompt(launcher.name, launcher.mutating,
+                                             args):
+            return True
+        summary = summarise_call(launcher.name, args, self.workspace)
+        decision = await self.cb.ask_permission(
+            launcher.name, summary, args.get("command", ""))
+        if decision is Decision.ALLOW_ALWAYS:
+            self.permissions.remember(launcher.name, args)
+            return True
+        if decision in (Decision.DENY, Decision.ABORT):
+            self.permissions.record_denial(launcher.name, summary)
+            self.session.add_tool_result(
+                launcher.name,
+                "The user declined to run that command. Do not retry it.")
+            return False
+        return True
 
     async def _run_tool_calls(self, turn: ParsedTurn) -> bool:
         """Execute a turn's tool calls. Returns False if the user aborted.

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
 import sys
 
@@ -40,6 +41,15 @@ class LaunchApplicationInput(Schema):
         "a specific file in the application.",
         default="",
     )
+    command = Field(
+        str,
+        "A shell command to run inside the application, for terminal "
+        "emulators only -- for example 'python3 main.py' when the user "
+        "says 'open konsole and run main.py'. The terminal stays open "
+        "afterwards so its output can be read. Leave empty for anything "
+        "that is not a terminal.",
+        default="",
+    )
 
 
 class LaunchApplication(Tool):
@@ -57,6 +67,12 @@ class LaunchApplication(Tool):
             "absolute path in the `path` argument as well -- the application is "
             "still resolved from `query`, and the path is handed to it as an "
             "argument so it opens with that file loaded.\n\n"
+            "To open a terminal already running something -- 'open konsole "
+            "and run python3 main.py' -- pass the command in `command` as "
+            "well. It only works on terminal emulators; anything else "
+            "refuses rather than opening without it.\n\n"
+            "Several applications in one message are several calls, in the "
+            "order the user named them.\n\n"
             "A successful launch completes the request: reply with a short "
             "confirmation and stop. Do not continue inspecting files, planning "
             "or running further tools unless the user asked for additional work "
@@ -108,11 +124,30 @@ class LaunchApplication(Tool):
                 ambiguous=True, candidates=[c.name for c in resolution.candidates],
                 query=query)
 
-        return await self._launch(resolution.entry, (args.path or "").strip())
+        return await self._launch(resolution.entry, (args.path or "").strip(),
+                                  (args.command or "").strip())
 
-    async def _launch(self, entry: AppEntry, open_path: str = "") -> ToolResult:
+    async def _launch(self, entry: AppEntry, open_path: str = "",
+                      command: str = "") -> ToolResult:
+        argv = None
+        if command:
+            argv = terminal_argv(entry, command)
+            if argv is None:
+                # Refused rather than launched without it. Dropping the
+                # command silently would open the application and report
+                # success, and the user would be told their script was run
+                # by something that never saw it.
+                return ToolResult.failure(
+                    f"'{entry.name}' is not a terminal this can run a "
+                    f"command in, so nothing was launched. Tell the user, "
+                    f"or use the shell tool to run the command here.",
+                    status="not_a_terminal", application=entry.name,
+                    query=entry.name)
         try:
-            await _launch_entry(entry, open_path)
+            if argv is not None:
+                await _shell_launch(argv)
+            else:
+                await _launch_entry(entry, open_path)
         except OSError as exc:
             return ToolResult.failure(
                 f"Found '{entry.name}' but launching it failed: {exc}. "
@@ -125,14 +160,89 @@ class LaunchApplication(Tool):
         }
         if open_path:
             meta["opened"] = open_path
+        if command:
+            meta["command"] = command
+        did = (f"Launched {entry.name}"
+               + (f" running `{command}`" if command
+                  else f" with {open_path}" if open_path else ""))
         return ToolResult.success(
-            f"Launched {entry.name}" + (f" with {open_path}" if open_path else "") + ". "
-            "This completes the request -- reply with a short confirmation "
-            "and stop; do not perform further tool calls unless the user asked "
-            "for additional work.",
-            display=f"launched {entry.name}",
+            did + ". This completes the request -- reply with a short "
+            "confirmation and stop; do not perform further tool calls "
+            "unless the user asked for additional work.",
+            display=(f"launched {entry.name}"
+                     + (f" running {command}" if command else "")),
+            said=did + ".",
             terminal=True,
             **meta)
+
+
+# -- terminals ---------------------------------------------------------------
+
+_STAYS_OPEN = "; exec bash"
+"""Kept alive after the command finishes.
+
+"Open a terminal and run this" means the window is there to be read. Left
+to exit, a command that takes a second flashes a window and closes it, and
+the output -- the entire reason for asking -- is gone before anyone sees
+it."""
+
+TERMINALS: dict[str, tuple[str, ...]] = {
+    # The flag that means "the rest of this is the program to run" differs
+    # per terminal and there is no convention to fall back on: -e, -x, --,
+    # or nothing at all. Guessing wrong does not fail cleanly -- it opens a
+    # terminal that ignores the command, or one that treats it as a file
+    # name -- so only terminals whose spelling is known are offered.
+    "konsole": ("-e",),
+    "gnome-terminal": ("--",),
+    "kgx": ("--",),
+    "ptyxis": ("--",),
+    "xfce4-terminal": ("-x",),
+    "mate-terminal": ("--",),
+    "lxterminal": ("-e",),
+    "terminator": ("-x",),
+    "tilix": ("-e",),
+    "deepin-terminal": ("-e",),
+    "alacritty": ("-e",),
+    "kitty": (),
+    "foot": (),
+    "wezterm": ("start", "--"),
+    "xterm": ("-e",),
+    "urxvt": ("-e",),
+    "rxvt": ("-e",),
+    "st": ("-e",),
+    "qterminal": ("-e",),
+}
+
+
+def terminal_argv(entry: AppEntry, command: str) -> list[str] | None:
+    """How to start ``entry`` running ``command``, or None if it cannot.
+
+    The binary is looked up on PATH rather than taken from the entry: a
+    .desktop file is a description, and `gio launch` has nowhere to put a
+    command. The registry above is keyed on the executable's own name,
+    which is what both the desktop entry and the PATH hit agree on.
+
+    None rather than a guess. A terminal whose flag is not known here would
+    be handed a command it silently ignores, and "I opened konsole and ran
+    your script" would be a sentence about something that did not happen.
+    """
+    for candidate in (entry.path.stem, entry.name):
+        key = str(candidate).strip().lower()
+        if key not in TERMINALS:
+            continue
+        binary = shutil.which(key) or (
+            str(entry.path) if entry.path.stem.lower() == key
+            and entry.path.suffix.lower() not in (".desktop", ".lnk")
+            else "")
+        if not binary:
+            return None
+        return [binary, *TERMINALS[key], "bash", "-c", command + _STAYS_OPEN]
+    return None
+
+
+def is_a_terminal(entry: AppEntry) -> bool:
+    return any(str(c).strip().lower() in TERMINALS
+               for c in (entry.path.stem, entry.name))
 
 
 async def _launch_entry(entry: AppEntry, open_path: str = "") -> None:
@@ -178,7 +288,6 @@ async def _launch_desktop(path, open_arg: str = "") -> None:
     a file URI argument, so a requested file can be handed to the launched
     application.
     """
-    import shutil
     arg = [_file_uri(open_arg)] if open_arg else []
     if shutil.which("gio"):
         await _shell_launch(["gio", "launch", str(path)] + arg)

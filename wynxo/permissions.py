@@ -96,6 +96,16 @@ class PermissionStore:
         if not mutating or internal:
             return False
 
+        # A launch that carries a command is a command, whatever the tool
+        # is called. It runs outside every guard the shell tool has -- no
+        # output ceiling, no workspace, no read-only test -- in a window
+        # wynxo does not own, so it is asked about on the same terms and
+        # never waved through as "just opening an application".
+        launching_a_command = (tool_name == "launch_application"
+                               and str(args.get("command", "")).strip())
+        if launching_a_command:
+            tool_name, args = "shell", {"command": args["command"]}
+
         if self.mode in (Mode.AUTO, Mode.REVIEW):
             # Edits in scope go through; anything that runs a command or
             # reaches off the machine still asks. Review mode defers the

@@ -1064,7 +1064,7 @@ are rejected on the way in, with numbers treated as distinguishing so
 | `github_read` | | Search, list, stat and read a GitHub repo without cloning |
 | `github_write` | ✓ | Commit, branch and open a PR through the API |
 | `web_search` | | Look something up when the answer may have changed |
-| `launch_application` | ✓ | Open an app installed on the machine, by the name you call it |
+| `launch_application` | ✓ | Open an app installed on the machine, by the name you call it — several in one message, and a terminal can be given a command to run |
 | `background_poll` | | Check on a command started with `shell(background=true)` |
 | `shell` | ✓ | Run a command — PowerShell on Windows, your login shell elsewhere |
 | `todo_write` | | The visible plan, which also survives compaction |
