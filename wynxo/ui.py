@@ -746,6 +746,20 @@ class UI:
     def success(self, message: str) -> None:
         self._marked(self.g.tick, message, GOOD)
 
+    def hint(self, message: str) -> None:
+        """What you can do next, said quietly and at the detail column.
+
+        Distinct from info(): info is a fact about what happened, a hint is
+        an offer. They were the same call, so "/session <id> to pick one up"
+        arrived with the same weight as "resumed 4f21a0 -- 12 messages", and
+        the eye had to read both to find out which was which. Held at FAINT
+        and indented under whatever it follows, an offer can be skipped at a
+        glance and still be there when it is wanted.
+        """
+        body = sanitise(message).strip()
+        if body:
+            self.detail_line(body, FAINT)
+
     def outcome(self, report: str) -> None:
         """How a coding turn ended: a headline, then the evidence under it.
 

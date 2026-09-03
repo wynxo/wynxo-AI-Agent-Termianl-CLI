@@ -79,6 +79,12 @@ class GitHubRead(Tool):
         super().__init__(workspace, boundary, shield)
         self._client = client or GitHubClient()
 
+    def unavailable(self) -> str:
+        if not self._client.available():
+            return ("the GitHub CLI `gh` is not installed -- install it "
+                    "from https://cli.github.com, then `gh auth login`")
+        return ""
+
     async def run(self, args: GitHubReadInput) -> ToolResult:
         owner, repo = _split_repo(args.repo)
         if not owner or not repo:
@@ -280,6 +286,12 @@ class GitHubWrite(Tool):
                  client: GitHubClient | None = None):
         super().__init__(workspace, boundary, shield)
         self._client = client or GitHubClient()
+
+    def unavailable(self) -> str:
+        if not self._client.available():
+            return ("the GitHub CLI `gh` is not installed -- install it "
+                    "from https://cli.github.com, then `gh auth login`")
+        return ""
 
     async def run(self, args: GitHubWriteInput) -> ToolResult:
         owner, repo = _split_repo(args.repo)

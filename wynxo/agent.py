@@ -490,12 +490,32 @@ class Agent:
         turn native `think` back on and undo what detect_capabilities()
         already established."""
 
-        self.session = Session(workspace=workspace)
+        self._session = Session(workspace=workspace)
+        self._session.autosave = True
         # The undo stack rides with the session: it is created after the
         # session so it can persist under the same id, and a restarted
         # session keeps its undo history.
         self.checkpoints = Checkpoints(session_id=self.session.session_id)
         self.refresh_system_prompt()
+
+    # -- the conversation --------------------------------------------------
+
+    @property
+    def session(self) -> Session:
+        return self._session
+
+    @session.setter
+    def session(self, session: Session) -> None:
+        """Adopt a conversation, and make it durable.
+
+        /clear, /new and /resume all replace this wholesale, and a resumed
+        conversation that quietly stopped saving itself would be worse than
+        one that was never saved: you would carry on talking into it and
+        lose the lot. Set here rather than at each of the three call sites,
+        so a fourth cannot forget.
+        """
+        self._session = session
+        session.autosave = True
 
     # -- setup -------------------------------------------------------------
 
@@ -1877,6 +1897,7 @@ class Agent:
             # Same reason: the provider can fail between the calls being
             # announced and their results being recorded.
             self.session.close_open_tool_calls()
+            self.session.save()
             partial = self._last_substantive()
             return TurnResult(
                 content=partial,
@@ -1894,6 +1915,11 @@ class Agent:
             # next request -- so the malformed shape would be replayed on
             # every one of them.
             self.session.close_open_tool_calls()
+            # close_open_tool_calls() saves only when it had something to
+            # repair, and a turn cancelled while the model was still
+            # producing its first token has nothing to repair and everything
+            # to lose: the request itself was recorded moments ago.
+            self.session.save()
             raise Interrupted from None
 
         # An empty answer is not a completed turn. Reporting it as one left

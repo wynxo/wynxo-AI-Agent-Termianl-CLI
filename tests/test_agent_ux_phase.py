@@ -87,18 +87,41 @@ def test_checkpoint_undo_refuses_to_destroy_user_changes(tmp_path: Path):
     assert "Reverted" in message
 
 
-def test_session_limits_are_reported_in_command_output(tmp_path: Path):
+def test_session_limits_are_reported_in_command_output(tmp_path: Path, monkeypatch):
+    """/session says what the limits actually are, not what was configured.
+
+    The iteration limit is the lower of the effort policy's and the
+    config's, and it is the number that decides whether a turn stops early
+    -- so reporting the config's alone would tell you 7 while the run gives
+    you 6.
+    """
+    import io
+
     from wynxo.cli import Repl
+    from wynxo.session import Session
+    from wynxo.ui import UI
+
+    monkeypatch.setattr("wynxo.session.data_dir", lambda: tmp_path)
+
+    session = Session(workspace=tmp_path, session_id="abc")
+    session.add_user("why do the tests fail")
+    session.usage.requests = 1
+    session.usage.tool_calls = 2
+
     repl = Repl.__new__(Repl)
-    repl.agent = type("A", (), {
-        "session": type("S", (), {"session_id": "abc", "token_estimate": lambda self: 10,
-                                   "usage": type("U", (), {"requests": 1, "tool_calls": 2})()})(),
-        "tools": [1, 2],
-    })()
+    repl.agent = type("A", (), {"session": session, "tools": [1, 2]})()
     repl.config = Config(max_tool_iterations=7, num_ctx=1000)
     repl.policy = resolve("low")
     repl.workspace = tmp_path
-    repl.ui = type("UI", (), {"shorten_path": lambda self, x: x, "info": lambda self, x: setattr(self, "message", x)})()
-    repl.cmd_session()
-    assert "iteration limit 6" in repl.ui.message
-    assert "tool calls 2" in repl.ui.message
+
+    ui = UI()
+    ui.console.file = io.StringIO()
+    ui.console.width = ui.width = 100
+    repl.ui = ui
+    assert repl._describe_session() is True
+
+    shown = ui.console.file.getvalue()
+    assert "up to 6 calls a turn" in shown, shown
+    assert "2 tool calls" in shown, shown
+    assert "why do the tests fail" in shown, shown
+    assert "abc" in shown, shown

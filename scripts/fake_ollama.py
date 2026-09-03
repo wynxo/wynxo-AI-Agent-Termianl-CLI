@@ -192,6 +192,17 @@ class Handler(BaseHTTPRequestHandler):
                  "details": {"family": "qwen3", "parameter_size": params,
                              "quantization_level": quant, "format": "gguf"}}
                 for n, size, params, quant in MODELS]})
+        if self.path.startswith("/api/ps"):
+            # A model held half on the GPU, which is the case worth being
+            # able to reproduce: it is the difference between forty tokens
+            # a second and five, and nothing on screen says so.
+            name, size = MODELS[0][0], MODELS[0][1]
+            return self._send({"models": [{
+                "name": name, "model": name, "size": size,
+                "size_vram": int(size * float(getattr(self.server, "split", 1.0))),
+                "context_length": 32768,
+                "details": {"family": "qwen3", "format": "gguf"},
+            }]})
         self._send({"error": "not found"}, 404)
 
     def do_POST(self):
@@ -278,12 +289,16 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--delay", type=float, default=0.01,
                         help="seconds between chunks, to imitate generation speed")
+    parser.add_argument("--split", type=float, default=1.0,
+                        help="Fraction of the model /api/ps reports as being "
+                             "on the GPU. 0.55 reproduces a partial offload.")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.delay = args.delay
     server.verbose = args.verbose
+    server.split = args.split
     print(f"fake ollama on http://{args.host}:{args.port}")
     print(f"  wynxo --endpoint {args.host}:{args.port} --doctor")
     print(f"  wynxo --endpoint {args.host}:{args.port}")

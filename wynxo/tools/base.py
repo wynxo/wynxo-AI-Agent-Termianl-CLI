@@ -103,6 +103,25 @@ class Tool(ABC):
     @abstractmethod
     async def run(self, args: Schema) -> ToolResult: ...
 
+    # -- availability ------------------------------------------------------
+
+    def unavailable(self) -> str:
+        """Why this tool cannot work here, or "" if it can.
+
+        Every tool's schema is sent with every single request, and a local
+        model pays for the whole list in prompt-processing time before it
+        writes a token. A tool that is certain to fail -- the GitHub tools
+        with no `gh` installed -- is paying that toll to be offered, tried,
+        and refused.
+
+        Certainty is the bar. This must describe something that cannot
+        possibly work, not something that looks unlikely: a tool held back
+        by a wrong guess is a capability silently lost, which is worse than
+        a slow prompt. Anything a tool can discover at call time belongs in
+        run(), where it can say so.
+        """
+        return ""
+
     # -- schema rendering --------------------------------------------------
 
     def json_schema(self) -> dict:

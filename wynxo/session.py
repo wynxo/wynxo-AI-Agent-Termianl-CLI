@@ -82,6 +82,21 @@ class Session:
     superseded_chars: int = 0
     """How much stale tool output has been collapsed, for /stats."""
 
+    autosave: bool = False
+    """Whether every message is written to disk as it is recorded.
+
+    Off by default so that constructing a Session -- in a test, in a tool,
+    anywhere -- never touches the user's session store. The agent turns it
+    on for the conversation it owns, which is the one that has to survive
+    being interrupted.
+    """
+
+    _pruned: bool = False
+    """Whether this process has already swept the session store. Autosave
+    writes after every message rather than once per turn, and globbing plus
+    stat-ing the whole directory on each of those is a lot of syscalls to
+    answer a question whose answer does not change within a turn."""
+
     # -- building the wire format -----------------------------------------
 
     def wire(self) -> list[dict]:
@@ -89,14 +104,29 @@ class Session:
         out = [{"role": "system", "content": self.system_prompt}] if self.system_prompt else []
         return out + self.messages
 
+    def _recorded(self) -> None:
+        """One message went in. Write the conversation out if asked to.
+
+        Called from every method that appends, rather than from the turn
+        loop, so that no future call site has to remember: if it is in the
+        conversation, it is on disk. This is what makes Ctrl-C survivable --
+        a turn can spend minutes across a dozen tool calls, and saving only
+        when one finishes meant an interrupt threw away everything since the
+        last one, the request included.
+        """
+        if self.autosave:
+            self.save()
+
     def add_user(self, content: str) -> None:
         self.messages.append({"role": "user", "content": content})
+        self._recorded()
 
     def add_assistant(self, content: str, tool_calls: list[dict] | None = None) -> None:
         message: dict[str, Any] = {"role": "assistant", "content": content}
         if tool_calls:
             message["tool_calls"] = tool_calls
         self.messages.append(message)
+        self._recorded()
 
     def add_tool_result(self, name: str, content: str, call_id: str = "",
                         subject: str = "") -> None:
@@ -121,6 +151,7 @@ class Session:
             message["subject"] = subject
             self._supersede(subject, len(content))
         self.messages.append(message)
+        self._recorded()
 
     def _supersede(self, subject: str, incoming: int) -> None:
         """Collapse older results about the same subject to a one-line note.
@@ -199,6 +230,11 @@ class Session:
                 })
                 index += 1
                 added += 1
+        if added:
+            # This runs on the way out of an interrupted turn, which is the
+            # one moment the on-disk copy most needs to be the repaired
+            # shape rather than the malformed one.
+            self._recorded()
         return added
 
     # -- size --------------------------------------------------------------
@@ -283,13 +319,41 @@ class Session:
             *kept,
         ]
         self.compactions += 1
+        self._recorded()
 
     # -- persistence -------------------------------------------------------
 
     def path(self) -> Path:
         return data_dir() / "sessions" / f"{self.session_id}.json"
 
+    def title(self) -> str:
+        """A one-line name for this conversation, taken from what was asked.
+
+        Written into the file so /session can list conversations without
+        parsing every message of every one of them, and so a resumed
+        conversation is recognisable by what it was about rather than by
+        twelve hex digits.
+        """
+        for message in self.messages:
+            if message.get("role") != "user":
+                continue
+            text = " ".join(str(message.get("content") or "").split())
+            # The plan note and the compaction preamble are wynxo's own
+            # words wearing the user role. Neither names the conversation.
+            if not text or text.startswith(("(", "[")):
+                continue
+            return text[:70]
+        return ""
+
     def save(self) -> Path | None:
+        """Write the conversation to disk. Cheap enough to call often.
+
+        Called after every message that changes the conversation, not once
+        per turn: a turn can run for minutes across a dozen tool calls, and
+        Ctrl-C during one of them used to throw away everything since the
+        last completed turn -- the request included, so the conversation on
+        disk did not even record having been asked.
+        """
         try:
             path = self.path()
             atomic_write(
@@ -298,6 +362,7 @@ class Session:
                     {
                         "session_id": self.session_id,
                         "workspace": str(self.workspace),
+                        "title": self.title(),
                         "created_at": self.created_at,
                         "updated_at": time.time(),
                         "compactions": self.compactions,
@@ -314,7 +379,9 @@ class Session:
                     default=str,
                 ),
             )
-            self.prune()
+            if not self._pruned:
+                self._pruned = True
+                self.prune()
             return path
         except OSError:
             # Never let a full disk or a read-only home directory end a session.
@@ -374,7 +441,17 @@ class Session:
             with contextlib.suppress(OSError):
                 path.unlink()
 
-    def recent(limit: int = 20) -> list[dict]:
+    @staticmethod
+    def recent(limit: int = 20, exclude: str = "") -> list[dict]:
+        """Saved conversations, newest first, from every workspace.
+
+        Deliberately not filtered to the current directory: the point of
+        resuming is often that the conversation happened somewhere else --
+        you were in one project, learned something, and want to carry on
+        talking about it from another. Each row carries its workspace so the
+        list can say where it came from, and ``exclude`` drops the
+        conversation you are already in, which is never something you resume.
+        """
         directory = data_dir() / "sessions"
         if not directory.is_dir():
             return []
@@ -385,21 +462,32 @@ class Session:
                 return 0.0
 
         out = []
-        for path in sorted(directory.glob("*.json"), key=when)[:limit]:
+        for path in sorted(directory.glob("*.json"), key=when):
+            if len(out) >= limit:
+                break
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(data, dict):
                     continue
+                session_id = as_text(data.get("session_id")) or path.stem
+                if exclude and session_id == exclude:
+                    continue
                 messages = [m for m in as_list(data.get("messages"))
                             if isinstance(m, dict)]
-                first = next((as_text(m.get("content")) for m in messages
-                              if m.get("role") == "user"), "")
+                # Files written before titles were stored still list, by
+                # falling back to the same first-message rule that produced
+                # them.
+                preview = as_text(data.get("title"))
+                if not preview:
+                    preview = next(
+                        (as_text(m.get("content")) for m in messages
+                         if m.get("role") == "user"), "")
                 out.append({
-                    "session_id": as_text(data.get("session_id")) or path.stem,
+                    "session_id": session_id,
                     "workspace": as_text(data.get("workspace")) or "?",
                     "updated_at": as_float(data.get("updated_at"), 0.0),
                     "messages": len(messages),
-                    "preview": first[:70].replace("\n", " "),
+                    "preview": " ".join(preview.split())[:70],
                 })
             except (OSError, json.JSONDecodeError, ValueError):
                 continue

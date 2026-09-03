@@ -69,14 +69,21 @@ class Doctor:
 
     async def run(self) -> int:
         """Run every check. Returns a process exit code."""
+        # One line, at column zero, in the same shape as the session banner:
+        # what is being checked and where. It was a title on one row and a
+        # subtitle indented under it on the next, which is a page header --
+        # and the header of a page is not what a terminal command should
+        # open with.
+        from rich.text import Text
+
+        head = Text()
+        head.append("doctor", style=f"bold {ACCENT}")
+        head.append(f"  {self.ui.g.dot}  ", style=MUTED)
+        head.append(self.config.model, style=MUTED)
+        head.append(f"  {self.ui.g.dot}  ", style=MUTED)
+        head.append(str(self.client.base_url), style=MUTED)
         self.ui.console.print()
-        self.ui.console.print(f"[bold {ACCENT}]  wynxo doctor[/]")
-        # Keep environment facts available for the report, but fail-fast checks
-        # should remain the only checks when the provider cannot be reached.
-        self.ui.console.print(
-            f"  [{MUTED}]{self.config.model} on {self.client.base_url}[/]"
-        )
-        self.ui.console.print()
+        self.ui.console.print(head, overflow="ellipsis", no_wrap=True)
 
         if not await self.check_server():
             # Keep the provider failure as the sole recorded check: callers
@@ -100,6 +107,7 @@ class Doctor:
         info = await self.check_capabilities()
         await self.check_context(info)
         await self.check_generation()
+        await self.check_memory()
         await self.check_thinking(info)
         await self.check_tool_calling(info)
 
@@ -274,6 +282,77 @@ class Doctor:
             return
         self.checks.append(Check("context window", Status.PASS, f"{configured} tokens", facts=facts))
 
+    async def check_memory(self) -> None:
+        """Where the server actually put the model.
+
+        Run after generation, because that is what loads it -- asking before
+        the first request finds nothing resident and reports nothing.
+
+        This is the check that answers "why is wynxo slower than `ollama
+        run`". `ollama run` uses the model's own default window, usually
+        4096; wynxo asks for num_ctx, which defaults to 32768. The KV cache
+        scales with that window, so a model that fits entirely on the GPU
+        under `ollama run` can have a third of its layers pushed onto the
+        CPU under wynxo -- same model, same machine, several times slower,
+        and nothing anywhere says why.
+        """
+        loaded = await self.client.running()
+        mine = next((m for m in loaded
+                     if m.name == self.config.model
+                     or m.name.split(":")[0] == self.config.model.split(":")[0]),
+                    None)
+        if mine is None:
+            # An older server with no /api/ps, or a model that unloaded
+            # between the request and this check. Neither is a problem, and
+            # a check that reports "unknown" on every old server is noise.
+            return
+
+        def gigabytes(n: int) -> str:
+            return f"{n / 1e9:.1f} GB"
+
+        facts = [f"{gigabytes(mine.size)} total"]
+        if mine.context_length:
+            facts.append(f"window {mine.context_length:,}")
+
+        if not mine.split:
+            # Either all on the GPU, or a machine with no GPU at all. There
+            # is nothing to fix in either case.
+            where = ("all on the GPU" if mine.size_vram
+                     else "on the CPU (no GPU offload)")
+            self.checks.append(Check("model in memory", Status.PASS, where,
+                                     facts=facts))
+            return
+
+        share = mine.on_gpu
+        facts.append(f"{gigabytes(mine.size_vram)} on the GPU")
+        # Halved, not tuned: there is no way to work out the right window
+        # from here -- it depends on how much VRAM is free, which the server
+        # does not report -- so this is a step in the right direction that
+        # can be taken again.
+        smaller = max(4096, self.config.num_ctx // 2)
+        fix = [
+            "Every token is generated at the speed of the slowest part, so "
+            "this is the main reason generation feels slow: a split model "
+            "is typically several times slower than one that fits entirely "
+            "on the GPU.",
+            f"The KV cache grows with the context window. wynxo asks for "
+            f"num_ctx={self.config.num_ctx:,}; `ollama run` uses the "
+            f"model's own default, which is usually far smaller -- that is "
+            f"the whole difference.",
+            f"Try `/ctx {smaller}`, then `/doctor` again.",
+        ]
+        if smaller < MIN_USABLE_CONTEXT:
+            fix.append(
+                f"That is below the {MIN_USABLE_CONTEXT:,} an agent really "
+                f"wants, so expect more compaction mid-task. A smaller "
+                f"quantisation of {self.config.model} buys the window back.")
+        self.checks.append(Check(
+            "model in memory", Status.WARN,
+            f"{share:.0%} on the GPU, the rest on the CPU",
+            fix="\n".join(fix),
+            facts=facts,
+        ))
+
     async def check_generation(self) -> None:
         """A real streamed request, which also measures speed."""
         started = time.monotonic()
@@ -439,36 +518,59 @@ class Doctor:
     # -- output ------------------------------------------------------------
 
     def report(self) -> int:
-        self.ui.console.print()
+        """The findings, in the shape the rest of the transcript uses.
+
+        Heads at column zero and their evidence at two, drawn through
+        detail_line so it wraps inside its own column. It was printed raw at
+        two and six, so it was both the one block indented differently from
+        everything else and the one that could run off the edge -- the
+        longest text in the report, a fix worth several sentences, was
+        exactly the text that fell back to column zero on its second line.
+        """
+        from rich.text import Text
+
         marks = {
             Status.PASS: (self.ui.g.tick, GOOD),
             Status.WARN: ("!", WARN),
             Status.FAIL: (self.ui.g.cross, BAD),
         }
+        self.ui.console.print()
         for check in self.checks:
             mark, style = marks[check.status]
-            self.ui.console.print(
-                f"  [{style}]{mark}[/] [bold]{check.name}[/]  [{MUTED}]{check.detail}[/]")
+            head = Text()
+            head.append(f"{mark} ", style=style)
+            head.append(check.name, style="bold" if check.status is Status.PASS
+                        else f"bold {style}")
+            if check.detail:
+                head.append(f"  {check.detail}", style=MUTED)
+            self.ui.console.print(head, overflow="ellipsis", no_wrap=True)
             for fact in check.facts:
-                self.ui.console.print(f"      [{MUTED}]{fact}[/]")
+                self.ui.detail_line(fact, MUTED)
             if check.fix:
-                for line in check.fix.splitlines():
-                    self.ui.console.print(f"      [{WARN}]{line}[/]")
+                # A blank row before advice that runs to several sentences,
+                # so it reads as a paragraph under the finding rather than
+                # as one more fact about it.
+                if check.facts and len(check.fix) > 120:
+                    self.ui.console.print()
+                self.ui.detail_line(check.fix, WARN)
 
         failures = sum(1 for c in self.checks if c.status is Status.FAIL)
         warnings = sum(1 for c in self.checks if c.status is Status.WARN)
         self.ui.console.print()
 
         if failures:
-            self.ui.console.print(
-                f"  [{BAD}]{failures} problem(s) will stop wynxo working.[/] "
-                f"[{MUTED}]Fix those first.[/]")
+            self.ui.console.print(Text(
+                f"{failures} problem{'' if failures == 1 else 's'} will stop "
+                f"wynxo working. Fix those first.", style=f"bold {BAD}"))
             return 1
         if warnings:
-            self.ui.console.print(
-                f"  [{WARN}]Usable, with {warnings} caveat(s) noted above.[/]")
+            self.ui.console.print(Text(
+                f"Usable, with {warnings} caveat{'' if warnings == 1 else 's'} "
+                f"noted above.", style=f"bold {WARN}"))
             return 0
-        self.ui.console.print(f"  [{GOOD}]Everything checks out. You are good to go.[/]")
+        self.ui.console.print(
+            Text("Everything checks out. You are good to go.",
+                 style=f"bold {GOOD}"))
         return 0
 
 

@@ -26,6 +26,42 @@ class ProviderError(RuntimeError):
 
 
 @dataclass
+class Loaded:
+    """A model the server currently has in memory, and where it put it.
+
+    ``size_vram`` is the part that fits on the GPU and ``size`` is the whole
+    thing, so anything less than the whole is running partly on the CPU.
+    That is the single most useful number about local generation speed and
+    nothing in wynxo was reading it: a model that would run at forty tokens
+    a second entirely on the GPU runs at five with a few layers spilled, and
+    the only symptom is that everything feels slow for no stated reason.
+    """
+
+    name: str
+    size: int = 0
+    size_vram: int = 0
+    context_length: int = 0
+
+    @property
+    def on_gpu(self) -> float:
+        """How much of the model is on the GPU, 0.0 to 1.0.
+
+        1.0 for a CPU-only machine too: with no GPU to spill off, nothing
+        has gone wrong and there is nothing to report. The number this
+        exists to catch is a *partial* offload -- a machine that could be
+        fast and is not.
+        """
+        if self.size <= 0:
+            return 1.0
+        return min(1.0, self.size_vram / self.size)
+
+    @property
+    def split(self) -> bool:
+        """Whether the model is spread across GPU and CPU."""
+        return 0 < self.size_vram < self.size
+
+
+@dataclass
 class ModelInfo:
     name: str
     size: int = 0
@@ -277,6 +313,34 @@ class OllamaClient:
                 info.context_length = value
                 break
         return info
+
+    async def running(self) -> list[Loaded]:
+        """What the server has in memory right now, from /api/ps.
+
+        Never raises: this only ever informs a diagnostic, and a server too
+        old to have the endpoint, or one that answers something unexpected,
+        must not be able to break a turn. An empty list means "nothing
+        loaded, or could not tell", and every caller treats those the same.
+        """
+        try:
+            r = await self._client.get("/api/ps", timeout=10.0)
+            r.raise_for_status()
+            payload = _payload(r, "/api/ps", self.base_url)
+        except (httpx.HTTPError, ProviderError):
+            return []
+        out = []
+        for entry in as_list(payload.get("models")):
+            if not isinstance(entry, dict):
+                continue
+            details = entry.get("details") or {}
+            out.append(Loaded(
+                name=as_text(entry.get("name")) or as_text(entry.get("model")) or "?",
+                size=as_int(entry.get("size")),
+                size_vram=as_int(entry.get("size_vram")),
+                context_length=as_int(entry.get("context_length")
+                                      or details.get("context_length")),
+            ))
+        return out
 
     async def pull(self, model: str) -> AsyncIterator[str]:
         """Stream human-readable progress while a model downloads."""

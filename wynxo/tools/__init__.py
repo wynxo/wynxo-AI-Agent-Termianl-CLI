@@ -25,8 +25,23 @@ __all__ = ["Tool", "ToolResult", "Registry", "build_registry"]
 
 
 class Registry:
+    """The tools the agent may call, and the ones it may not.
+
+    Held apart rather than dropped: the agent is offered only what can
+    work, so no request pays for a schema the model would be refused for
+    using -- but /tools still lists what is missing and why, because "the
+    GitHub tools are not there" is a confusing thing to discover from a
+    model saying it cannot do something.
+    """
+
     def __init__(self, tools: list[Tool]):
-        self._tools = {t.name: t for t in tools}
+        self._tools = {}
+        self.withheld: dict[str, str] = {}
+        for tool in tools:
+            if (reason := tool.unavailable()):
+                self.withheld[tool.name] = reason
+            else:
+                self._tools[tool.name] = tool
 
     def __contains__(self, name: str) -> bool:
         return name in self._tools

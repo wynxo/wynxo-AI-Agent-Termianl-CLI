@@ -30,7 +30,6 @@ from . import config as config_module
 from . import stt_devices
 from .agent import Agent, Callbacks, Interrupted
 from .events import ToolEvent
-from .task_state import TaskState
 from .discovery import Discovery
 from .config import Config, Endpoint, data_dir, is_configured, load, normalise_url
 from . import companion
@@ -174,6 +173,28 @@ def _first(text: str) -> str:
     return text.strip().splitlines()[0].strip() if text.strip() else ""
 
 
+def _plural(count: int, noun: str, plural: str = "") -> str:
+    """"1 tool call", "2 tool calls". Said properly, or not said at all."""
+    return f"{count:,} {noun if count == 1 else (plural or noun + 's')}"
+
+
+def _ago(stamp: float) -> str:
+    """How long ago, in the coarsest unit that still says something.
+
+    A conversation is picked out of a list by when it happened, not by its
+    id, so this is the column the eye actually uses.
+    """
+    import time as _time
+
+    if not stamp:
+        return "?"
+    seconds = max(0.0, _time.time() - stamp)
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if seconds >= size:
+            return f"{int(seconds // size)}{unit} ago"
+    return "just now"
+
+
 def _clean_commit_message(text: str) -> str:
     """Take the message out of whatever the model wrapped it in.
 
@@ -215,6 +236,81 @@ def resolve_command(name: str) -> str | None:
         return name[:-1]
     matches = [c for c in COMMANDS if c.startswith(name)]
     return matches[0] if len(matches) == 1 else None
+
+
+def suggest_commands(name: str, limit: int = 6) -> list[str]:
+    """Commands that ``name`` might have meant, best guess first.
+
+    Prefixes come first and in full: typing /mo is far more often an
+    unfinished /mode or /model than a misspelling of anything. Only when
+    nothing starts with it does this fall back to spelling, which is the
+    case that catches /mdoe. Aliases are resolved to what they expand to,
+    so /se does not offer itself.
+    """
+    name = name.strip().lower()
+    if not name or not name.startswith("/"):
+        return []
+
+    ordered: list[str] = []
+
+    def add(command: str) -> None:
+        if command in COMMANDS and command not in ordered:
+            ordered.append(command)
+
+    if (alias := ALIASES.get(name)):
+        add(alias)
+    for command in COMMANDS:
+        if command.startswith(name):
+            add(command)
+    # An alias whose own spelling starts with what was typed -- /q for
+    # /quit. Prefix matching on the command names alone never finds these.
+    for alias, target in sorted(ALIASES.items()):
+        if alias.startswith(name):
+            add(target)
+
+    if not ordered:
+        import difflib
+
+        for match in difflib.get_close_matches(name, list(COMMANDS),
+                                               n=limit, cutoff=0.6):
+            add(match)
+        # A word that is right but for the slash, or one buried inside a
+        # command name: /sesion, /tool, /colour.
+        stem = name.lstrip("/")
+        if len(stem) >= 3:
+            for command in COMMANDS:
+                if stem in command:
+                    add(command)
+
+    return ordered[:limit]
+
+
+def command_hints(buffer: str) -> list[str]:
+    """Commands matching the half-typed one at the prompt, if any.
+
+    Empty for everything else, which is almost all of the time: ordinary
+    prose must not put a menu under the composer, and neither must a command
+    that is already complete or has moved on to its arguments.
+    """
+    buffer = buffer.strip().lower()
+    if not buffer.startswith("/") or " " in buffer or len(buffer) < 2:
+        return []
+    matches = suggest_commands(buffer, limit=5)
+    # Nothing to say when the only match is what is already typed.
+    return [] if matches == [buffer] else matches
+
+
+def _composer_text(repl) -> str:
+    """What is in the composer right now, or "" if there is no composer.
+
+    Reaching into prompt_toolkit's application state, so it is wrapped: the
+    toolbar is redrawn on every keystroke, and one that raises takes the
+    prompt down with it.
+    """
+    try:
+        return (repl.prompt_session.app.current_buffer.text or "").strip()
+    except Exception:                                  # noqa: BLE001
+        return ""
 
 
 def _theme_summary(name: str) -> str:
@@ -276,7 +372,7 @@ COMMANDS = {
     "/thinking": "show or hide the model's reasoning",
     "/plan": "show the current plan",
     "/new": "start a new chat: fresh history, screen and log",
-    "/resume": "pick up an earlier conversation where it stopped",
+    "/resume": "pick up an earlier conversation, from this project or another",
     "/gh": "work on a GitHub repo in the cloud: status | open | ls | cat | edit | branch | pr | close",
     "/commit": "write a commit message from the staged diff, then commit",
     "/review": "ask the model to review the working-tree changes",
@@ -285,10 +381,10 @@ COMMANDS = {
     "/clear": "start a fresh conversation",
     "/compact": "summarise the conversation to reclaim context",
     "/stats": "tokens, speed, context use",
-    "/session": "show current session, model, tools, and context",
+    "/session": "this conversation; `list` for the others, `<id>` to pick one up",
     "/doctor": "check the server and model for problems",
     "/yolo": "stop asking permission for this session",
-    "/sessions": "list recent sessions",
+    "/sessions": "the conversations you can pick up (same as /session list)",
     "/init": "write a WYNXO.md describing this project",
     "/map": "the project layout the model is given, or rebuild it",
     "/pull": "download a model from Ollama, then switch to it",
@@ -2040,11 +2136,20 @@ class Repl:
         # The hints that fit, most useful first. ^C stop must survive the
         # longest, so it is trimmed last rather than with the rest.
         base = ["^O think", "^T detail", "^D diff", "^E effort", "^R talk"]
+        anchor = "^C stop"
         if note:
             base = [note]
+        elif (typing := command_hints(_composer_text(self))):
+            # Half a command is a question -- "which one was it?" -- and the
+            # answer was three keystrokes away behind Tab, which you only
+            # press if you already suspect there is something to find.
+            # Shown while it is still being typed, /mo says plainly that
+            # /mode and /mommy exist next to /model, which is the whole
+            # reason the abbreviation is ambiguous in the first place.
+            base, anchor = typing, ""
         hint = ""
         for keep in range(len(base), -1, -1):
-            candidate = "  ".join(base[:keep] + ["^C stop"])
+            candidate = "  ".join(base[:keep] + ([anchor] if anchor else []))
             if total(left, candidate, 1) <= width:
                 hint = candidate
                 break
@@ -2307,11 +2412,18 @@ class Repl:
         if name not in COMMANDS and name not in ALIASES:
             resolved = resolve_command(name)
             if resolved is None:
-                near = [c for c in COMMANDS if c.startswith(name)]
-                self.ui.warn(
-                    f"unknown command {name}."
-                    + (f" Did you mean {' or '.join(near)}?" if near
-                       else " /help for the list."))
+                near = suggest_commands(name)
+                if near:
+                    # The list, with what each one does. Naming them without
+                    # saying what they are is only half an answer when the
+                    # reason you typed a prefix is that you could not
+                    # remember which of them you wanted.
+                    self.ui.warn(f"{name} could be any of these")
+                    self.ui.table(["", ""],
+                                  [(c, COMMANDS[c]) for c in near])
+                else:
+                    self.ui.warn(f"no command called {name}")
+                    self.ui.hint("/help for the list")
                 return True
             name = resolved
 
@@ -2367,6 +2479,18 @@ class Repl:
                 title=f"{len(self.agent.tools)} tools"
                 + ("" if self.agent.native_tools else "  (Hermes prompted mode)"),
             )
+            # Every schema here is sent with every request, so a tool that
+            # cannot work is held back rather than offered. Said out loud:
+            # "wynxo cannot read GitHub" is a confusing thing to learn from
+            # the model claiming it has no such tool.
+            if (withheld := getattr(self.agent.tools, "withheld", None)):
+                self.ui.table(
+                    ["", ""],
+                    sorted(withheld.items()),
+                    title=f"{len(withheld)} held back on this machine",
+                )
+                self.ui.hint("held-back tools cost nothing and are offered "
+                             "again once they can work")
             return True
 
         if name == "/apps":
@@ -2410,7 +2534,7 @@ class Repl:
             return True
 
         if name in ("/status", "/session"):
-            return self.cmd_session()
+            return await self.cmd_session(args)
 
         if name == "/stats":
             return self.cmd_stats()
@@ -2489,16 +2613,7 @@ class Repl:
             return self.cmd_map(args)
 
         if name == "/sessions":
-            rows = Session.recent()
-            if not rows:
-                self.ui.info("no saved sessions")
-                return True
-            self.ui.table(
-                ["id", "messages", "started with"],
-                [(r["session_id"], r["messages"], r["preview"]) for r in rows],
-                title="recent sessions",
-            )
-            return True
+            return await self.cmd_session(["list", *args])
 
         if name == "/init":
             await self.turn(
@@ -2513,18 +2628,77 @@ class Repl:
         self.ui.warn(f"unknown command {name}. /help for the list.")
         return True
 
-    def cmd_session(self) -> bool:
+    async def cmd_session(self, args: list[str]) -> bool:
+        """Where you are, and how to get back to somewhere you were.
+
+        One command rather than three: /session says what this conversation
+        is, /session list shows the others, and /session <id> picks one up.
+        They are the same subject, and splitting them across /session,
+        /sessions and /resume meant the one you remembered was rarely the
+        one you wanted. All three names still work.
+        """
+        word = (args[0].lower() if args else "")
+
+        if word in ("list", "ls", "all"):
+            return self._list_sessions()
+        if word in ("resume", "open", "switch", "continue"):
+            return await self.cmd_resume(args[1:])
+        if word:
+            # /session 4f21a0 -- an id, or the start of one.
+            return await self.cmd_resume(args)
+
+        return self._describe_session()
+
+    def _describe_session(self) -> bool:
         session = self.agent.session
         limit = min(self.policy.max_iterations, self.config.max_tool_iterations)
-        self.ui.info(
-            f"state {getattr(getattr(self.agent, 'task_state', None), 'state', TaskState.IDLE).value}  "
-            f"project {self.project_info.summary() if hasattr(self, 'project_info') else 'unknown project'}\n"
-            f"session {session.session_id}  model {self.config.model}  "
-            f"workspace {self.ui.shorten_path(str(self.workspace))}\n"
-            f"tools {len(self.agent.tools)}  iteration limit {limit}  "
-            f"context {session.token_estimate()}/{self.config.num_ctx} tokens  "
-            f"requests {session.usage.requests}  tool calls {session.usage.tool_calls}"
+        used = session.token_estimate()
+        window = max(1, self.config.num_ctx)
+        self.ui.table(
+            ["", ""],
+            [
+                ("about", session.title() or "nothing said yet"),
+                ("model", self.config.model, f"{self.policy.name} effort"),
+                ("workspace", self.ui.shorten_path(str(self.workspace))),
+                ("context", f"{used:,} of {window:,} tokens",
+                 f"{100 * used // window}% used"),
+                ("said", _plural(len(session.messages), "message"),
+                 _plural(session.usage.requests, "request"),
+                 _plural(session.usage.tool_calls, "tool call")),
+                ("tools", _plural(len(self.agent.tools), "available", "available"),
+                 f"up to {_plural(limit, 'call')} a turn"),
+            ],
+            title=f"session {session.session_id}",
         )
+        others = len(Session.recent(limit=6, exclude=session.session_id))
+        if others:
+            self.ui.hint(f"/session list -- {others} other conversation"
+                         f"{'s' if others != 1 else ''} you can pick up")
+        return True
+
+    def _list_sessions(self) -> bool:
+        rows = Session.recent(exclude=self.agent.session.session_id)
+        if not rows:
+            self.ui.info("no other saved conversations")
+            return True
+        here = str(self.workspace)
+        # The column only earns its place when it distinguishes something.
+        # With every conversation from this directory it said "here" seven
+        # times down the page and told you nothing.
+        elsewhere = any(r["workspace"] != here for r in rows)
+        self.ui.table(
+            ["", "", "", "", ""],
+            [tuple(cell for cell in (
+                r["session_id"][:8],
+                _ago(r.get("updated_at", 0)),
+                _plural(r["messages"], "message"),
+                (self.ui.shorten_path(r["workspace"])
+                 if elsewhere and r["workspace"] != here else ""),
+                r["preview"] or "(nothing said yet)",
+            ) if cell) for r in rows],
+            title="conversations you can pick up",
+        )
+        self.ui.hint("/session <id> to pick one up")
         return True
 
     def cmd_diff(self, args: list[str]) -> bool:
@@ -2743,55 +2917,44 @@ class Repl:
         was simply no way back into one, which made them a debugging
         artefact rather than something you could use.
         """
-        import time as _time
-
-        rows = Session.recent()
+        rows = Session.recent(exclude=self.agent.session.session_id)
         if not rows:
-            self.ui.info("no saved conversations yet")
+            self.ui.info("no other saved conversations yet")
             return True
 
         if args:
-            wanted = args[0]
-            match = next((r for r in rows if r["session_id"].startswith(wanted)), None)
+            wanted = args[0].lstrip("#")
+            match = next((r for r in rows
+                          if r["session_id"].startswith(wanted)), None)
             if match is None:
                 self.ui.warn(f"no saved conversation starting {wanted!r}")
+                self.ui.hint("/session list to see them")
                 return True
             return self._load_session(match["session_id"])
 
-        def age(stamp: float) -> str:
-            if not stamp:
-                return "?"
-            seconds = max(0, _time.time() - stamp)
-            for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
-                if seconds >= size:
-                    return f"{int(seconds // size)}{unit} ago"
-            return "just now"
-
+        here = str(self.workspace)
         options = [
             Choice(value=r["session_id"],
-                   label=age(r.get("updated_at", 0)),
-                   badge=f"{r['messages']} msgs",
+                   label=_ago(r.get("updated_at", 0)),
+                   badge=(f"{r['messages']} msgs" if r["workspace"] == here
+                          else self.ui.shorten_path(r["workspace"])),
                    badge_style="badge.muted",
-                   hint=(r["preview"] or "(no messages)"))
+                   hint=(r["preview"] or "(nothing said yet)"))
             for r in rows
         ]
-        chosen = await self._pick("resume which conversation?", options,
+        chosen = await self._pick("pick up which conversation?", options,
                                   options[0].value if options else "")
         if chosen is not NO_PICKER:
             if not chosen:
                 return True
             return self._load_session(chosen)
 
-        self.ui.table(
-            ["id", "when", "messages", "started with"],
-            [(r["session_id"][:8], age(r.get("updated_at", 0)),
-              str(r["messages"]), r["preview"]) for r in rows],
-            title="recent conversations",
-        )
-        self.ui.info("/resume <id> to pick one up")
-        return True
+        return self._list_sessions()
 
     def _load_session(self, session_id: str) -> bool:
+        came_from = next(
+            (r["workspace"] for r in Session.recent(limit=60)
+             if r["session_id"] == session_id), "")
         restored = Session.load(session_id, self.workspace)
         if restored is None:
             self.ui.warn(f"could not read conversation {session_id[:8]}")
@@ -2806,9 +2969,21 @@ class Repl:
         self.agent.refresh_system_prompt()
         self._last_elapsed = 0.0
 
-        self.ui.success(f"resumed {session_id[:8]} -- "
-                        f"{len(restored.messages)} messages")
-        self.ui.info("undo history is not restored; it belonged to that run")
+        title = restored.title()
+        self.ui.success(f"picked up {session_id[:8]}"
+                        + (f" -- {title}" if title else "")
+                        + f" ({len(restored.messages)} messages)")
+        if came_from and came_from != str(self.workspace):
+            # Resuming across projects is the point, not an accident, but
+            # the tools are pointed at the directory you are in now -- so a
+            # conversation about another repository will happily read files
+            # that are not the ones it was talking about unless you say so.
+            self.ui.hint(
+                f"that conversation happened in "
+                f"{self.ui.shorten_path(came_from)}; tools still work in "
+                f"{self.ui.shorten_path(str(self.workspace))} "
+                f"(/cd to move)")
+        self.ui.hint("undo history is not restored; it belonged to that run")
         return True
 
     def _leave_conversation(self) -> None:
