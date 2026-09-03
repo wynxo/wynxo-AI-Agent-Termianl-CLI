@@ -86,6 +86,42 @@ def decide(messages: list[dict], tools: list | None) -> dict:
     text = str(last.get("content") or "")
     low = text.lower()
 
+    # A deterministic long answer with reasoning and a fenced block, so the
+    # streaming path -- thinking, prose, code, marks -- can be looked at
+    # without a real model. Say "show me a stream".
+    #
+    # Matched anywhere in the conversation rather than on the last message:
+    # above medium effort the planner and the executor each add a message of
+    # their own, so by the time the model is asked for the answer the
+    # request is several turns back.
+    asked = any("show me a stream" in str(m.get("content") or "").lower()
+                for m in messages or [])
+    if asked and role != "tool":
+        return {
+            "thinking":
+                "The user wants the retry path to back off. The loop in "
+                "provider.py sleeps a fixed RETRY_BACKOFF between attempts, "
+                "so three failures cost the same as one.\n\nOne risk: the "
+                "caller may rely on the total wait staying under the request "
+                "timeout. Worth saying so rather than assuming.",
+            "content":
+                "The retry loop sleeps a fixed `RETRY_BACKOFF` between "
+                "attempts, so three failures cost about the same as one. "
+                "Growing the delay is a two-line change:\n\n"
+                "```python\n"
+                "for attempt in range(CONNECT_ATTEMPTS):\n"
+                "    try:\n"
+                "        return await self._once(payload)\n"
+                "    except _TRANSIENT:\n"
+                "        if attempt == CONNECT_ATTEMPTS - 1:\n"
+                "            raise\n"
+                "        await asyncio.sleep(RETRY_BACKOFF * 2 ** attempt)\n"
+                "```\n\n"
+                "The **total** wait becomes `RETRY_BACKOFF * (2**n - 1)`, "
+                "which is worth checking against `request_timeout` before "
+                "raising the attempt count any further.",
+        }
+
     # A tool just answered: comment on it and stop.
     if role == "tool":
         name = last.get("tool_name") or last.get("name") or "the tool"

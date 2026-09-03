@@ -118,10 +118,14 @@ class TestSmoothStreaming:
         out = capsys.readouterr().out
         assert "and it is fine." in out
 
-    def test_thinking_is_indented(self, capsys):
+    def test_thinking_sits_at_the_transcript_detail_column(self, capsys):
+        """Two, not four. The transcript puts heads at zero and what belongs
+        to them at two; reasoning was the one block with a scheme of its own,
+        and it is the longest thing on the screen."""
         self._stream(["some reasoning here"], streamer=ThoughtStreamer)
         printed = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
-        assert printed[0].startswith("    ")
+        assert printed[0].startswith("  ")
+        assert not printed[0].startswith("   ")
 
 
 class TestKawaii:

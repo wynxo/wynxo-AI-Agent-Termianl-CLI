@@ -13,6 +13,7 @@ import contextlib
 import re
 import sys
 import time
+from functools import lru_cache
 from typing import Iterable
 
 from rich.box import ASCII as ASCII_BOX, ROUNDED
@@ -438,6 +439,11 @@ class Glyphs:
             # in place.
             self.step_done, self.step_now, self.step_todo = "✓", "●", "○"
             self.spark = "✦"
+            # The model's own reasoning, which is neither an action nor an
+            # answer. U+273B is Neutral width, so it costs one cell in every
+            # locale -- the filled stars that read better here (U+2605,
+            # U+2736) are Ambiguous and take two in a CJK one.
+            self.think = "✻"
             self.tool = "◈"
             self.task = "✦"
             # A ring, not a disc: the activity mark reads as "in progress"
@@ -454,6 +460,7 @@ class Glyphs:
             self.caret = ">"
             self.step_done, self.step_now, self.step_todo = "+", ">", "-"
             self.spark = "*"
+            self.think = "*"
             self.tool = "*"
             self.task = "*"
             self.busy = "o"
@@ -494,6 +501,32 @@ class _SaidOnce:
 
     def __exit__(self, *_exc) -> bool:
         return False
+
+
+@lru_cache(maxsize=64)
+def _lexer(language: str):
+    """The pygments lexer for a language name, or None.
+
+    Asked through pygments rather than through rich. It used to go through
+    ``rich.syntax.Syntax.get_lexer``, which rich 14 removed -- so on any
+    current rich the call raised AttributeError, the bare ``except`` around
+    it caught that exactly as it would catch an unknown language, and every
+    fenced block in every streamed answer came out with no colour at all.
+    Nothing said so, because falling back to plain text is what this is
+    supposed to do when it cannot recognise a language.
+
+    Cached because it is asked once per line of every block.
+    """
+    if not language or language in ("text", "plain"):
+        return None
+    try:
+        from pygments.lexers import get_lexer_by_name
+
+        return get_lexer_by_name(language, stripnl=False, ensurenl=False)
+    except Exception:                                  # noqa: BLE001
+        # An unknown language really is plain text. This is the case the
+        # guard is for, and now the only one it catches.
+        return None
 
 
 class UI:
@@ -992,21 +1025,25 @@ class UI:
         themselves on the next character. That is the price of showing code
         as it arrives rather than a line at a time.
         """
+        rendered = Text.from_ansi(line) if "\x1b" in line else Text(line)
+        lexer = _lexer(language)
+        if lexer is None:
+            return rendered
         try:
-            rendered = Text.from_ansi(line) if "\x1b" in line else Text(line)
-            if language not in ("text", ""):
-                from rich.syntax import Syntax as _S
-
-                lexer = _S.get_lexer(_S("", language), line)
-                rendered = Text()
-                for token, value in lexer.get_tokens(line):
-                    if value.endswith("\n"):
-                        value = value[:-1]
-                    if value:
-                        rendered.append(value, style=self._token_style(token))
-        except Exception:
-            rendered = Text(line)
-        return rendered
+            tokens = list(lexer.get_tokens(line))
+        except Exception:                              # noqa: BLE001
+            # pygments on a half-written line: an unterminated string, a
+            # keyword still being typed. It corrects itself on the next
+            # character, and showing the line uncoloured for one frame is
+            # the price of showing code as it arrives.
+            return rendered
+        out = Text()
+        for token, value in tokens:
+            if value.endswith("\n"):
+                value = value[:-1]
+            if value:
+                out.append(value, style=self._token_style(token))
+        return out
 
     def code_line(self, line: str, language: str = "text",
                   indent: str = "") -> None:
@@ -1236,8 +1273,14 @@ class CodeStreamer:
         self.in_bold = False
         self.in_heading = False
         self.pending_star = ""
-        """A single asterisk, held for one character to see whether a second
-        follows. `2 * 3` has to survive; `**bold**` has to work."""
+        """Asterisks held back until it is clear what they are.
+
+        One is held for a character to see whether a second follows, so
+        `2 * 3` survives. Two are held for one more, because "**" opens bold
+        only when something other than a space comes next -- otherwise
+        "2 ** 8 == 256" lost its operator and told you the answer to a
+        different sum.
+        """
         self.pending_hashes = ""
         self._pen_shown = ""
         """The style the terminal is currently set to, when writing to it
@@ -1457,6 +1500,16 @@ class CodeStreamer:
         Returns (consumed, char): the mark itself is swallowed, everything
         else comes back to be written.
         """
+        # Inside a code span nothing is markup but the backtick that ends
+        # it. `a**b` is an expression, and reading its asterisks as bold
+        # deleted them: what reached the screen was `ab`, which is a
+        # different expression that happens to look plausible.
+        if self.in_span and self.marks_code:
+            if char == "`":
+                self.in_span = False
+                return True, char
+            return False, char
+
         # A heading is decided by what starts the line. The hashes are held
         # rather than written, because "#" is also just a character and only
         # "## " makes it a heading.
@@ -1474,18 +1527,33 @@ class CodeStreamer:
             self.pending_hashes = "#"
             return True, char
 
-        if self.pending_star:
-            self.pending_star = False
+        if self.pending_star == "**":
+            # Two asterisks, and now the character that decides what they
+            # were. Bold cannot open on a space in markdown, and a model
+            # writing arithmetic relies on that: "2 ** 8" is a power, not
+            # the start of an emphasis that never ends.
+            self.pending_star = ""
+            if char.isspace():
+                self._prose_out("**")
+            else:
+                self.in_bold = True
+        elif self.pending_star == "*":
+            self.pending_star = ""
             if char == "*":
-                self.in_bold = not self.in_bold
+                if self.in_bold:
+                    # Closing needs no lookahead: the run that opened it is
+                    # what made this a pair.
+                    self.in_bold = False
+                    return True, char
+                self.pending_star = "**"
                 return True, char
             self._prose_out("*")          # a lone asterisk, meant literally
         elif char == "*":
-            self.pending_star = True
+            self.pending_star = "*"
             return True, char
 
         if char == "`":
-            self.in_span = not self.in_span
+            self.in_span = True
             return True, char
         return False, char
 
@@ -1497,9 +1565,8 @@ class CodeStreamer:
         dropped.
         """
         held, self.pending_hashes = self.pending_hashes, ""
-        if self.pending_star:
-            self.pending_star = False
-            held += "*"
+        held += self.pending_star
+        self.pending_star = ""
         if held:
             self._prose_out(held)
 
@@ -1717,15 +1784,33 @@ def _language(tag: str) -> str:
 
 
 class ThoughtStreamer(CodeStreamer):
-    """The model's reasoning: same flow, indented and dimmed, no code blocks.
+    """The model's reasoning: same flow, dimmed, at the detail column.
 
     Reasoning is not code even when it contains backticks, so fence handling
     is off -- a stray ``` in a scratchpad would otherwise swallow the rest of
     the thought into a syntax highlighter.
+
+    Two spaces, not four. The transcript puts heads at column zero and what
+    belongs to them at two, and reasoning was the one block still sitting at
+    two and four -- a whole indentation scheme of its own for the longest
+    thing on the screen.
     """
 
-    def __init__(self, ui: "UI", indent: str = "    "):
+    def __init__(self, ui: "UI", indent: str = "  "):
         super().__init__(ui, indent=indent, style=MUTED, code=False)
+
+    @staticmethod
+    def head(ui: "UI", label: str = "thinking") -> Text:
+        """The line a block of reasoning opens with.
+
+        Its own mark rather than the tool arrow: an arrow means wynxo did
+        something, and thinking is the model talking to itself. One place, so
+        the live block and the replayed ones cannot drift apart.
+        """
+        line = Text()
+        line.append(f"{ui.g.think} ", style=FAINT)
+        line.append(label, style=f"bold {MUTED}")
+        return line
 
 
 SURGE_FRAMES = (
@@ -1865,6 +1950,10 @@ class ActivityBar:
         """When an event last arrived. Only ever used to stop claiming
         activity, never to invent it."""
         self._live: Live | None = None
+        self._painted = 0.0
+        """When the live region was last repainted at someone's request.
+        See REFRESH_INTERVAL: the stream asks once per character, and the
+        terminal cannot usefully be asked that often."""
         self._frame = 0
         self._essential_width = MIN_ACTIVITY_WIDTH
         """Cells the sign of life and the activity word need. Measured while
@@ -2077,7 +2166,11 @@ class ActivityBar:
         if state is not None:
             self.state = state
         self._seen = time.monotonic()
-        self.refresh()
+        # A change of what wynxo is doing is an event and lands in the frame
+        # it happens. A token count is not: it ticks with every chunk, and
+        # nobody reads a number that changes forty times a second.
+        self.refresh(force=activity is not None or detail is not None
+                     or state is not None)
 
     def tick(self) -> None:
         """Advance the clocks. Called once per frame, by the frame.
@@ -2099,7 +2192,7 @@ class ActivityBar:
     def set_plan(self, rendered: str) -> None:
         self.plan = rendered or ""
         self.plan_done_frame = 0
-        self.refresh()
+        self.refresh(force=True)
 
     def plan_is_complete(self) -> bool:
         """Every line ticked, and there was at least one."""
@@ -2118,11 +2211,13 @@ class ActivityBar:
             return
         for frame in range(1, self.PLAN_DONE_FRAMES + 1):
             self.plan_done_frame = frame
-            self.refresh()
+            # A deliberate animation, paced by its own sleep. Every frame of
+            # it is meant to be seen, so none of them may be coalesced away.
+            self.refresh(force=True)
             await asyncio.sleep(0.06)
         self.plan = ""
         self.plan_done_frame = 0
-        self.refresh()
+        self.refresh(force=True)
 
     def _plan_panel(self):
         """The plan, drawn inside the live region.
@@ -2141,16 +2236,47 @@ class ActivityBar:
                           complete=bool(self.plan_done_frame))
 
     def set_lead(self, line: Text | None) -> None:
-        """Show (or clear) the line of the answer currently being written."""
-        self.lead = line
-        self.refresh()
+        """Show (or clear) the line of the answer currently being written.
 
-    def refresh(self) -> None:
-        if self._live is not None:
-            # Nudge Live to repaint now. The renderable is self, so the
-            # content is recomputed either way -- this only skips the wait
-            # for the next scheduled refresh.
-            self._live.refresh()
+        Clearing is forced: it happens when the line is about to be
+        committed to the scrollback, and a stale copy still in the live
+        region for a frame after that is the same text on screen twice.
+        """
+        self.lead = line
+        self.refresh(force=line is None)
+
+    REFRESH_INTERVAL = 1.0 / 20
+    """The floor between two repaints asked for by the stream.
+
+    A repaint is not free. Every one erases and redraws the whole pinned
+    block -- the plan, the line being written, the strip -- which on a
+    two-row bar is around a hundred and fifty bytes of escape sequences.
+    Asked for once per streamed character, a five-hundred-character answer
+    spent seventy-five kilobytes of terminal traffic to show five hundred
+    characters, and on a slow terminal or over ssh the display, not the
+    model, is what you are waiting for.
+
+    Nothing is lost by skipping one. Live runs its own refresh thread and
+    the renderable is this object, so the next scheduled paint shows the
+    newest state whether or not anyone asked for it -- at worst the token
+    counter is fifty milliseconds behind, which is under the interval at
+    which a human can read it changing.
+    """
+
+    def refresh(self, force: bool = False) -> None:
+        """Nudge Live to repaint.
+
+        ``force`` for the moments that must land in the frame they happen --
+        a tool starting, the bar being taken down -- rather than whenever
+        the next frame comes round.
+        """
+        if self._live is None:
+            return
+        now = time.monotonic()
+        if not force and now - self._painted < self.REFRESH_INTERVAL:
+            return
+        self._painted = now
+        self._live.refresh()
 
     def _renderable(self):
         """The pinned block: plan on top, then the line being written, then

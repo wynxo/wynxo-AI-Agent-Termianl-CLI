@@ -674,16 +674,15 @@ class TerminalCallbacks(Callbacks):
 
         if history:
             self.ui.console.print()
-            self.ui.console.print(
-                Text(f"  everything thought this session "
-                     f"({len(history)} earlier turn"
-                     f"{'s' if len(history) != 1 else ''})",
-                     style=f"bold {MUTED}"))
+            self.ui.console.print(ThoughtStreamer.head(
+                self.ui,
+                f"everything thought this session "
+                f"({len(history)} earlier turn"
+                f"{'s' if len(history) != 1 else ''})"))
             for index, thought in enumerate(history, start=1):
                 if not thought.strip():
                     continue
-                self.ui.console.print(
-                    Text(f"  turn {index}", style=FAINT))
+                self.ui.console.print(Text(f"  turn {index}", style=FAINT))
                 past = ThoughtStreamer(self.ui)
                 past.feed(thought.lstrip())
                 past.finish()
@@ -691,7 +690,7 @@ class TerminalCallbacks(Callbacks):
         if not backlog:
             return
         self.ui.console.print()
-        self.ui.console.print(Text("  thinking", style=f"bold {MUTED}"))
+        self.ui.console.print(ThoughtStreamer.head(self.ui))
         if self._thinker is None:
             self._thinker = ThoughtStreamer(self.ui)
         self._thinker.feed(backlog)
@@ -794,7 +793,7 @@ class TerminalCallbacks(Callbacks):
                 self._end_stream()
             if self._thinker is None:
                 self.ui.console.print()
-                self.ui.console.print(Text("  thinking", style=f"bold {MUTED}"))
+                self.ui.console.print(ThoughtStreamer.head(self.ui))
                 self._thinker = ThoughtStreamer(self.ui)
             self._thinker.feed(text)
 
