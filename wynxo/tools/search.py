@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import fnmatch
 import re
 from pathlib import Path
 
@@ -16,8 +15,73 @@ MAX_FILES_SCANNED = 20_000
 
 
 class GlobInput(Schema):
-    pattern = Field(str, "Glob pattern, e.g. '**/*.py' or 'src/**/test_*.ts'.")
+    pattern = Field(str, "Glob pattern, e.g. '**/*.py' or 'src/**/test_*.ts'. "
+                         "A pattern with no '/' matches the file name "
+                         "anywhere in the tree.")
     path = Field(str, "Directory to search from.", default=".")
+
+
+def _matcher(pattern: str):
+    """A glob pattern as a predicate on a relative path.
+
+    Written out rather than handed to ``fnmatch``, which has no notion of a
+    path separator: its ``*`` matches ``/`` like any other character. So
+    ``src/*.py`` matched ``src/deep/nested/thing.py``, and ``*.py`` matched
+    every Python file in the tree rather than the ones beside you. And the
+    pattern people actually type, ``**/*.py``, matched *nothing* in the root
+    directory, because ``**`` collapses to nothing and the literal ``/``
+    then has to be there. All three at once meant the answer was roughly
+    "files whose name ends in .py, somewhere", whatever was asked.
+
+    The segment rules, which are what every other glob implements:
+
+        **/     zero or more directories
+        **      everything below here
+        *       anything within one name
+        ?       one character within one name
+
+    A pattern with no separator in it is matched against the file name
+    anywhere in the tree, which is what ``fd '*.py'`` and ``git ls-files
+    '*.py'`` do and what someone typing it means.
+    """
+    bare = "/" not in pattern
+    body, index, length = [], 0, len(pattern)
+    while index < length:
+        char = pattern[index]
+        if pattern.startswith("**/", index):
+            body.append("(?:[^/]+/)*")
+            index += 3
+        elif pattern.startswith("**", index):
+            body.append(".*")
+            index += 2
+        elif char == "*":
+            body.append("[^/]*")
+            index += 1
+        elif char == "?":
+            body.append("[^/]")
+            index += 1
+        elif char == "[":
+            close = pattern.find("]", index + 1)
+            if close == -1:
+                body.append(re.escape(char))
+                index += 1
+            else:
+                inner = pattern[index + 1:close].replace("\\", "\\\\")
+                if inner.startswith("!"):
+                    inner = "^" + inner[1:]
+                body.append(f"[{inner}]")
+                index = close + 1
+        else:
+            body.append(re.escape(char))
+            index += 1
+    compiled = re.compile("".join(body) + r"\Z")
+
+    def matches(relative: str) -> bool:
+        if compiled.match(relative):
+            return True
+        return bare and bool(compiled.match(relative.rsplit("/", 1)[-1]))
+
+    return matches
 
 
 class Glob(Tool):
@@ -43,6 +107,7 @@ class Glob(Tool):
         return ToolResult.success(body, display=f"glob {args.pattern} -> {len(matches)} files")
 
     def _collect(self, root: Path, pattern: str) -> list[str]:
+        matches = _matcher(pattern.replace("\\", "/").lstrip("./"))
         out: list[str] = []
         for path in root.rglob("*"):
             if len(out) > MAX_MATCHES * 4:
@@ -52,7 +117,7 @@ class Glob(Tool):
             if any(part in IGNORED or part.startswith(".") for part in path.parts):
                 continue
             rel = self.relative(path)
-            if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(path.name, pattern):
+            if matches(rel.replace("\\", "/")):
                 out.append(rel)
         # Most-recently-modified first: when a model is hunting for the file it
         # just changed, that is nearly always the one it wants.
@@ -143,13 +208,18 @@ class Grep(Tool):
         return hits, scanned
 
     def _candidates(self, root: Path, glob: str) -> list[Path]:
+        # The same matcher the glob tool uses. This had its own copy of the
+        # fnmatch pair, so narrowing a search with "src/*.py" searched every
+        # Python file in the tree -- the filter that was meant to make a
+        # search cheaper and more precise did neither.
+        matches = _matcher(glob.replace("\\", "/").lstrip("./")) if glob else None
         out = []
         for path in root.rglob("*"):
             if not path.is_file():
                 continue
             if any(part in IGNORED or part.startswith(".") for part in path.parts):
                 continue
-            if glob and not (fnmatch.fnmatch(path.name, glob) or fnmatch.fnmatch(self.relative(path), glob)):
+            if matches and not matches(self.relative(path).replace("\\", "/")):
                 continue
             out.append(path)
         return out
