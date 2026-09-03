@@ -462,8 +462,28 @@ def split_thinking(text: str) -> tuple[str, str]:
     return content.strip(), "\n\n".join(t for t in thoughts if t).strip()
 
 
-def repair_json(raw: str) -> dict[str, Any] | None:
-    """Best-effort parse of near-JSON. Returns None if it is truly hopeless."""
+def repair_json(raw: str, *, allow_truncated: bool = False) -> dict[str, Any] | None:
+    """Best-effort parse of near-JSON. Returns None if it is truly hopeless.
+
+    Output that simply stops -- a model cut off by num_predict, a dropped
+    connection, a context that ran out -- is recovered only as far as it can
+    be without guessing. A brace left open after a complete value is closed:
+    every value the model wrote, it finished writing. A *string* left open
+    is not, because what it holds is however much of the value arrived.
+
+    That distinction is the whole point. A ``write_file`` cut off inside its
+    content used to parse as a complete call whose content was the first
+    half of the file -- and one cut a little earlier parsed as a call whose
+    content was the empty string, which is a request to empty the file.
+    Neither is what the model meant and neither could be told apart from a
+    real call downstream.
+
+    ``allow_truncated`` re-enables closing an unterminated string, for a
+    caller that wants to look at a fragment rather than act on it. A tool
+    call is not such a caller: a truncated one is malformed, which is a
+    state the loop already knows how to handle -- it hands it back and asks
+    again.
+    """
     text = raw.strip()
     if not text:
         return None
@@ -501,11 +521,23 @@ def repair_json(raw: str) -> dict[str, Any] | None:
         return parsed
 
     # Truncated output: close whatever is still open and see if it parses.
-    if (closed := _close_unbalanced(text)) and (
-            parsed := loads_object(closed)) is not None:
+    if (closed := _close_unbalanced(text, inside_a_string=allow_truncated)) \
+            and (parsed := loads_object(closed)) is not None:
         return parsed
 
     return None
+
+
+def looks_truncated(raw: str) -> bool:
+    """Whether this stopped mid-way rather than being merely malformed.
+
+    Worth telling apart when asking the model to try again: "your tool call
+    was cut off" is a different instruction from "your tool call is not
+    valid JSON", and a model that is told the wrong one fixes the wrong
+    thing.
+    """
+    text = (raw or "").strip()
+    return bool(text) and _close_unbalanced(text) is not None
 
 
 def _escape_newlines_in_strings(text: str) -> str:
@@ -537,8 +569,16 @@ def _escape_newlines_in_strings(text: str) -> str:
     return "".join(out)
 
 
-def _close_unbalanced(text: str) -> str | None:
-    """Close a truncated JSON object so it can at least be inspected."""
+def _close_unbalanced(text: str, *, inside_a_string: bool = True) -> str | None:
+    """Close a truncated JSON object so it can at least be inspected.
+
+    ``inside_a_string`` is whether to close an *unterminated string* too.
+    That is the line between recovering and guessing. A brace left open
+    after a complete value costs nothing to close: every value the model
+    wrote, it finished writing. A string left open is different -- what it
+    holds is however much of the value arrived, and closing it turns half a
+    file into a whole one that parses.
+    """
     stack: list[str] = []
     in_string = False
     escaped = False
@@ -560,6 +600,8 @@ def _close_unbalanced(text: str) -> str | None:
             if stack:
                 stack.pop()
     if not stack and not in_string:
+        return None
+    if in_string and not inside_a_string:
         return None
     tail = '"' if in_string else ""
     for opener in reversed(stack):

@@ -25,8 +25,8 @@ from ._agent_hardening import _stream_test_output
 from .config import Config
 from .effort import EffortPolicy, override
 from .memory import Memory
-from .parsing import (LiveContentFilter, ParsedTurn, parse_turn,
-                      partial_string_value)
+from .parsing import (LiveContentFilter, ParsedTurn, looks_truncated,
+                      parse_turn, partial_string_value)
 from .permissions import Decision, PermissionStore, summarise_call
 from .prompts import (
     TESTS_FAILED_PROMPT,
@@ -1165,13 +1165,19 @@ class Agent:
                 "repairing tool call", f"attempt {attempt + 1}/{self.policy.repair_attempts}"
             )
             raw = "\n\n".join(turn.malformed[:2])
+            # A call that was cut off and a call that is mis-punctuated need
+            # different instructions, and a model told the wrong one fixes
+            # the wrong thing: asked to check its quotes, it re-emits the
+            # same over-long content and is cut off in the same place.
+            if looks_truncated(turn.malformed[0] if turn.malformed else ""):
+                reason = ("It stops part-way through -- the reply was cut "
+                          "off. Send the call again and make it shorter: "
+                          "write less in one go, or split it across calls.")
+            else:
+                reason = ("It is not valid JSON. Check the quotes, commas "
+                          "and escaping.")
             self.session.add_assistant(turn.content or "")
-            self.session.add_user(
-                REPAIR.format(
-                    raw=raw[:2000],
-                    reason="It is not valid JSON. Check the quotes, commas and escaping.",
-                )
-            )
+            self.session.add_user(REPAIR.format(raw=raw[:2000], reason=reason))
             repaired = await self._call_model(stream_content=False)
             if repaired.tool_calls:
                 return repaired
