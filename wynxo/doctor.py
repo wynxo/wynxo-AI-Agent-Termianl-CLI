@@ -22,7 +22,7 @@ from enum import Enum
 
 from .config import MIN_USABLE_CONTEXT, Config
 from .parsing import parse_turn
-from .provider import OllamaClient, ProviderError
+from .provider import OllamaClient, ProviderError, same_model
 from .ui import ACCENT, BAD, GOOD, MUTED, WARN, UI
 
 
@@ -298,9 +298,7 @@ class Doctor:
         """
         loaded = await self.client.running()
         mine = next((m for m in loaded
-                     if m.name == self.config.model
-                     or m.name.split(":")[0] == self.config.model.split(":")[0]),
-                    None)
+                     if same_model(m.name, self.config.model)), None)
         if mine is None:
             # An older server with no /api/ps, or a model that unloaded
             # between the request and this check. Neither is a problem, and
@@ -325,11 +323,14 @@ class Doctor:
 
         share = mine.on_gpu
         facts.append(f"{gigabytes(mine.size_vram)} on the GPU")
-        # Halved, not tuned: there is no way to work out the right window
-        # from here -- it depends on how much VRAM is free, which the server
-        # does not report -- so this is a step in the right direction that
-        # can be taken again.
-        smaller = max(4096, self.config.num_ctx // 2)
+        # Worked out rather than guessed at. The weights do not grow with
+        # the window, so everything the model needs above its file size is
+        # KV cache, and the KV cache is linear in tokens -- which makes the
+        # window that would fit a division, not a halving repeated until it
+        # stops complaining.
+        weights = await self._weights_of(self.config.model)
+        fitting = mine.context_that_fits(weights, self.config.num_ctx)
+        smaller = fitting or max(4096, self.config.num_ctx // 2)
         fix = [
             "Every token is generated at the speed of the slowest part, so "
             "this is the main reason generation feels slow: a split model "
@@ -339,7 +340,10 @@ class Doctor:
             f"num_ctx={self.config.num_ctx:,}; `ollama run` uses the "
             f"model's own default, which is usually far smaller -- that is "
             f"the whole difference.",
-            f"Try `/ctx {smaller}`, then `/doctor` again.",
+            (f"About {fitting:,} tokens of context would fit entirely on "
+             f"the GPU: try `/ctx {smaller}`, then `/doctor` again."
+             if fitting else
+             f"Try `/ctx {smaller}`, then `/doctor` again."),
         ]
         if smaller < MIN_USABLE_CONTEXT:
             fix.append(
@@ -352,6 +356,20 @@ class Doctor:
             fix="\n".join(fix),
             facts=facts,
         ))
+
+    async def _weights_of(self, model: str) -> int:
+        """The model's size on disk, which is what its weights cost loaded.
+
+        Zero when it cannot be told, which every caller treats as "say
+        nothing" rather than as a number to compute with.
+        """
+        try:
+            for entry in await self.client.list_models():
+                if same_model(entry.name, model):
+                    return entry.size
+        except ProviderError:
+            pass
+        return 0
 
     async def check_generation(self) -> None:
         """A real streamed request, which also measures speed."""

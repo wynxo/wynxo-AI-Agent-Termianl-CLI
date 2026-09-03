@@ -33,18 +33,21 @@ from . import stt_devices
 from .agent import Agent, Callbacks, Interrupted
 from .events import ToolEvent
 from .discovery import Discovery
-from .config import Config, Endpoint, data_dir, is_configured, load, normalise_url
+from .config import (Config, Endpoint, MIN_USABLE_CONTEXT, data_dir,
+                     is_configured, load, normalise_url)
 from . import companion
 from . import livediff
 from .doctor import run_doctor
 from .effort import ORDER, resolve
 from .permissions import Decision
-from .provider import ProviderError, check_context, make_client
+from .provider import (ProviderError, check_context, make_client,
+                       same_model)
 from .queue import Pending
 from .session import Session
 from .keys import KeyWatcher
 from .journal import Journal, recent as recent_logs
 from .memory import Memory
+from .pacing import Typewriter
 from .pet import Pet
 from .select import (
     HINT, HINT_ASCII, Choice, choose, silence_cpr_warning,
@@ -535,6 +538,29 @@ class CommandCompleter(Completer):
                     display_meta=COMMANDS.get(target, ""))
 
 
+STATE_GAP = "   "
+"""Between two states in the gallery /animate list and /pet draw."""
+
+STATE_INDENT = 2
+
+
+def gallery_columns(width: int) -> int:
+    """How many companion states fit across a terminal this wide.
+
+    From the terminal, not from a constant. Four was hard-coded, and four
+    of anything is only ever right at one width: even at the old sprite
+    size the gallery needed seventy columns and was drawn on any terminal
+    at all, so at sixty-two every row wrapped -- the cats came apart into
+    bands of pixels with their labels adrift underneath. The command exists
+    to show what the character looks like, and a version of it that mangles
+    the character is worse than not having it.
+    """
+    from . import sprite
+
+    room = width - STATE_INDENT
+    return max(1, room // (sprite.WIDTH + len(STATE_GAP)))
+
+
 class TerminalCallbacks(Callbacks):
     """Wires the agent's events to the terminal."""
 
@@ -637,6 +663,9 @@ class TerminalCallbacks(Callbacks):
         self._status_message = ""
         self._status_lock = asyncio.Lock()
         self._turn_lock = asyncio.Lock()
+        self.typed = Typewriter(self._status_lock)
+        """The answer's pacer. Started for the length of a turn where there
+        is a live region, and a straight pass-through everywhere else."""
 
     @property
     def card(self) -> "livediff.DiffCard | None":
@@ -811,8 +840,43 @@ class TerminalCallbacks(Callbacks):
         if self.bar is not None:
             self.bar.update(detail=message)
 
+    def _write_thought(self, text: str) -> None:
+        """One paced piece of the model's reasoning."""
+        if self._thinker is not None:
+            self._thinker.feed(text)
+
+    def _write_code(self, text: str) -> None:
+        """One paced piece of a file being written, in the transcript."""
+        if self._coder is not None:
+            self._coder.feed(text)
+
+    def _write_card(self, text: str) -> None:
+        """One paced piece of a file being written, into its live card."""
+        if self.card is not None and self.card.live:
+            self.card.feed(text)
+            if self.bar is not None:
+                self.bar.refresh()
+
+    def _write_content(self, text: str) -> None:
+        """One paced piece of the answer, on its way to the screen.
+
+        The fallback is not decoration: text held by the pacer has already
+        been generated, and dropping it because the block it belonged to was
+        closed underneath would lose the end of an answer with nothing on
+        screen to say so.
+        """
+        if self.streamer is not None:
+            self.streamer.feed(text)
+        else:
+            self.ui.console.print(text, end="", soft_wrap=True)
+
     def _end_stream(self) -> None:
         """Close whichever transient block is open, so the next starts clean."""
+        # Before anything else writes. Whatever the pacer is still holding
+        # was generated *before* the line that is about to go out, and a
+        # tool line landing in the middle of a held sentence is the one
+        # thing the streamer's own ordering rules exist to prevent.
+        self.typed.flush()
         self._end_thinking()
         if self._streaming:
             if self.streamer is not None:
@@ -850,7 +914,7 @@ class TerminalCallbacks(Callbacks):
                 self.ui.console.print()
                 self.ui.console.print(ThoughtStreamer.head(self.ui))
                 self._thinker = ThoughtStreamer(self.ui)
-            self._thinker.feed(text)
+            self.typed.feed(self._write_thought, text)
 
     def _end_thinking(self) -> None:
         if self._thinker is not None:
@@ -877,8 +941,11 @@ class TerminalCallbacks(Callbacks):
             if self.bar is not None:
                 self.bar.update(activity="writing", detail="",
                                 tokens=self.tokens,
-                                state=self._companion_state())
-            self.streamer.feed(text)
+                                state=self._writing_state())
+            # Through the pacer, not straight at the streamer: a chunk is
+            # whatever the model happened to emit in one go, and shown whole
+            # it reads as text being pasted rather than written.
+            self.typed.feed(self._write_content, text)
 
     async def on_stage(self, name: str, detail: str = "") -> None:
         async with self._status_lock:
@@ -962,6 +1029,10 @@ class TerminalCallbacks(Callbacks):
 
     async def _on_tool_result_locked(self, name: str, ok: bool, display: str, output: str, event: ToolEvent | None = None) -> None:
         self.active_tool = ""
+        # Before the card is finished: anything the pacer is still holding
+        # is part of the file that was being written, and finishing the card
+        # around it would settle the diff against half its own content.
+        self.typed.flush()
         if self.card is not None and self.card.tool == name and self.card.live:
             settled = ""
             if ok and not self.card.streamed and self.workspace is not None:
@@ -1054,16 +1125,14 @@ class TerminalCallbacks(Callbacks):
             # An edit in flight: the fragments belong to its card, which
             # draws in the live region. Streaming them into the conversation
             # as well would put the whole file on screen twice.
-            self.card.feed(text)
-            if self.bar is not None:
-                self.bar.refresh()
+            self.typed.feed(self._write_card, text)
             return
         if self._coder is None:
             self.ui.console.print()
             self.ui.console.print(Text("  writing", style=f"bold {MUTED}"))
             self._coder = CodeStreamer(self.ui, indent="  ",
                                        style=MUTED, code=False, literal=True)
-        self._coder.feed(text)
+        self.typed.feed(self._write_code, text)
 
     def _companion_state(self, tool: str | None = None) -> str:
         """What the companion should be doing, from what the agent is doing.
@@ -1077,6 +1146,26 @@ class TerminalCallbacks(Callbacks):
         running = self.active_tool if tool is None else tool
         return companion.state_for(
             running or "", getattr(task, "value", "") or "").value
+
+    def _writing_state(self) -> str:
+        """The companion while the answer itself is streaming.
+
+        The task state machine has no entry for this. Generating an answer
+        is "thinking" to it from the first token to the last, so the strip
+        said "writing" beside a character sitting with its paw against its
+        chin, staring into the air -- the one place the two halves of the
+        live region disagreed about what was happening, in the state they
+        spend most of a turn in.
+
+        A running tool still wins: a file being written during a turn is
+        more specific than the fact that words are coming back, and it is
+        what the companion is for.
+        """
+        settled = self._companion_state()
+        if settled in (companion.State.THINKING.value,
+                       companion.State.IDLE.value):
+            return companion.State.CODING.value
+        return settled
 
     def _call_summary(self, name: str, ok: bool, display: str,
                       output: str) -> tuple[str, str]:
@@ -1167,12 +1256,14 @@ class TerminalCallbacks(Callbacks):
         folded into _end_stream(): that runs *during* a turn as well, and
         would close the card moments after on_code opened it.
         """
+        self.typed.flush()
         if self.card is not None and self.card.live:
             self.card.finish(ok=False, error="interrupted")
             self._commit_card()
         self.active_tool = ""
 
     def _end_code(self) -> None:
+        self.typed.flush()
         if self._coder is not None:
             self._coder.finish()
             self._coder = None
@@ -1365,6 +1456,15 @@ class Repl:
                                 else "default")
         self._last_elapsed = 0.0
         self._warming: "asyncio.Future | None" = None
+        self._placement_checked = 0
+        """Attempts made to report the model's GPU placement.
+
+        Once a session once it is known: the fact does not change while a
+        model stays loaded, and a line about it every turn is noise on top
+        of a slow turn. Counted rather than a flag because the first look
+        can be too early -- a 30B still loading is not yet in /api/ps --
+        and a check that gives up on the one answer it exists to give is
+        worse than no check."""
         """The background model load started at connect. Held so it is not
         collected mid-flight, and so a turn can say what it is waiting
         behind."""
@@ -1614,6 +1714,79 @@ class Repl:
         self._start_warming()
         return True
 
+    PLACEMENT_TRIES = 3
+    """Turns to keep looking before giving up on the GPU-placement check."""
+
+    async def _report_placement(self) -> None:
+        """Say, once, when the model is not entirely on the GPU.
+
+        This is the single biggest fact about local generation speed and
+        the one nothing was saying. A model that runs at forty tokens a
+        second on the GPU runs at five with a few layers pushed onto the
+        CPU, and the only symptom is that everything feels slow for no
+        stated reason -- which is exactly the shape of "wynxo is slower
+        than `ollama run`".
+
+        The cause is usually wynxo's own doing. `ollama run` uses the
+        model's default window; wynxo asks for num_ctx, which defaults to
+        32,768, and the KV cache grows with it -- so the same model on the
+        same machine can be entirely on the GPU under one and spilled
+        under the other.
+
+        Once per session, and only when it is true. A line every turn
+        would be noise, and a line on a machine with no GPU at all would be
+        wrong: nothing has gone wrong there and there is nothing to fix.
+        """
+        if self._placement_checked >= self.PLACEMENT_TRIES:
+            return
+        try:
+            loaded = await self.client.running()
+        except Exception:                                   # noqa: BLE001
+            self._placement_checked += 1
+            return          # a diagnostic must never be able to fail a turn
+        mine = next((m for m in loaded
+                     if same_model(m.name, self.config.model)), None)
+        if mine is None:
+            # Nothing definite yet: an older server with no /api/ps, or a
+            # model that had not finished loading. Counted rather than
+            # settled, so a slow first load does not silently cost the
+            # answer for the whole session -- and bounded, so an old server
+            # is not asked once a turn forever.
+            self._placement_checked += 1
+            return
+        self._placement_checked = self.PLACEMENT_TRIES
+        if not mine.split:
+            return
+        weights = 0
+        try:
+            for entry in await self.client.list_models():
+                if same_model(entry.name, self.config.model):
+                    weights = entry.size
+                    break
+        except Exception:                                   # noqa: BLE001
+            pass
+        fits = mine.context_that_fits(weights, self.config.num_ctx)
+        self.ui.console.print()
+        self.ui.warn(f"{self.config.model} is {mine.on_gpu:.0%} on the GPU; "
+                     f"the rest is running on the CPU, which is most of why "
+                     f"generation feels slow.")
+        if fits >= MIN_USABLE_CONTEXT:
+            self.ui.info(f"the KV cache grows with the context window, and "
+                         f"num_ctx is {self.config.num_ctx:,}. About "
+                         f"{fits:,} tokens would fit entirely on the GPU: "
+                         f"/ctx {fits}")
+        elif fits:
+            self.ui.info(f"only about {fits:,} tokens of context would fit "
+                         f"on the GPU, which is tight for an agent. "
+                         f"/ctx {fits} trades context for speed; a smaller "
+                         f"quantisation of {self.config.model} buys back "
+                         f"both.")
+        else:
+            self.ui.info("the weights alone do not fit on this GPU, so no "
+                         "context window is small enough. A smaller model "
+                         "or a tighter quantisation is the fix.")
+        self.ui.info("/doctor explains it in full.")
+
     def _start_warming(self) -> None:
         """Load the model while the user is typing, not after.
 
@@ -1631,9 +1804,22 @@ class Repl:
         """
         if not self.config.warm_start:
             return
+        # The exact prompt the first question will carry in front of it:
+        # the system message and the tool schemas, which together are the
+        # five thousand tokens a local model reads before writing a word.
+        # Read now, in the background, they are cached by the time anyone
+        # presses enter -- and if the server does not reuse the prefix, the
+        # only cost is arithmetic done early while somebody was typing.
+        try:
+            wire = self.agent.session.wire()
+            tools = (self.agent.tools.ollama_schemas()
+                     if self.agent.native_tools else None)
+        except Exception:                                   # noqa: BLE001
+            wire, tools = None, None
         try:
             self._warming = asyncio.ensure_future(
-                self.client.warm(self.config.model))
+                self.client.warm(self.config.model, messages=wire,
+                                 tools=tools))
         except RuntimeError:
             self._warming = None            # no loop: nothing to warm into
 
@@ -1935,6 +2121,10 @@ class Repl:
             await self._talk(await self.talker.opening(text))
         self._task = asyncio.ensure_future(self.agent.run(text))
         bar.start()
+        # Only here. Outside a turn there is no live region to pace against,
+        # and in -p or a pipe the pacer is a pass-through -- output that is
+        # being read by a program should arrive as fast as it is produced.
+        self.callbacks.typed.start()
         # Only one thing may read stdin. prompt_toolkit is not reading during
         # a turn -- the prompt has returned -- so the watcher can hold the
         # terminal in cbreak mode and read it directly for the length of the
@@ -1959,6 +2149,9 @@ class Repl:
             # unflushed line with it.
             watcher.stop()
             self.callbacks.close_card()
+            # Stopped before the flush inside _end_stream, so the drain loop
+            # cannot write one more piece after the answer has been closed.
+            self.callbacks.typed.stop()
             self.callbacks._end_stream()
             bar.stop()
             self.callbacks.bar = None
@@ -1968,6 +2161,14 @@ class Repl:
             # Stages are transient. Never leave a terminal-level status
             # behind after the live bar is disposed.
             self.callbacks._status_message = ""
+
+        # The model is loaded by now, whether it was warmed or the turn
+        # loaded it, so this is the first moment /api/ps has anything true
+        # to say. Reported here rather than only in /doctor: a user who has
+        # just watched a 30B crawl does not know there is a check to run,
+        # and "wynxo is slower than ollama run" is the report that reaches
+        # me instead.
+        await self._report_placement()
 
         if interrupted:
             self.ui.console.print()
@@ -4583,13 +4784,13 @@ class Repl:
                      f"/log list  {dot}  /log off")
         return True
 
-    STATE_COLUMNS = 4
-    """States shown side by side. The companion is five rows tall, so a row
-    per state would be sixty lines to show twelve of them."""
-
     def _show_states(self, only: str = "") -> None:
         """Every state the companion has, drawn by the renderer that draws
         it during a turn.
+
+        Side by side, as many across as the terminal has room for: the
+        companion is six rows tall, so a row each would be seventy-two
+        lines to show twelve of them.
 
         Deliberately not a preview built from its own copy of the frames.
         There used to be one of those -- a whole module wrapping the scene
@@ -4606,9 +4807,10 @@ class Repl:
             self.ui.info("states: "
                          + " | ".join(s.value for s in State))
             return
-        gap = "   "
-        for start in range(0, len(states), self.STATE_COLUMNS):
-            group = states[start:start + self.STATE_COLUMNS]
+        gap = STATE_GAP
+        columns = gallery_columns(self.ui.width)
+        for start in range(0, len(states), columns):
+            group = states[start:start + columns]
             # The second frame, where there is one. Several states differ
             # from idle only in the part that moves -- the paws come up to
             # the keyboard, the progress bar starts filling -- so a gallery

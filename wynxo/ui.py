@@ -24,6 +24,7 @@ from rich.rule import Rule
 from rich.text import Text
 
 from .platforms import is_narrow, terminal_width
+from . import pacing
 from . import sprite
 
 from . import theme as _theme
@@ -2146,6 +2147,8 @@ class ActivityBar:
         See REFRESH_INTERVAL: the stream asks once per character, and the
         terminal cannot usefully be asked that often."""
         self._frame = 0
+        self._beat: "asyncio.Task | None" = None
+        """The repaint heartbeat, while the region is up."""
         self._essential_width = MIN_ACTIVITY_WIDTH
         """Cells the sign of life and the activity word need. Measured while
         the left half is built, and read by the right half to decide what it
@@ -2324,14 +2327,45 @@ class ActivityBar:
 
     # -- lifecycle ---------------------------------------------------------
 
+    HEARTBEAT = 1.0 / 12
+    """How often the region repaints with nothing new to say.
+
+    Enough for a clock counting tenths and for a companion that blinks;
+    not so often that a screen with nothing happening on it is being
+    redrawn for no reason."""
+
     def start(self) -> None:
         if not self.ui.live_ok:
             return       # nowhere to repaint: the caller prints instead
         if not self.ui.console.is_terminal:
             return
-        self._live = Live(self, console=self.ui.console,
-                          refresh_per_second=12, transient=True)
+        # auto_refresh off, and a heartbeat of our own instead. rich's own
+        # refresh thread was a second clock: it painted on its schedule
+        # while the stream painted on ours, and two unsynchronised clocks
+        # put frames 1 ms apart and then 32 ms apart. Erase-and-redraw at
+        # irregular intervals is exactly what "less smooth than ollama run"
+        # looks like. One clock, one cadence, and the throttle in refresh()
+        # coalesces the heartbeat with whatever the stream asked for.
+        self._live = Live(self, console=self.ui.console, auto_refresh=False,
+                          transient=True)
         self._live.start()
+        self._beat = None
+        try:
+            self._beat = asyncio.ensure_future(self._heartbeat())
+        except RuntimeError:
+            pass        # no running loop: refresh() on change is all there is
+
+    async def _heartbeat(self) -> None:
+        """Repaint on a steady beat, so time keeps passing on screen.
+
+        Not forced: it goes through the same throttle as everything else,
+        so while an answer is streaming this costs nothing -- the stream is
+        already painting more often than this -- and when nothing is
+        arriving it is the only thing keeping the elapsed clock moving.
+        """
+        while True:
+            await asyncio.sleep(self.HEARTBEAT)
+            self.refresh()
 
     STALL_AFTER = 20.0
     """Seconds of silence before saying so.
@@ -2436,8 +2470,13 @@ class ActivityBar:
         self.lead = line
         self.refresh(force=line is None)
 
-    REFRESH_INTERVAL = 1.0 / 20
+    REFRESH_INTERVAL = pacing.TICK
     """The floor between two repaints asked for by the stream.
+
+    The same interval the answer is paced at, and it has to be: the pacer
+    releases one piece per frame, and a screen redrawn less often than that
+    puts two or three of them on at once -- which is the lumpiness it exists
+    to remove, reintroduced one layer down.
 
     A repaint is not free. Every one erases and redraws the whole pinned
     block -- the plan, the line being written, the strip -- which on a
@@ -2474,8 +2513,9 @@ class ActivityBar:
         self._live.refresh()
 
     def _renderable(self):
-        """The pinned block: plan on top, then the line being written, then
-        the status strip. Everything here is redrawn in place.
+        """The pinned block: the card, the line being written, the
+        companion and its status, then the strip. Everything here is
+        redrawn in place.
 
         No history of finished calls. Six of them used to be kept and
         redrawn here as "✓ read calc.py (5 lines)  0.00s", which is the
@@ -2498,9 +2538,17 @@ class ActivityBar:
                 body.append(line + "\n", style=BAR_DIM)
             body.rstrip()
             parts.append(body)
-        parts.extend(self._scene())
+        # The line being written comes first, directly under the lines
+        # already committed above it. It used to sit under the companion,
+        # which put six rows of cat between "    try:" and the half-written
+        # "        return await self._onc" that continues it -- the one
+        # place in the whole layout where a block of code was cut in half
+        # by something that was not code. What is being written belongs
+        # against what has been; the character and the strip are the
+        # furniture underneath both.
         if self.lead is not None and self.lead.plain:
             parts.append(self.lead)
+        parts.extend(self._scene())
         parts.append(self._render())
         return parts[0] if len(parts) == 1 else Group(*parts)
 
@@ -2694,6 +2742,10 @@ class ActivityBar:
             self._live.refresh()
 
     def stop(self) -> None:
+        beat, self._beat = self._beat, None
+        if beat is not None:
+            beat.cancel()
+            beat.add_done_callback(lambda t: t.cancelled() or t.exception())
         live, self._live = self._live, None
         if live is not None:
             with contextlib.suppress(Exception):

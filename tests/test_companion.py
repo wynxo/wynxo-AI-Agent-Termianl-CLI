@@ -221,3 +221,43 @@ class TestTheInkMapIsAllUsed:
                 for row in frame:
                     unknown = set(row) - set(INK)
                     assert not unknown, f"{state.value}: {unknown}"
+
+
+class TestTheStripAndTheCharacterAgree:
+    """The live region says what is happening twice -- once in a word and
+    once in a drawing -- and the two must never contradict each other.
+    """
+
+    def _callbacks(self):
+        from wynxo.cli import TerminalCallbacks
+        from wynxo.ui import UI
+
+        return TerminalCallbacks(UI())
+
+    def test_a_streaming_answer_draws_a_character_that_is_writing(self):
+        """The task state machine has no entry for writing an answer: it
+        reads "thinking" from the first token to the last. So the strip
+        said "writing" beside a character with its paw against its chin,
+        staring into the air, for most of every turn."""
+        from wynxo.companion import State
+
+        cb = self._callbacks()
+        assert cb._writing_state() == State.CODING.value
+
+    def test_a_running_tool_still_wins(self):
+        """A file being written is more specific than "words are coming
+        back", and it is what the companion exists to show."""
+        from wynxo.companion import State
+
+        cb = self._callbacks()
+        cb.active_tool = "read_file"
+        assert cb._writing_state() == State.READING.value
+
+    def test_a_finished_turn_is_not_redrawn_as_writing(self):
+        from types import SimpleNamespace
+
+        from wynxo.companion import State
+
+        cb = self._callbacks()
+        cb.task_state = SimpleNamespace(state=SimpleNamespace(value="failed"))
+        assert cb._writing_state() == State.ERROR.value

@@ -60,6 +60,57 @@ class Loaded:
         """Whether the model is spread across GPU and CPU."""
         return 0 < self.size_vram < self.size
 
+    def context_that_fits(self, weights: int, num_ctx: int) -> int:
+        """Roughly the largest context window that would stay on the GPU.
+
+        This is the number that answers "why is wynxo slower than `ollama
+        run`", and it can be worked out from what the server already
+        reports rather than guessed at.
+
+        ``size`` is what the model needs in memory at the window it was
+        loaded under, and the weights do not change with the window, so
+        everything above them is the KV cache -- and the KV cache is linear
+        in the number of tokens. Divide by the window and you have the cost
+        per token; the room left on the card once the weights are there,
+        divided by that, is how many tokens would fit.
+
+        ``size_vram`` stands in for how much VRAM there is. Ollama places as
+        many layers as it can, so what it managed to place is a fair
+        estimate of the card, and an underestimate rather than an over one:
+        being told a slightly smaller window than would truly fit costs
+        some context, where the other way round costs the speed this exists
+        to recover.
+
+        Zero when the answer is not worth acting on -- an unknown weight, a
+        window that is not really the KV cache's, or a card too small for
+        the weights alone, where no window is small enough and the fix is a
+        smaller model or a tighter quantisation instead.
+        """
+        if weights <= 0 or num_ctx <= 0 or self.size <= weights:
+            return 0
+        per_token = (self.size - weights) / num_ctx
+        if per_token <= 0:
+            return 0
+        room = self.size_vram - weights
+        if room <= 0:
+            return 0
+        # Down to a round number: this is an estimate, and a recommendation
+        # of "13,417" claims a precision it does not have.
+        return int(room / per_token) // 1024 * 1024
+
+
+def same_model(a: str, b: str) -> bool:
+    """Whether two model names are the same model.
+
+    ``/api/ps`` answers with the tag the server loaded, which is not always
+    the string configured here: ``qwen3-coder:30b`` and ``qwen3-coder:latest``
+    are the same weights under two names, and a check that misses that
+    reports nothing at all rather than reporting the wrong thing -- which is
+    the failure mode nobody notices.
+    """
+    a, b = a.strip().lower(), b.strip().lower()
+    return bool(a) and (a == b or a.split(":")[0] == b.split(":")[0])
+
 
 @dataclass
 class ModelInfo:
@@ -342,8 +393,10 @@ class OllamaClient:
             ))
         return out
 
-    async def warm(self, model: str = "", num_ctx: int = 0) -> bool:
-        """Ask the server to load the model, without generating anything.
+    async def warm(self, model: str = "", num_ctx: int = 0,
+                   messages: list[dict] | None = None,
+                   tools: list[dict] | None = None) -> bool:
+        """Ask the server to load the model, and read the prompt into it.
 
         An empty message list is Ollama's documented way to say "load this
         and hold it": the model is read from disk and the KV cache is
@@ -356,7 +409,24 @@ class OllamaClient:
         behind a status line that said "thinking", which is not what was
         happening.
 
-        The options must be the ones every later request will carry.
+        Given ``messages``, it goes one step further and has the model
+        *read* them, one token of generation to make sure the prompt is
+        actually evaluated. That matters because loading the weights is
+        only half the wait. wynxo's system prompt and tool schemas come to
+        somewhere north of five thousand tokens, and a local model reads
+        every one of them before it writes a word -- where `ollama run`
+        sends your message and nothing else. Ollama keeps the KV cache
+        between requests and reuses whatever prefix matches, so a first
+        question that arrives after this shares all of it and pays only for
+        itself.
+
+        The prompt has to be the one the first real request will send, or
+        the prefix does not match and the work is thrown away. Nothing here
+        can tell whether the server honoured it; the cost of being wrong is
+        one request's worth of arithmetic done early, in the background,
+        while somebody types.
+
+        The options must be the ones every later request will carry too.
         Loading under a different num_ctx would be worse than not loading at
         all: Ollama would evict and reload the model on the first real
         question, so the wait would be paid twice.
@@ -365,12 +435,21 @@ class OllamaClient:
         a machine with no room -- each is the first request's problem to
         report properly, and none of them is a reason to fail a start-up.
         """
-        payload = {
+        payload: dict[str, Any] = {
             "model": model or self.config.model,
-            "messages": [],
+            "messages": messages or [],
             "keep_alive": self.config.keep_alive,
             "options": {"num_ctx": num_ctx or self.config.num_ctx},
         }
+        if messages:
+            # One token, discarded. Zero is accepted by some builds as "load
+            # only" and by others as "evaluate nothing", and a warm that
+            # quietly skipped the prefill would look exactly like one that
+            # worked.
+            payload["options"]["num_predict"] = 1
+            payload["stream"] = False
+            if tools:
+                payload["tools"] = tools
         try:
             r = await self._client.post("/api/chat", json=payload,
                                         timeout=self.config.request_timeout)
@@ -683,8 +762,17 @@ class OpenAIClient:
         """
         return []
 
-    async def warm(self, model: str = "", num_ctx: int = 0) -> bool:
-        """Nothing to warm. Loading is the server's business, not ours."""
+    async def warm(self, model: str = "", num_ctx: int = 0,
+                   messages: list[dict] | None = None,
+                   tools: list[dict] | None = None) -> bool:
+        """Nothing to warm. Loading is the server's business, not ours.
+
+        The arguments are the Ollama client's and are ignored, but they
+        have to be accepted: start-up calls this without knowing which
+        provider it is holding, and a signature that does not match is a
+        TypeError on the first line of every session against an
+        OpenAI-compatible server.
+        """
         return False
 
     async def ping(self) -> str:

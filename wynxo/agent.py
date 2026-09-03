@@ -496,6 +496,9 @@ class Agent:
         # session so it can persist under the same id, and a restarted
         # session keeps its undo history.
         self.checkpoints = Checkpoints(session_id=self.session.session_id)
+        self._streaming_shown: list[str] | None = None
+        """What the current streaming call has put on screen, while one is
+        running. Read by run() when a turn is cancelled."""
         self.refresh_system_prompt()
 
     # -- the conversation --------------------------------------------------
@@ -588,11 +591,21 @@ class Agent:
         num_predict: int | None = None,
         silent: bool = False,
     ) -> ParsedTurn:
-        """``silent`` suppresses the thinking channel as well as content.
+        """``silent`` suppresses the stage line and the truncation warning.
 
-        For infrastructure calls -- the intent router, compaction -- whose
-        reasoning is not part of the user's conversation and should not land
-        in the thinking record they can open with Ctrl-O.
+        For infrastructure calls -- the intent router, compaction -- which
+        are not part of the user's conversation at all, and whose progress
+        should not be narrated as if they were.
+
+        ``stream_content`` governs the whole live view of a call, reasoning
+        included. A pass whose answer is deliberately withheld -- planning,
+        verification, a safety-sensitive turn held back until it can be
+        checked -- must not narrate its reasoning either. Reasoning streamed
+        from a call whose conclusion is hidden is at best a second
+        "thinking" block per turn with no answer under it, and at worst the
+        hole in the boundary the withholding exists to close: the model's
+        working is on the terminal long before anything decides whether the
+        answer may be shown.
         """
         content_parts: list[str] = []
         thinking_parts: list[str] = []
@@ -631,15 +644,29 @@ class Agent:
             stream=self.config.stream,
         )
 
+        # Ctrl-C can land anywhere in the loop below. Whatever has reached
+        # the screen by then is read out of this by run()'s cancellation
+        # handler, so an interrupted answer goes into the conversation
+        # instead of being denied by it. The filtered text, not the raw
+        # chunks: what the session records has to be what the user saw, and
+        # the raw stream still has the reasoning and any half-written tool
+        # call in it.
+        shown: list[str] = []
+        self._streaming_shown = shown if stream_content else None
+
         async for chunk in stream:
             if chunk.thinking:
+                # Kept in thinking_parts either way: the record is complete
+                # even when the live view of it is not, so a summary or a
+                # log written afterwards still has the whole turn.
                 thinking_parts.append(chunk.thinking)
-                if not silent:
+                if not silent and stream_content:
                     await self.cb.on_thinking(chunk.thinking)
             if chunk.content:
                 content_parts.append(chunk.content)
                 if stream_content:
                     if visible := live_filter.feed(chunk.content):
+                        shown.append(visible)
                         await self.cb.on_content(visible)
                     # A file being written is worth watching. Without this the
                     # screen shows nothing at all between "the model started a
@@ -668,6 +695,9 @@ class Agent:
                     chunk.prompt_tokens, chunk.completion_tokens, chunk.total_duration_ns
                 )
 
+        # The stream ended on its own, so there is nothing half-said to
+        # rescue: parse_turn below produces the real answer.
+        self._streaming_shown = None
         if stream_content and (trailing := live_filter.finish()):
             await self.cb.on_content(trailing)
         if truncated and not silent:
@@ -1915,6 +1945,13 @@ class Agent:
             )
         except asyncio.CancelledError:
             self.task_state.transition(TaskState.CANCELLED)
+            # Half an answer is still something the model said, and it is
+            # still on screen. Without this the conversation had no record
+            # of it: the next question went to a model that would deny
+            # having written the words the user could still see above the
+            # prompt, and "carry on" had nothing to carry on from.
+            if partial := "".join(self._streaming_shown or ()).strip():
+                self.session.add_assistant(partial)
             # The turn is over, but the conversation has to survive it. A
             # cancellation between announcing tool calls and running them
             # leaves those calls unanswered, and the session is kept for the
