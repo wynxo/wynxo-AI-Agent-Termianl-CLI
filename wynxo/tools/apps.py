@@ -226,6 +226,12 @@ def terminal_argv(entry: AppEntry, command: str) -> list[str] | None:
     be handed a command it silently ignores, and "I opened konsole and ran
     your script" would be a sentence about something that did not happen.
     """
+    if not command.strip():
+        # "bash -c '; exec bash'" is a syntax error, and a terminal that
+        # opens and immediately dies is a worse answer than a refusal. The
+        # caller filters this too; a public function should not depend on
+        # its caller for that.
+        return None
     for candidate in (entry.path.stem, entry.name):
         key = str(candidate).strip().lower()
         if key not in TERMINALS:

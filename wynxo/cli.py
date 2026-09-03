@@ -1167,6 +1167,18 @@ class TerminalCallbacks(Callbacks):
         being written was headed "(unnamed)" until the call finished.
         """
         async with self._status_lock:
+            if (name, path) != (self._code_tool, self._code_path) \
+                    and (self._code_tool or self._code_path):
+                # A second call in the same message. Left alone, its
+                # argument was appended to the first one's block: two
+                # write_file calls in one turn drew a.py holding a.py's
+                # contents followed by b.py's -- a file that will never
+                # exist, shown being written. The half-drawn block is
+                # dropped rather than committed, because the call it
+                # belonged to has not run: it gets its own block when it
+                # does.
+                self._end_code()
+                self.card = None
             self._code_tool = name
             self._code_path = path or self._code_path
             if path and self.card is not None and self.card.live \

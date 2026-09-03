@@ -46,7 +46,7 @@ from .intent import Intent
 from .provider import OllamaClient, ProviderError
 from .model import ModelBackend, OllamaBackend
 from .scope import Boundary, Mode
-from .session import Session
+from .session import Session, estimate_tokens
 from . import testing
 from .secrets import Shield
 from .tools import Registry, build_registry
@@ -537,10 +537,46 @@ class Agent:
         """
         self._session = session
         session.autosave = True
+        # And it starts counting what rides beside it. A fresh Session has
+        # no idea the tool schemas exist, so a /clear or a /resume would
+        # otherwise go back to under-counting the window by the whole of
+        # them until something happened to rebuild the prompt.
+        session.overhead = self._tool_overhead()
 
     # -- setup -------------------------------------------------------------
 
+    def _tool_overhead(self) -> int:
+        """Tokens the tool schemas cost, when they are sent as schemas.
+
+        Zero on the prompted path: there the tools are described inside the
+        system prompt, which is already counted, and adding them again
+        would compact a conversation that has room.
+        """
+        # getattr, because the session setter reaches here and a session
+        # can be assigned to an agent that is not finished being built --
+        # /resume does it to a live one, but a bare Agent.__new__ has
+        # neither attribute yet. Nothing to count then, and
+        # refresh_system_prompt sets it properly once there is.
+        if not getattr(self, "native_tools", False):
+            return 0
+        registry = getattr(self, "tools", None)
+        if registry is None:
+            return 0
+        try:
+            return estimate_tokens(json.dumps(registry.ollama_schemas(),
+                                              default=str))
+        except Exception:                                   # noqa: BLE001
+            return 0
+
     def refresh_system_prompt(self) -> None:
+        """Rebuild the prompt, and re-count what rides beside it.
+
+        Both together, because they change together: the schemas are sent
+        when native_tools is on and described in the prompt when it is off,
+        so counting one without the other is wrong in whichever direction
+        the setting happens to be.
+        """
+        self.session.overhead = self._tool_overhead()
         self.session.system_prompt = build_system_prompt(
             self.workspace,
             self.policy,

@@ -82,6 +82,23 @@ class Session:
     superseded_chars: int = 0
     """How much stale tool output has been collapsed, for /stats."""
 
+    overhead: int = 0
+    """Tokens the request carries that are neither a message nor the system
+    prompt: the tool schemas.
+
+    Native tool calling sends the schemas in their own wire field, not in
+    the prompt, so they were invisible to every count here -- and they are
+    not small. Seventeen tools is around 3,900 tokens, which at
+    num_ctx=8192 is half the window that nothing was accounting for:
+    wynxo reported 52% used while actually sending 8,301 tokens into 8,192,
+    and Ollama truncates the front of an overflowing prompt, which is the
+    system prompt. The model quietly loses its instructions and its tools,
+    and nothing anywhere says so.
+
+    Zero on the prompted path, where the tools are described in the system
+    prompt and therefore already counted.
+    """
+
     autosave: bool = False
     """Whether every message is written to disk as it is recorded.
 
@@ -240,8 +257,8 @@ class Session:
     # -- size --------------------------------------------------------------
 
     def token_estimate(self) -> int:
-        base = estimate_tokens(self.system_prompt)
-        return base + sum(message_tokens(m) for m in self.messages)
+        return (estimate_tokens(self.system_prompt) + self.overhead
+                + sum(message_tokens(m) for m in self.messages))
 
     def should_compact(self, budget: int, num_ctx: int) -> bool:
         limit = min([n for n in (budget, num_ctx) if n and n > 0] or [8000])
@@ -251,8 +268,16 @@ class Session:
         if not older:
             return False
         removable = sum(message_tokens(m) for m in older)
-        return removable > max(MIN_WORTH_COMPACTING,
-                               self.token_estimate() * 0.15)
+        # Against the conversation, not against everything. "Is the older
+        # half worth summarising" is a question about the messages; the
+        # system prompt and the tool schemas are neither summarised nor
+        # reclaimed, so counting them here sets the bar with the weight of
+        # the one thing compaction cannot move. At a small window, where
+        # that fixed part is most of the request, it made the bar
+        # unreachable: over the window every turn and never compacting,
+        # because the reason it was over was also the reason it would not.
+        conversation = sum(message_tokens(m) for m in self.messages)
+        return removable > max(MIN_WORTH_COMPACTING, conversation * 0.15)
 
     # -- compaction --------------------------------------------------------
 
