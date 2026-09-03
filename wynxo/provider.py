@@ -83,6 +83,29 @@ def same_model(a: str, b: str) -> bool:
     return bool(a) and a == b
 
 
+def check_context(info, configured: int | Config | None = None) -> str | None:
+    """Return a human-readable context warning, or ``None`` when it is safe.
+
+    This small compatibility helper is intentionally synchronous so the CLI
+    can perform the check before entering its async doctor/REPL flow.
+    ``configured`` may be a raw token count or a Config instance.
+    """
+    if isinstance(configured, Config):
+        configured = configured.num_ctx
+    if configured is None:
+        configured = getattr(info, "num_ctx", 0) or 0
+    try:
+        configured = int(configured)
+    except (TypeError, ValueError):
+        return "context window is not a valid integer"
+    if configured < MIN_USABLE_CONTEXT:
+        return f"num_ctx {configured} is too small for agent work (minimum {MIN_USABLE_CONTEXT})"
+    native = getattr(info, "context_length", 0) if info is not None else 0
+    if native and configured > native:
+        return f"num_ctx {configured} exceeds the model's native context window of {native}"
+    return None
+
+
 @dataclass
 class ModelInfo:
     name: str
