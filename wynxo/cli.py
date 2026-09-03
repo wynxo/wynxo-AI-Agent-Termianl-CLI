@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import inspect
 import os
 import select
 import signal
 import stat
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -343,68 +345,125 @@ def _escape(text: str) -> str:
     return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
-COMMANDS = {
-    "/help": "show this",
-    "/effort": "change effort level (low|medium|high|xhigh|max|ultra)",
-    "/model": "switch model, or list what the server has",
-    "/endpoint": "list | use <name> | add <url> | test -- where Ollama serves",
-    "/ctx": "show or set the context window (num_ctx)",
-    "/tools": "list the tools the agent can call",
-    "/apps": "list the applications discovered on this machine (add refresh to rescan)",
-    "/pet": "the companion: on | off | name <x> | voice <x> | show <mood>",
-    "/mommy": "mommy-style talking: on | off (no argument toggles)",
-    "/animate": "preview the animations: list, or <name> for a scene",
-    "/todo": "show the current plan",
-    "/queue": "what you typed while it was working: show | run | clear",
-    "/dictate": "record one spoken message onto the prompt (Ctrl-R)",
-    "/theme": "colour palette: purple | sakura | midnight | ember | plain | minimal",
-    "/secrets": "credential protection: on | off | allow <path>",
-    "/speak": "read answers out loud: on | off | test | engine <name>",
-    "/talker": "small model that does the talking: <model> | off",
-    "/log": "where this session is being recorded",
-    "/mode": "plan | manual | auto | yolo -- how much it asks first",
-    "/scope": "folder | repo | machine, or a path to work in",
-    "/cd": "work in another directory",
-    "/repo": "clone a GitHub repo and work in it",
-    "/undo": "revert the last file change",
-    "/copy": "copy the conversation to the clipboard (/copy last = last answer)",
-    "/memory": "show, add to, or forget long-term memory",
-    "/thinking": "show or hide the model's reasoning",
-    "/plan": "show the current plan",
-    "/new": "start a new chat: fresh history, screen and log",
-    "/resume": "pick up an earlier conversation, from this project or another",
-    "/gh": "work on a GitHub repo in the cloud: status | open | ls | cat | edit | branch | pr | close",
-    "/commit": "write a commit message from the staged diff, then commit",
-    "/review": "ask the model to review the working-tree changes",
-    "/diff": "show uncommitted changes (or /diff staged)",
-    "/test": "run the project's detected test command",
-    "/clear": "start a fresh conversation",
-    "/compact": "summarise the conversation to reclaim context",
-    "/stats": "tokens, speed, context use",
-    "/session": "this conversation; `list` for the others, `<id>` to pick one up",
-    "/doctor": "check the server and model for problems",
-    "/yolo": "stop asking permission for this session",
-    "/sessions": "the conversations you can pick up (same as /session list)",
-    "/init": "write a WYNXO.md describing this project",
-    "/map": "the project layout the model is given, or rebuild it",
-    "/pull": "download a model from Ollama, then switch to it",
-    "/quit": "exit",
-}
+@dataclass(frozen=True)
+class Command:
+    """One slash command: its name, what it does, and what runs it.
 
+    All three in one row, because keeping them in three places is how the
+    dispatcher and the help drifted apart. /status had a branch no input
+    could reach for months -- the resolver did not know the name, so the
+    code handling it was dead and nothing said so. Every abbreviation in the
+    alias table was dead for the same shape of reason. A row cannot be
+    half-present: `test_command_table` walks this list and checks each
+    handler exists, and the dispatcher looks a command up here rather than
+    comparing it against fifty string literals.
+    """
+
+    name: str
+    does: str
+    """What /help prints. A sentence, lower case, no full stop."""
+    handler: str
+    """The Repl method that runs it. Named rather than referenced because
+    these are unbound at import time; the dispatcher resolves it on self,
+    awaits it if it is a coroutine, and treats anything but False as
+    "stay"."""
+    values: tuple[str, ...] = ()
+    """What may follow the space, for completion. Empty means the argument
+    is free text -- a path, a model tag, a number."""
+
+
+COMMAND_LIST: tuple[Command, ...] = (
+    Command("/help", "show this", "cmd_help"),
+    Command("/effort", "change effort level (low|medium|high|xhigh|max|ultra)",
+            "cmd_effort",
+            ("low", "medium", "high", "xhigh", "max", "ultra")),
+    Command("/model", "switch model, or list what the server has", "cmd_model"),
+    Command("/endpoint",
+            "list | use <name> | add <url> | test -- where Ollama serves",
+            "cmd_endpoint"),
+    Command("/ctx", "show or set the context window (num_ctx)", "cmd_ctx"),
+    Command("/tools", "list the tools the agent can call", "cmd_tools"),
+    Command("/apps",
+            "list the applications discovered on this machine "
+            "(add refresh to rescan)", "cmd_apps"),
+    Command("/pet", "the companion: on | off | name <x> | voice <x> | show <mood>",
+            "cmd_pet", ("on", "off", "still", "name", "voice")),
+    Command("/mommy", "mommy-style talking: on | off (no argument toggles)",
+            "cmd_mommy", ("on", "off")),
+    Command("/animate", "preview the animations: list, or <name> for a scene",
+            "cmd_animate"),
+    Command("/todo", "show the current plan", "cmd_todo"),
+    Command("/queue", "what you typed while it was working: show | run | clear",
+            "cmd_queue"),
+    Command("/dictate", "record one spoken message onto the prompt (Ctrl-R)",
+            "cmd_dictate"),
+    Command("/theme",
+            "colour palette: purple | sakura | midnight | ember | plain | minimal",
+            "cmd_theme",
+            ("purple", "sakura", "kawaii", "midnight", "ember", "catboy",
+             "plain", "minimal")),
+    Command("/secrets", "credential protection: on | off | allow <path>",
+            "cmd_secrets"),
+    Command("/speak", "read answers out loud: on | off | test | engine <name>",
+            "cmd_speak"),
+    Command("/talker", "small model that does the talking: <model> | off",
+            "cmd_talker"),
+    Command("/log", "where this session is being recorded", "cmd_log",
+            ("tail", "list", "off")),
+    Command("/mode", "plan | manual | auto | yolo -- how much it asks first",
+            "cmd_mode", ("plan", "manual", "auto", "yolo")),
+    Command("/scope", "folder | repo | machine, or a path to work in",
+            "cmd_scope", ("folder", "repo", "machine")),
+    Command("/cd", "work in another directory", "cmd_cd"),
+    Command("/repo", "clone a GitHub repo and work in it", "cmd_repo"),
+    Command("/undo", "revert the last file change", "cmd_undo"),
+    Command("/copy", "copy the conversation to the clipboard (/copy last = "
+                     "last answer)", "cmd_copy", ("last",)),
+    Command("/memory", "show, add to, or forget long-term memory", "cmd_memory"),
+    Command("/thinking", "show or hide the model's reasoning", "cmd_thinking"),
+    Command("/plan", "show the current plan", "cmd_plan"),
+    Command("/new", "start a new chat: fresh history, screen and log", "cmd_new"),
+    Command("/resume",
+            "pick up an earlier conversation, from this project or another",
+            "cmd_resume"),
+    Command("/gh",
+            "work on a GitHub repo in the cloud: status | open | ls | cat | "
+            "edit | branch | pr | close", "cmd_gh",
+            ("status", "login", "open", "ls", "cat", "edit", "branch", "pr",
+             "close")),
+    Command("/commit", "write a commit message from the staged diff, then commit",
+            "cmd_commit"),
+    Command("/review", "ask the model to review the working-tree changes",
+            "cmd_review"),
+    Command("/diff", "show uncommitted changes (or /diff staged)", "cmd_diff",
+            ("staged",)),
+    Command("/test", "run the project's detected test command", "cmd_test"),
+    Command("/clear", "start a fresh conversation", "cmd_clear"),
+    Command("/compact", "summarise the conversation to reclaim context",
+            "cmd_compact"),
+    Command("/stats", "tokens, speed, context use", "cmd_stats"),
+    Command("/session",
+            "this conversation; `list` for the others, `<id>` to pick one up",
+            "cmd_session", ("list", "resume")),
+    Command("/doctor", "check the server and model for problems", "cmd_doctor"),
+    Command("/yolo", "stop asking permission for this session", "cmd_yolo"),
+    Command("/sessions", "the conversations you can pick up (same as /session "
+                         "list)", "cmd_sessions"),
+    Command("/init", "write a WYNXO.md describing this project", "cmd_init"),
+    Command("/map", "the project layout the model is given, or rebuild it",
+            "cmd_map"),
+    Command("/pull", "download a model from Ollama, then switch to it", "cmd_pull"),
+    Command("/quit", "exit", "cmd_quit"),
+)
+
+REGISTRY: dict[str, Command] = {c.name: c for c in COMMAND_LIST}
+
+COMMANDS: dict[str, str] = {c.name: c.does for c in COMMAND_LIST}
+"""Name to description. Derived, so it cannot describe a command that does
+not exist or miss one that does -- which it did, both ways."""
 
 _SUBCOMMAND_VALUES: dict[str, tuple[str, ...]] = {
-    "/effort": ("low", "medium", "high", "xhigh", "max", "ultra"),
-    "/mode": ("plan", "manual", "auto", "yolo"),
-    "/scope": ("folder", "repo", "machine"),
-    "/theme": ("purple", "sakura", "kawaii", "midnight", "ember",
-                "catboy", "plain", "minimal"),
-    "/log": ("tail", "list", "off"),
-    "/pet": ("on", "off", "still", "name", "voice"),
-    "/mommy": ("on", "off"),
-    "/copy": ("last",),
-    "/gh": ("status", "login", "open", "ls", "cat", "edit",
-             "branch", "pr", "close"),
-}
+    c.name: c.values for c in COMMAND_LIST if c.values}
 """Values offered after a slash command's space, e.g. ``/effort h``."""
 
 
@@ -2478,214 +2537,152 @@ class Repl:
         return None
 
     async def command(self, text: str) -> bool:
+        """Run one slash command. False means "leave".
+
+        A lookup, not a chain of comparisons. It was fifty ``if name ==``
+        branches sitting beside a separate COMMANDS dict describing them,
+        and the two drifted exactly as often as you would expect: /status
+        had a branch no input could reach for months because the resolver
+        did not know the name, and every abbreviation in the alias table was
+        dead because the guard in front of the chain skipped resolution for
+        aliases. Both are unrepresentable now -- a command is one row that
+        carries its own description and its own handler, and a test walks
+        the table.
+        """
         parts = text.split()
         name, args = parts[0].lower(), parts[1:]
 
         expanded = self._expand(name)
         if expanded is None:
             return True
-        name = expanded
 
-        if name in ("/quit", "/exit", "/q"):
-            return False
-
-        if name == "/help":
-            self.ui.table(
-                ["command", "what it does"],
-                [(c, d) for c, d in COMMANDS.items()],
-                title="commands",
-            )
-            self.ui.table(
-                ["key", "does"],
-                [("Ctrl-O", "show or hide the model's thinking (works mid-answer)"),
-                 ("Ctrl-T", "full tool output vs. one-line summary (mid-answer)"),
-                 ("Ctrl-D", "expand or collapse the edit diff (during or after)"),
-                 ("Ctrl-R", "speak a message: record, transcribe, review in the composer"),
-                 ("Ctrl-E", "step effort up"),
-                 ("Ctrl-B", "step effort down"),
-                 ("Ctrl-C", "interrupt the current turn, keep the conversation"),
-                 ("Alt-Enter", "newline instead of submitting"),
-                 ("Up / Down", "history"),
-                 ("Mouse wheel", "scroll back -- your terminal's own scrollback"),
-                 ("Drag", "select text; copy the way you always do"),
-                 ("/copy", "the whole conversation, or /copy last, to the clipboard")],
-                title="keys",
-            )
+        entry = REGISTRY.get(expanded)
+        if entry is None:
+            # Unreachable while the table is the source of both the
+            # resolver's vocabulary and this lookup, which is the point --
+            # but a wrong answer here is a command that silently does
+            # nothing, so it says so instead.
+            self.ui.error(f"{expanded} has no handler")
             return True
 
-        if name == "/effort":
-            return await self.cmd_effort(args)
-        if name == "/model":
-            return await self.cmd_model(args)
-        if name == "/pull":
-            return await self.cmd_pull(args)
-        if name == "/endpoint":
-            return await self.cmd_endpoint(args)
-        if name == "/ctx":
-            return await self.cmd_ctx(args)
+        outcome = getattr(self, entry.handler)(args)
+        if inspect.isawaitable(outcome):
+            outcome = await outcome
+        return False if outcome is False else True
 
-        if name == "/tools":
-            self.ui.table(
-                ["tool", "writes?", "what it does"],
-                # "writes", not "yes": the heading is three rows up by the
-                # time you reach the bottom of the list, and a bare "yes"
-                # under nothing is not an answer. And the description is
-                # not pre-cut here -- it used to be sliced at seventy
-                # characters, mid-word, before the renderer ever saw it.
-                [(t.signature(), "writes" if t.mutating else "",
-                  _first_sentence(t.description))
-                 for t in self.agent.tools],
-                title=f"{len(self.agent.tools)} tools"
-                + ("" if self.agent.native_tools else "  (Hermes prompted mode)"),
-            )
-            # Every schema here is sent with every request, so a tool that
-            # cannot work is held back rather than offered. Said out loud:
-            # "wynxo cannot read GitHub" is a confusing thing to learn from
-            # the model claiming it has no such tool.
-            if (withheld := getattr(self.agent.tools, "withheld", None)):
-                self.ui.table(
-                    ["", ""],
-                    sorted(withheld.items()),
-                    title=f"{len(withheld)} held back on this machine",
-                )
-                self.ui.hint("held-back tools cost nothing and are offered "
-                             "again once they can work")
-            return True
+    # -- the commands ------------------------------------------------------
 
-        if name == "/apps":
-            return self.cmd_apps(args)
+    def cmd_quit(self, args: list[str]) -> bool:
+        return False
 
-        if name == "/todo":
-            return await self.cmd_todo(args)
-
-        if name == "/queue":
-            return await self.cmd_queue(args)
-
-        if name == "/dictate":
-            self.start_dictation()
-            return True
-
-        if name == "/thinking":
-            return await self.cmd_thinking(args)
-
-        if name == "/plan":
-            todo = self.agent.tools.get("todo_write")
-            rendered = todo.render() if todo and hasattr(todo, "render") else ""
-            self.ui.todos(rendered) if rendered else self.ui.info("no plan yet")
-            return True
-
-        if name == "/clear":
-            self.agent.session = Session(workspace=self.workspace)
-            self._leave_conversation()
-            self.agent.refresh_system_prompt()
-            self.ui.info("conversation cleared")
-            return True
-
-        if name == "/new":
-            return self.cmd_new()
-
-        if name == "/compact":
-            before = self.agent.session.token_estimate()
-            with self.ui.status("compacting..."):
-                await self.agent._compact()
-            after = self.agent.session.token_estimate()
-            self.ui.success(f"{before} -> {after} tokens")
-            return True
-
-        if name in ("/status", "/session"):
-            return await self.cmd_session(args)
-
-        if name == "/stats":
-            return self.cmd_stats()
-
-        if name == "/doctor":
-            from .doctor import Doctor
-            await Doctor(self.client, self.config, self.ui,
-                         workspace=self.workspace).run()
-            return True
-
-        if name == "/mode":
-            return await self.cmd_mode(args)
-        if name == "/scope":
-            return await self.cmd_scope(args)
-        if name == "/cd":
-            return self.cmd_cd(args)
-        if name == "/repo":
-            return await self.cmd_repo(args)
-        if name == "/undo":
-            return self.cmd_undo(args)
-        if name == "/gh":
-            return await self.cmd_gh(args)
-        if name == "/copy":
-            return self.cmd_copy(args)
-        if name == "/memory":
-            return self.cmd_memory(args)
-
-        if name == "/pet":
-            return await self.cmd_pet(args)
-
-        if name == "/mommy":
-            return self.cmd_mommy(args)
-
-        if name == "/animate":
-            return await self.cmd_animate(args)
-
-        if name == "/theme":
-            return await self.cmd_theme(args)
-
-        if name == "/secrets":
-            return await self.cmd_secrets(args)
-
-        if name == "/speak":
-            return await self.cmd_speak(args)
-
-        if name == "/talker":
-            return await self.cmd_talker(args)
-
-        if name == "/log":
-            return self.cmd_log(args)
-
-        if name == "/yolo":
-            self.agent.permissions.yolo = not self.agent.permissions.yolo
-            if self.agent.permissions.yolo:
-                self.ui.warn("Permission prompts off. The agent can write files and run commands freely.")
-            else:
-                self.ui.info("Permission prompts back on.")
-            return True
-
-        if name == "/resume":
-            return await self.cmd_resume(args)
-
-        if name == "/commit":
-            return await self.cmd_commit(args)
-
-        if name == "/review":
-            return await self.cmd_review(args)
-
-        if name == "/diff":
-            return self.cmd_diff(args)
-
-        if name == "/test":
-            return await self.cmd_test(args)
-
-        if name == "/map":
-            return self.cmd_map(args)
-
-        if name == "/sessions":
-            return await self.cmd_session(["list", *args])
-
-        if name == "/init":
-            await self.turn(
-                "Look at this project -- its layout, build files, tests, and "
-                "conventions -- then write a WYNXO.md at the root that tells a "
-                "new agent what it needs to know: what the project is, how to "
-                "build and test it, and the conventions to follow. Be concrete "
-                "and brief. No filler."
-            )
-            return True
-
-        self.ui.warn(f"unknown command {name}. /help for the list.")
+    def cmd_help(self, args: list[str]) -> bool:
+        self.ui.table(
+            ["command", "what it does"],
+            [(c.name, c.does) for c in COMMAND_LIST],
+            title="commands",
+        )
+        self.ui.table(
+            ["key", "does"],
+            [("Ctrl-O", "show or hide the model's thinking (works mid-answer)"),
+             ("Ctrl-T", "full tool output vs. one-line summary (mid-answer)"),
+             ("Ctrl-D", "expand or collapse the edit diff (during or after)"),
+             ("Ctrl-R", "speak a message: record, transcribe, review in the composer"),
+             ("Ctrl-E", "step effort up"),
+             ("Ctrl-B", "step effort down"),
+             ("Ctrl-C", "interrupt the current turn, keep the conversation"),
+             ("Alt-Enter", "newline instead of submitting"),
+             ("Up / Down", "history"),
+             ("Mouse wheel", "scroll back -- your terminal's own scrollback"),
+             ("Drag", "select text; copy the way you always do"),
+             ("/copy", "the whole conversation, or /copy last, to the clipboard")],
+            title="keys",
+        )
         return True
+
+    def cmd_tools(self, args: list[str]) -> bool:
+        self.ui.table(
+            ["tool", "writes?", "what it does"],
+            # "writes", not "yes": the heading is three rows up by the time
+            # you reach the bottom of the list, and a bare "yes" under
+            # nothing is not an answer. And the description is not pre-cut
+            # here -- it used to be sliced at seventy characters, mid-word,
+            # before the renderer ever saw it.
+            [(t.signature(), "writes" if t.mutating else "",
+              _first_sentence(t.description))
+             for t in self.agent.tools],
+            title=f"{len(self.agent.tools)} tools"
+            + ("" if self.agent.native_tools else "  (Hermes prompted mode)"),
+        )
+        # Every schema here is sent with every request, so a tool that
+        # cannot work is held back rather than offered. Said out loud:
+        # "wynxo cannot read GitHub" is a confusing thing to learn from the
+        # model claiming it has no such tool.
+        if (withheld := getattr(self.agent.tools, "withheld", None)):
+            self.ui.table(
+                ["", ""],
+                sorted(withheld.items()),
+                title=f"{len(withheld)} held back on this machine",
+            )
+            self.ui.hint("held-back tools cost nothing and are offered "
+                         "again once they can work")
+        return True
+
+    def cmd_plan(self, args: list[str]) -> bool:
+        todo = self.agent.tools.get("todo_write")
+        rendered = todo.render() if todo and hasattr(todo, "render") else ""
+        if rendered:
+            self.ui.todos(rendered)
+        else:
+            self.ui.info("no plan yet")
+        return True
+
+    def cmd_clear(self, args: list[str]) -> bool:
+        self.agent.session = Session(workspace=self.workspace)
+        self._leave_conversation()
+        self.agent.refresh_system_prompt()
+        self.ui.info("conversation cleared")
+        return True
+
+    async def cmd_compact(self, args: list[str]) -> bool:
+        before = self.agent.session.token_estimate()
+        with self.ui.status("compacting..."):
+            await self.agent._compact()
+        after = self.agent.session.token_estimate()
+        self.ui.success(f"{before:,} -> {after:,} tokens")
+        return True
+
+    def cmd_yolo(self, args: list[str]) -> bool:
+        self.agent.permissions.yolo = not self.agent.permissions.yolo
+        if self.agent.permissions.yolo:
+            self.ui.warn("Permission prompts off. The agent can write files "
+                         "and run commands freely.")
+        else:
+            self.ui.info("Permission prompts back on.")
+        return True
+
+    async def cmd_doctor(self, args: list[str]) -> bool:
+        from .doctor import Doctor
+
+        await Doctor(self.client, self.config, self.ui,
+                     workspace=self.workspace).run()
+        return True
+
+    def cmd_dictate(self, args: list[str]) -> bool:
+        self.start_dictation()
+        return True
+
+    async def cmd_init(self, args: list[str]) -> bool:
+        await self.turn(
+            "Look at this project -- its layout, build files, tests, and "
+            "conventions -- then write a WYNXO.md at the root that tells a "
+            "new agent what it needs to know: what the project is, how to "
+            "build and test it, and the conventions to follow. Be concrete "
+            "and brief. No filler."
+        )
+        return True
+
+    async def cmd_sessions(self, args: list[str]) -> bool:
+        return await self.cmd_session(["list", *args])
 
     async def cmd_session(self, args: list[str]) -> bool:
         """Where you are, and how to get back to somewhere you were.
@@ -3084,7 +3081,7 @@ class Repl:
         if todo is not None and hasattr(todo, "items"):
             todo.items = []
 
-    def cmd_new(self) -> bool:
+    def cmd_new(self, args: list[str]) -> bool:
         """A new chat, the way opening a new tab is new.
 
         /clear empties the message list in place. This goes further: a new
@@ -4844,7 +4841,7 @@ class Repl:
             chosen = typed
         return await self.cmd_ctx([chosen])
 
-    def cmd_stats(self) -> bool:
+    def cmd_stats(self, args: list[str]) -> bool:
         usage = self.agent.session.usage
         used = self.agent.session.token_estimate()
         limit, set_by = self._context_limit()

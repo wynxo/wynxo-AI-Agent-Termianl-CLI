@@ -771,7 +771,7 @@ class TestLeavingAConversationLeavesItBehind:
         for name, source in [
             ("/new", inspect.getsource(Repl.cmd_new)),
             ("/resume", inspect.getsource(Repl._load_session)),
-            ("/clear", inspect.getsource(Repl.command)),
+            ("/clear", inspect.getsource(Repl.cmd_clear)),
         ]:
             assert "_leave_conversation()" in source, name
 
