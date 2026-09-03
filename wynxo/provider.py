@@ -60,6 +60,57 @@ class Loaded:
         """Whether the model is spread across GPU and CPU."""
         return 0 < self.size_vram < self.size
 
+    def context_that_fits(self, weights: int, num_ctx: int) -> int:
+        """Roughly the largest context window that would stay on the GPU.
+
+        This is the number that answers "why is wynxo slower than `ollama
+        run`", and it can be worked out from what the server already
+        reports rather than guessed at.
+
+        ``size`` is what the model needs in memory at the window it was
+        loaded under, and the weights do not change with the window, so
+        everything above them is the KV cache -- and the KV cache is linear
+        in the number of tokens. Divide by the window and you have the cost
+        per token; the room left on the card once the weights are there,
+        divided by that, is how many tokens would fit.
+
+        ``size_vram`` stands in for how much VRAM there is. Ollama places as
+        many layers as it can, so what it managed to place is a fair
+        estimate of the card, and an underestimate rather than an over one:
+        being told a slightly smaller window than would truly fit costs
+        some context, where the other way round costs the speed this exists
+        to recover.
+
+        Zero when the answer is not worth acting on -- an unknown weight, a
+        window that is not really the KV cache's, or a card too small for
+        the weights alone, where no window is small enough and the fix is a
+        smaller model or a tighter quantisation instead.
+        """
+        if weights <= 0 or num_ctx <= 0 or self.size <= weights:
+            return 0
+        per_token = (self.size - weights) / num_ctx
+        if per_token <= 0:
+            return 0
+        room = self.size_vram - weights
+        if room <= 0:
+            return 0
+        # Down to a round number: this is an estimate, and a recommendation
+        # of "13,417" claims a precision it does not have.
+        return int(room / per_token) // 1024 * 1024
+
+
+def same_model(a: str, b: str) -> bool:
+    """Whether two model names are the same model.
+
+    ``/api/ps`` answers with the tag the server loaded, which is not always
+    the string configured here: ``qwen3-coder:30b`` and ``qwen3-coder:latest``
+    are the same weights under two names, and a check that misses that
+    reports nothing at all rather than reporting the wrong thing -- which is
+    the failure mode nobody notices.
+    """
+    a, b = a.strip().lower(), b.strip().lower()
+    return bool(a) and (a == b or a.split(":")[0] == b.split(":")[0])
+
 
 @dataclass
 class ModelInfo:

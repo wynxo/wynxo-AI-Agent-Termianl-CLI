@@ -33,13 +33,15 @@ from . import stt_devices
 from .agent import Agent, Callbacks, Interrupted
 from .events import ToolEvent
 from .discovery import Discovery
-from .config import Config, Endpoint, data_dir, is_configured, load, normalise_url
+from .config import (Config, Endpoint, MIN_USABLE_CONTEXT, data_dir,
+                     is_configured, load, normalise_url)
 from . import companion
 from . import livediff
 from .doctor import run_doctor
 from .effort import ORDER, resolve
 from .permissions import Decision
-from .provider import ProviderError, check_context, make_client
+from .provider import (ProviderError, check_context, make_client,
+                       same_model)
 from .queue import Pending
 from .session import Session
 from .keys import KeyWatcher
@@ -1454,6 +1456,15 @@ class Repl:
                                 else "default")
         self._last_elapsed = 0.0
         self._warming: "asyncio.Future | None" = None
+        self._placement_checked = 0
+        """Attempts made to report the model's GPU placement.
+
+        Once a session once it is known: the fact does not change while a
+        model stays loaded, and a line about it every turn is noise on top
+        of a slow turn. Counted rather than a flag because the first look
+        can be too early -- a 30B still loading is not yet in /api/ps --
+        and a check that gives up on the one answer it exists to give is
+        worse than no check."""
         """The background model load started at connect. Held so it is not
         collected mid-flight, and so a turn can say what it is waiting
         behind."""
@@ -1702,6 +1713,79 @@ class Repl:
         )
         self._start_warming()
         return True
+
+    PLACEMENT_TRIES = 3
+    """Turns to keep looking before giving up on the GPU-placement check."""
+
+    async def _report_placement(self) -> None:
+        """Say, once, when the model is not entirely on the GPU.
+
+        This is the single biggest fact about local generation speed and
+        the one nothing was saying. A model that runs at forty tokens a
+        second on the GPU runs at five with a few layers pushed onto the
+        CPU, and the only symptom is that everything feels slow for no
+        stated reason -- which is exactly the shape of "wynxo is slower
+        than `ollama run`".
+
+        The cause is usually wynxo's own doing. `ollama run` uses the
+        model's default window; wynxo asks for num_ctx, which defaults to
+        32,768, and the KV cache grows with it -- so the same model on the
+        same machine can be entirely on the GPU under one and spilled
+        under the other.
+
+        Once per session, and only when it is true. A line every turn
+        would be noise, and a line on a machine with no GPU at all would be
+        wrong: nothing has gone wrong there and there is nothing to fix.
+        """
+        if self._placement_checked >= self.PLACEMENT_TRIES:
+            return
+        try:
+            loaded = await self.client.running()
+        except Exception:                                   # noqa: BLE001
+            self._placement_checked += 1
+            return          # a diagnostic must never be able to fail a turn
+        mine = next((m for m in loaded
+                     if same_model(m.name, self.config.model)), None)
+        if mine is None:
+            # Nothing definite yet: an older server with no /api/ps, or a
+            # model that had not finished loading. Counted rather than
+            # settled, so a slow first load does not silently cost the
+            # answer for the whole session -- and bounded, so an old server
+            # is not asked once a turn forever.
+            self._placement_checked += 1
+            return
+        self._placement_checked = self.PLACEMENT_TRIES
+        if not mine.split:
+            return
+        weights = 0
+        try:
+            for entry in await self.client.list_models():
+                if same_model(entry.name, self.config.model):
+                    weights = entry.size
+                    break
+        except Exception:                                   # noqa: BLE001
+            pass
+        fits = mine.context_that_fits(weights, self.config.num_ctx)
+        self.ui.console.print()
+        self.ui.warn(f"{self.config.model} is {mine.on_gpu:.0%} on the GPU; "
+                     f"the rest is running on the CPU, which is most of why "
+                     f"generation feels slow.")
+        if fits >= MIN_USABLE_CONTEXT:
+            self.ui.info(f"the KV cache grows with the context window, and "
+                         f"num_ctx is {self.config.num_ctx:,}. About "
+                         f"{fits:,} tokens would fit entirely on the GPU: "
+                         f"/ctx {fits}")
+        elif fits:
+            self.ui.info(f"only about {fits:,} tokens of context would fit "
+                         f"on the GPU, which is tight for an agent. "
+                         f"/ctx {fits} trades context for speed; a smaller "
+                         f"quantisation of {self.config.model} buys back "
+                         f"both.")
+        else:
+            self.ui.info("the weights alone do not fit on this GPU, so no "
+                         "context window is small enough. A smaller model "
+                         "or a tighter quantisation is the fix.")
+        self.ui.info("/doctor explains it in full.")
 
     def _start_warming(self) -> None:
         """Load the model while the user is typing, not after.
@@ -2064,6 +2148,14 @@ class Repl:
             # Stages are transient. Never leave a terminal-level status
             # behind after the live bar is disposed.
             self.callbacks._status_message = ""
+
+        # The model is loaded by now, whether it was warmed or the turn
+        # loaded it, so this is the first moment /api/ps has anything true
+        # to say. Reported here rather than only in /doctor: a user who has
+        # just watched a 30B crawl does not know there is a check to run,
+        # and "wynxo is slower than ollama run" is the report that reaches
+        # me instead.
+        await self._report_placement()
 
         if interrupted:
             self.ui.console.print()
