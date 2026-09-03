@@ -83,7 +83,7 @@ class TestItSaysSoWithoutBeingAsked:
     already suspect the problem to run. "wynxo is slower than ollama run" is
     the report that arrived instead."""
 
-    def _repl(self, loaded, model_size=18 * GB, num_ctx=32768):
+    def _repl(self, loaded, model_size=18 * GB, num_ctx=32768, also=()):
         from types import SimpleNamespace
 
         from wynxo.cli import Repl
@@ -98,7 +98,8 @@ class TestItSaysSoWithoutBeingAsked:
             return loaded
 
         async def list_models():
-            return [ModelInfo(name="qwen3-coder:30b", size=model_size)]
+            return [ModelInfo(name="qwen3-coder:30b", size=model_size),
+                    *(ModelInfo(name=n, size=z) for n, z in also)]
 
         repl = Repl.__new__(Repl)
         repl.ui = ui
@@ -143,12 +144,37 @@ class TestItSaysSoWithoutBeingAsked:
 
     async def test_a_card_too_small_for_the_weights_is_told_the_truth(self):
         """Recommending a smaller window there would be advice that cannot
-        work: the weights alone do not fit."""
+        work: the weights alone do not fit, whatever the window."""
         repl = self._repl([Loaded("qwen3-coder:30b",
                                   size=21 * GB, size_vram=8 * GB)])
         said = await self._said(repl)
-        assert "smaller model" in said
         assert "/ctx" not in said
+        assert "8.0 GB" in said, "say how much card there actually is"
+
+    async def test_it_names_a_model_that_would_fit(self):
+        """"A smaller model is the fix" is advice, not help: it leaves the
+        one question that matters to somebody who has just been told their
+        setup is slow. wynxo knows what is installed."""
+        repl = self._repl([Loaded("qwen3-coder:30b",
+                                  size=21 * GB, size_vram=6 * GB)],
+                          also=[("qwen2.5-coder:7b", 4 * GB),
+                                ("llama3.2:3b", 2 * GB)])
+        said = await self._said(repl)
+        assert "/model qwen2.5-coder:7b" in said, \
+            "the largest that fits is the most capable one that stays fast"
+
+    async def test_it_recommends_nothing_when_nothing_fits(self):
+        repl = self._repl([Loaded("qwen3-coder:30b",
+                                  size=21 * GB, size_vram=2 * GB)],
+                          also=[("llama3:70b", 40 * GB)])
+        assert "/model" not in await self._said(repl)
+
+    async def test_it_does_not_recommend_the_model_already_loaded(self):
+        """It is the one that does not fit. Suggesting it is the shape of a
+        check that has not understood its own answer."""
+        repl = self._repl([Loaded("qwen3-coder:30b",
+                                  size=21 * GB, size_vram=20 * GB)])
+        assert "/model qwen3-coder:30b" not in await self._said(repl)
 
     async def test_a_diagnostic_cannot_fail_a_turn(self):
         from types import SimpleNamespace
@@ -222,3 +248,115 @@ class TestALoadingModelIsNotAnAnswer:
         repl.ui.console.file = io.StringIO()
         await repl._report_placement()
         return repl.ui.console.file.getvalue()
+
+
+class TestItReadsAsOneBlock:
+    """It went out as a warn() followed by two info()s, and info() has no
+    marker -- so the warning wrapped under its own "!" at column two while
+    the explanation under it started hard against column zero. Three ragged
+    paragraphs for one fact, in the message whose whole job is to be read
+    carefully."""
+
+    async def _lines(self, width=100):
+        from types import SimpleNamespace
+
+        from wynxo.cli import Repl
+        from wynxo.provider import ModelInfo
+        from wynxo.ui import UI
+
+        ui = UI()
+        ui.console.file = io.StringIO()
+        ui.console.width = ui.width = width
+
+        async def running():
+            return [Loaded("qwen3-coder:30b", size=21 * GB, size_vram=6 * GB)]
+
+        async def list_models():
+            return [ModelInfo(name="qwen3-coder:30b", size=18 * GB),
+                    ModelInfo(name="qwen2.5-coder:7b", size=4 * GB)]
+
+        repl = Repl.__new__(Repl)
+        repl.ui = ui
+        repl._placement_checked = 0
+        repl.config = SimpleNamespace(model="qwen3-coder:30b", num_ctx=32768)
+        repl.client = SimpleNamespace(running=running, list_models=list_models)
+        await repl._report_placement()
+        return [ln for ln in ui.console.file.getvalue().splitlines() if ln.strip()]
+
+    async def test_one_marker_at_the_top_and_nothing_at_column_zero_after(self):
+        lines = await self._lines()
+        assert lines[0].startswith("!"), lines[0]
+        for line in lines[1:]:
+            assert line.startswith("  "), f"fell out of the block: {line!r}"
+
+    async def test_only_the_headline_is_marked(self):
+        lines = await self._lines()
+        assert sum(1 for ln in lines if ln.lstrip().startswith("!")) == 1
+
+    @pytest.mark.parametrize("width", [50, 62, 80, 100, 140])
+    async def test_it_holds_together_at_any_width(self, width):
+        from wynxo.ui import cell_len
+
+        lines = await self._lines(width)
+        for line in lines:
+            assert cell_len(line) <= width, (width, line)
+        for line in lines[1:]:
+            assert line.startswith("  "), (width, line)
+
+
+class TestTheDoctorAgreesWithTheLiveWarning:
+    """Two places say the same thing and must not disagree: the line at the
+    end of a slow turn, and the check you run when you go looking."""
+
+    def _doctor(self, loaded, installed, num_ctx=32768):
+        from types import SimpleNamespace
+
+        from wynxo.doctor import Doctor
+        from wynxo.ui import UI
+
+        async def running():
+            return loaded
+
+        async def list_models():
+            return installed
+
+        made = Doctor.__new__(Doctor)
+        made.ui = UI()
+        made.checks = []
+        made.config = SimpleNamespace(model="qwen3-coder:30b", num_ctx=num_ctx)
+        made.client = SimpleNamespace(running=running, list_models=list_models)
+        return made
+
+    async def test_it_does_not_recommend_a_window_that_cannot_help(self):
+        """It fell back to halving num_ctx when the weights themselves do
+        not fit -- the same instruction, offered again with no more reason,
+        for a problem no window solves."""
+        from wynxo.provider import ModelInfo
+
+        doc = self._doctor(
+            [Loaded("qwen3-coder:30b", size=21 * GB, size_vram=6 * GB)],
+            [ModelInfo(name="qwen3-coder:30b", size=18 * GB)])
+        await doc.check_memory()
+        fix = doc.checks[-1].fix
+        assert "/ctx" not in fix
+        assert "smaller model" in fix
+
+    async def test_it_names_the_same_model_the_live_warning_would(self):
+        from wynxo.provider import ModelInfo
+
+        installed = [ModelInfo(name="qwen3-coder:30b", size=18 * GB),
+                     ModelInfo(name="qwen2.5-coder:7b", size=4 * GB)]
+        doc = self._doctor(
+            [Loaded("qwen3-coder:30b", size=21 * GB, size_vram=6 * GB)],
+            installed)
+        await doc.check_memory()
+        assert "/model qwen2.5-coder:7b" in doc.checks[-1].fix
+
+    async def test_a_window_that_would_fit_is_still_offered(self):
+        from wynxo.provider import ModelInfo
+
+        doc = self._doctor(
+            [Loaded("qwen3-coder:30b", size=21 * GB, size_vram=20 * GB)],
+            [ModelInfo(name="qwen3-coder:30b", size=18 * GB)])
+        await doc.check_memory()
+        assert "/ctx 21504" in doc.checks[-1].fix

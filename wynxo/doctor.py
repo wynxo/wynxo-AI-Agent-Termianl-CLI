@@ -22,7 +22,8 @@ from enum import Enum
 
 from .config import MIN_USABLE_CONTEXT, Config
 from .parsing import parse_turn
-from .provider import OllamaClient, ProviderError, same_model
+from .provider import (OllamaClient, ProviderError, fits_on_gpu,
+                       same_model)
 from .ui import ACCENT, BAD, GOOD, MUTED, WARN, UI
 
 
@@ -330,32 +331,64 @@ class Doctor:
         # stops complaining.
         weights = await self._weights_of(self.config.model)
         fitting = mine.context_that_fits(weights, self.config.num_ctx)
-        smaller = fitting or max(4096, self.config.num_ctx // 2)
         fix = [
             "Every token is generated at the speed of the slowest part, so "
             "this is the main reason generation feels slow: a split model "
             "is typically several times slower than one that fits entirely "
             "on the GPU.",
-            f"The KV cache grows with the context window. wynxo asks for "
-            f"num_ctx={self.config.num_ctx:,}; `ollama run` uses the "
-            f"model's own default, which is usually far smaller -- that is "
-            f"the whole difference.",
-            (f"About {fitting:,} tokens of context would fit entirely on "
-             f"the GPU: try `/ctx {smaller}`, then `/doctor` again."
-             if fitting else
-             f"Try `/ctx {smaller}`, then `/doctor` again."),
         ]
-        if smaller < MIN_USABLE_CONTEXT:
+        if fitting:
             fix.append(
-                f"That is below the {MIN_USABLE_CONTEXT:,} an agent really "
-                f"wants, so expect more compaction mid-task. A smaller "
-                f"quantisation of {self.config.model} buys the window back.")
+                f"The KV cache grows with the context window. wynxo asks "
+                f"for num_ctx={self.config.num_ctx:,}; `ollama run` uses "
+                f"the model's own default, which is usually far smaller -- "
+                f"that is the whole difference.")
+            fix.append(
+                f"About {fitting:,} tokens would fit entirely on the GPU: "
+                f"try `/ctx {fitting}`, then `/doctor` again.")
+            if fitting < MIN_USABLE_CONTEXT:
+                fix.append(
+                    f"That is below the {MIN_USABLE_CONTEXT:,} an agent "
+                    f"really wants, so expect more compaction mid-task. A "
+                    f"smaller quantisation of {self.config.model} buys the "
+                    f"window back.")
+        else:
+            # No window is small enough, so recommending one is advice that
+            # cannot work. This used to fall back to halving num_ctx --
+            # which is the same instruction the user has already followed
+            # as far as it goes, offered again with no more reason.
+            fix.append(
+                f"The weights alone need more than this card has (about "
+                f"{gigabytes(mine.size_vram)} of it usable), so no context "
+                f"window is small enough. A smaller model, or a tighter "
+                f"quantisation of this one, is the only thing that helps.")
+        if (smaller := await self._smaller_model(mine.size_vram)) is not None:
+            fix.append(
+                f"{smaller.name} is already installed at "
+                f"{gigabytes(smaller.size)} and would fit whole: "
+                f"`/model {smaller.name}`.")
         self.checks.append(Check(
             "model in memory", Status.WARN,
             f"{share:.0%} on the GPU, the rest on the CPU",
             fix="\n".join(fix),
             facts=facts,
         ))
+
+    async def _smaller_model(self, vram: int):
+        """The largest installed model that would run entirely on this card.
+
+        "A smaller model is the fix" is advice, not help: it leaves the one
+        question that matters -- which one -- to somebody who has just been
+        told their setup is slow.
+        """
+        try:
+            installed = await self.client.list_models()
+        except ProviderError:
+            return None
+        for candidate in fits_on_gpu(installed, vram):
+            if not same_model(candidate.name, self.config.model):
+                return candidate
+        return None
 
     async def _weights_of(self, model: str) -> int:
         """The model's size on disk, which is what its weights cost loaded.

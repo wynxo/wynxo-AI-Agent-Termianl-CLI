@@ -561,6 +561,11 @@ def gallery_columns(width: int) -> int:
     return max(1, room // (sprite.WIDTH + len(STATE_GAP)))
 
 
+def _gigabytes(size: int) -> str:
+    """A byte count as a person would say it."""
+    return f"{size / 1e9:.1f} GB" if size else "an unknown amount"
+
+
 class TerminalCallbacks(Callbacks):
     """Wires the agent's events to the terminal."""
 
@@ -1757,35 +1762,65 @@ class Repl:
         self._placement_checked = self.PLACEMENT_TRIES
         if not mine.split:
             return
+
+        installed: list = []
         weights = 0
         try:
-            for entry in await self.client.list_models():
-                if same_model(entry.name, self.config.model):
-                    weights = entry.size
-                    break
+            installed = await self.client.list_models()
         except Exception:                                   # noqa: BLE001
             pass
+        for entry in installed:
+            if same_model(entry.name, self.config.model):
+                weights = entry.size
+                break
+
+        # One block, not three. It went out as a warn() followed by two
+        # info()s, and info() has no marker -- so the warning wrapped under
+        # its own "!" at column two while the explanation under it started
+        # hard against column zero. Three ragged paragraphs for one fact.
+        # Head and detail is the shape every other block here uses.
         fits = mine.context_that_fits(weights, self.config.num_ctx)
-        self.ui.console.print()
-        self.ui.warn(f"{self.config.model} is {mine.on_gpu:.0%} on the GPU; "
-                     f"the rest is running on the CPU, which is most of why "
-                     f"generation feels slow.")
+        vram = mine.size_vram
+        note = [f"{self.config.model} is {mine.on_gpu:.0%} on the GPU -- "
+                f"most of why generation feels slow"]
         if fits >= MIN_USABLE_CONTEXT:
-            self.ui.info(f"the KV cache grows with the context window, and "
-                         f"num_ctx is {self.config.num_ctx:,}. About "
-                         f"{fits:,} tokens would fit entirely on the GPU: "
-                         f"/ctx {fits}")
+            note.append(f"the KV cache grows with the context window, and "
+                        f"num_ctx is {self.config.num_ctx:,}. About {fits:,} "
+                        f"tokens would fit entirely on the GPU: /ctx {fits}")
         elif fits:
-            self.ui.info(f"only about {fits:,} tokens of context would fit "
-                         f"on the GPU, which is tight for an agent. "
-                         f"/ctx {fits} trades context for speed; a smaller "
-                         f"quantisation of {self.config.model} buys back "
-                         f"both.")
+            note.append(f"only about {fits:,} tokens of context would fit on "
+                        f"the GPU, which is tight for an agent: /ctx {fits} "
+                        f"trades context for speed")
         else:
-            self.ui.info("the weights alone do not fit on this GPU, so no "
-                         "context window is small enough. A smaller model "
-                         "or a tighter quantisation is the fix.")
-        self.ui.info("/doctor explains it in full.")
+            note.append(f"the weights alone need more than this card has "
+                        f"(about {_gigabytes(vram)} of it usable), so no "
+                        f"context window is small enough")
+        if (smaller := self._smaller_model(installed, vram)) is not None:
+            note.append(f"{smaller.name} is already installed at "
+                        f"{_gigabytes(smaller.size)} and would fit whole: "
+                        f"/model {smaller.name}")
+        note.append("/doctor explains it in full")
+        self.ui.console.print()
+        self.ui.warn("\n".join(note))
+
+    def _smaller_model(self, installed: list, vram: int):
+        """The largest model already on this machine that would fit the GPU.
+
+        "A smaller model is the fix" is advice, not help: it leaves the one
+        question that matters -- which one -- to somebody who has just been
+        told their setup is slow. wynxo knows what is installed and roughly
+        how much VRAM there is, so it can name one.
+
+        The largest that fits, because that is the most capable one that
+        stays fast. None when the current model already fits, or when
+        nothing installed does -- there is no honest recommendation there.
+        """
+        from .provider import fits_on_gpu
+
+        for candidate in fits_on_gpu(installed, vram):
+            if not same_model(candidate.name, self.config.model):
+                return candidate
+        return None
 
     def _start_warming(self) -> None:
         """Load the model while the user is typing, not after.

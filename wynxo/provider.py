@@ -99,6 +99,36 @@ class Loaded:
         return int(room / per_token) // 1024 * 1024
 
 
+KV_HEADROOM = 1.2
+"""Weights plus room to work in, as a multiple of the weights.
+
+A model is not just its file: it needs a KV cache on top, and one sized for
+nothing is a model that reloads itself every few turns. A fifth over the
+weights is a small but real window on a 7B, and recommending something that
+turns out not to fit after all is worse than recommending nothing.
+"""
+
+
+def fits_on_gpu(models: list["ModelInfo"], vram: int) -> list["ModelInfo"]:
+    """Installed models that would run entirely on a card this size.
+
+    Largest first, because the largest that fits is the most capable one
+    that stays fast -- which is the actual question behind "how do I use my
+    GPU more".
+
+    ``vram`` is estimated from what Ollama managed to place on the card for
+    the model it has loaded. It fills the GPU as far as it can, so that is a
+    fair reading of the card's capacity, and an underestimate rather than an
+    over one: the cost of being low is recommending a slightly smaller model
+    than necessary, where being high is recommending one that spills too.
+    """
+    if vram <= 0:
+        return []
+    out = [m for m in models if 0 < m.size * KV_HEADROOM <= vram]
+    out.sort(key=lambda m: -m.size)
+    return out
+
+
 def same_model(a: str, b: str) -> bool:
     """Whether two model names are the same model.
 
