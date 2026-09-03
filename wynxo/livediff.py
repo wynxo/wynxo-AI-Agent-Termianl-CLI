@@ -120,9 +120,15 @@ class DiffCard:
         if self._diff[:2] == (self.before, self.streamed):
             return self._diff[2]
         name = self.path or self.tool
-        lines = list(difflib.unified_diff(
+        # The ---/+++ pair names the file, and every caller has just named
+        # the file on the line above. Two rows to say it a second time, at
+        # the top of every diff -- the transcript's own diff renderer has
+        # dropped them for a long time and this one did not, so the same
+        # edit had a header when it was committed and none when it was not.
+        lines = [line for line in difflib.unified_diff(
             self.before.splitlines(), self.streamed.splitlines(),
-            fromfile=name, tofile=name, lineterm="", n=2))
+            fromfile=name, tofile=name, lineterm="", n=2)
+            if not line.startswith(("--- ", "+++ "))]
         self._diff = (self.before, self.streamed, lines)
         return lines
 
@@ -165,26 +171,35 @@ class DiffCard:
         return [fit(line, room) for line in lines[:rows - 1]] \
             + [f"... {len(lines) - rows + 1} more lines"]
 
-    def render(self, glyphs, width: int, expanded: bool = False) -> list[str]:
-        """The whole card: a framed title, the diff, and a state line."""
-        inner = max(20, min(width, 100)) - 2
-        top = f"{glyphs.tl}{glyphs.hbar}{glyphs.hbar} "
-        from rich.cells import cell_len
+    def render(self, glyphs, width: int, expanded: bool = False,
+               head: bool = True) -> list[str]:
+        """The edit as it stands: a head, then the diff behind a rule.
 
-        title = fit(self.title(glyphs), inner - 4)
-        rule = glyphs.hbar * max(0, inner - cell_len(title) - 4)
-        out = [f"{top}{title} {rule}{glyphs.tr}"]
+        Not a box. It was a full frame -- two corners, a titled top rule,
+        a closing rule -- which is the shape the rest of this design spent a
+        long time removing: a diff is already the most structured thing on
+        the screen, every line of it begins with +, - or @@, and a border
+        draws a shape the content was drawing anyway. One column of rule
+        says "quoted" for the same price the code block pays.
+
+        ``head`` is off where the caller has already printed the tool line,
+        which said the same tool and the same path one row earlier.
+        """
+        inner = max(20, min(width, 100)) - 2
+        # Trimmed to the room, like every row below it. A path can be
+        # longer than the terminal, and a head that overflows wraps to
+        # column zero where the diff's own rows are not.
+        out = [fit(self.title(glyphs), inner)] if head else []
         rows = 10_000 if expanded else MAX_LIVE_ROWS
         for line in self.body(inner, rows):
             out.append(f"{glyphs.vbar} {line}")
         if self.live:
             out.append(f"{glyphs.vbar} streaming{glyphs.ellipsis}")
-        else:
-            added, removed = self.counts()
-            out.append(f"{glyphs.vbar} +{added} -{removed}"
-                       + (f"  {self.error.splitlines()[0][:40]}"
-                          if self.error else ""))
-        out.append(f"{glyphs.bl}{glyphs.hbar * max(0, inner)}{glyphs.br}")
+        elif self.error:
+            out.append(f"{glyphs.vbar} {self.error.splitlines()[0][:60]}")
+        # No count line. Every caller prints one itself, on the tool line
+        # directly above -- so the card said "+4 -1" underneath a line that
+        # had just said "+4 -1".
         return out
 
 

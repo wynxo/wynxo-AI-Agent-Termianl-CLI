@@ -780,9 +780,7 @@ class TerminalCallbacks(Callbacks):
         self._note("Diffs: full" if self.detail_diffs else "")
         card = self.card
         if self.detail_diffs and card is not None and not card.live:
-            for line in card.render(self.ui.g, self.ui.width - 4,
-                                    expanded=True):
-                self.ui.console.print(Text(f"  {line}", style=MUTED))
+            self._commit_diff(card)
 
     OUTPUT_AFTER_SECONDS = 1.5
     """How long a command must run before its output goes to the screen.
@@ -1146,9 +1144,19 @@ class TerminalCallbacks(Callbacks):
             detail = f"+{added} -{removed}" if (added or removed) else ""
         self.ui.tool_call(card.tool, card.path or "", detail, ok=ok)
         if self.detail_diffs:
-            for line in card.render(self.ui.g, self.ui.width - 4,
-                                    expanded=True):
-                self.ui.console.print(Text(f"  {line}", style=MUTED))
+            self._commit_diff(card)
+
+    def _commit_diff(self, card) -> None:
+        """Put an edit's diff into the transcript.
+
+        Through ui.diff, which is what the transcript uses for every other
+        diff. The card had its own renderer for this -- a framed box of
+        plain strings -- so the same edit was drawn one way when it was
+        committed and another when /diff showed it: no colour on the + and
+        - rows, a border nothing else in the transcript has, and a repeat
+        of the +4 -1 the tool line above had just given.
+        """
+        self.ui.diff("\n".join(card.diff_lines()))
 
     def close_card(self) -> None:
         """Close an edit left streaming, at the end of a turn.
