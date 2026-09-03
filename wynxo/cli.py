@@ -850,8 +850,11 @@ class TerminalCallbacks(Callbacks):
         if name == getattr(self, "_last_stage", ""):
             return
         self._last_stage = name
-        suffix = f" [{MUTED}]{detail}[/]" if detail else ""
-        self.ui.console.print(f"  [{ACCENT}]{self.ui.g.arrow}[/] [{MUTED}]{name}[/]{suffix}")
+        # The transcript's own shape -- head at column zero, detail under
+        # it -- rather than an arrow at column two. Piped output was the one
+        # place a stage line sat one indent in from the tool lines around
+        # it, which is the margin this design took out everywhere else.
+        self.ui.tool_call(name, detail, ok=True)
 
     async def on_tool_start(self, name: str, summary: str, event: ToolEvent | None = None) -> None:
         async with self._status_lock:
@@ -1819,7 +1822,7 @@ class Repl:
         bar.animate = self.config.animations
         bar.queued = self.pending.preview(ellipsis=self.ui.g.ellipsis)
         used = self.agent.session.token_estimate()
-        limit = self.policy.context_budget or self.config.num_ctx
+        limit, _ = self._context_limit()
         bar.context_pct = 100 * used / max(1, limit)
         if self._warming is not None and not self._warming.done():
             # The wait at the start of a session is usually not the model
@@ -2225,7 +2228,7 @@ class Repl:
         there the whole time and only its contents change.
         """
         used = self.agent.session.token_estimate()
-        limit = self.policy.context_budget or self.config.num_ctx
+        limit, _ = self._context_limit()
         pieces = []
         # What the agent is doing, first and in front of the numbers.
         bar = getattr(getattr(self, "callbacks", None), "bar", None)
@@ -2439,27 +2442,49 @@ class Repl:
 
     # -- slash commands ----------------------------------------------------
 
+    def _expand(self, name: str) -> str | None:
+        """The command a typed name means, or None once that is reported.
+
+        An exact command needs no expanding; everything else does -- and
+        "everything else" includes an alias, which is the whole point of the
+        table. The dispatcher's guard used to read ``name not in COMMANDS
+        and name not in ALIASES``, so resolution was skipped in precisely
+        the case it existed for: /mo, /m, /e, /eff, /t, /th, /mem, /sc, /st,
+        /se, /c, /co and /status all fell past every branch below and came
+        back "unknown command". Four of the eighteen worked anyway, by being
+        named a second time in a branch of their own further down, which is
+        why the table looked like it was doing something.
+        """
+        if name in COMMANDS:
+            return name
+        if (resolved := resolve_command(name)) is not None:
+            return resolved
+
+        near = suggest_commands(name)
+        if not near:
+            self.ui.warn(f"no command called {name}")
+            self.ui.hint("/help for the list")
+            return None
+        # An unfinished command and a misspelt one are different questions.
+        # "/mo could be any of these" is right; saying it of "/mdoe" claims
+        # there is a command called /mdoe.
+        unfinished = any(c.startswith(name) for c in near)
+        self.ui.warn(f"{name} could be any of these" if unfinished
+                     else f"no command called {name} -- did you mean")
+        # The list, with what each one does. Naming them without saying what
+        # they are is only half an answer when the reason you typed a prefix
+        # is that you could not remember which of them you wanted.
+        self.ui.table(["", ""], [(c, COMMANDS[c]) for c in near])
+        return None
+
     async def command(self, text: str) -> bool:
         parts = text.split()
         name, args = parts[0].lower(), parts[1:]
 
-        if name not in COMMANDS and name not in ALIASES:
-            resolved = resolve_command(name)
-            if resolved is None:
-                near = suggest_commands(name)
-                if near:
-                    # The list, with what each one does. Naming them without
-                    # saying what they are is only half an answer when the
-                    # reason you typed a prefix is that you could not
-                    # remember which of them you wanted.
-                    self.ui.warn(f"{name} could be any of these")
-                    self.ui.table(["", ""],
-                                  [(c, COMMANDS[c]) for c in near])
-                else:
-                    self.ui.warn(f"no command called {name}")
-                    self.ui.hint("/help for the list")
-                return True
-            name = resolved
+        expanded = self._expand(name)
+        if expanded is None:
+            return True
+        name = expanded
 
         if name in ("/quit", "/exit", "/q"):
             return False
@@ -2683,11 +2708,27 @@ class Repl:
 
         return self._describe_session()
 
+    def _context_limit(self) -> tuple[int, str]:
+        """The window that actually governs, and what set it.
+
+        Two numbers were on offer and both screens picked a different one:
+        /session showed num_ctx (32,768) and /stats showed the effort
+        policy's budget (16,000), for the same conversation at the same
+        moment. Neither was wrong on its own and together they were, because
+        the one that decides when to compact is the lower of the two.
+        """
+        budget = self.policy.context_budget
+        window = self.config.num_ctx
+        if budget and budget < window:
+            return budget, f"{self.policy.name} effort"
+        return window, "num_ctx"
+
     def _describe_session(self) -> bool:
         session = self.agent.session
         limit = min(self.policy.max_iterations, self.config.max_tool_iterations)
         used = session.token_estimate()
-        window = max(1, self.config.num_ctx)
+        window, set_by = self._context_limit()
+        window = max(1, window)
         self.ui.table(
             ["", ""],
             [
@@ -2695,7 +2736,7 @@ class Repl:
                 ("model", self.config.model, f"{self.policy.name} effort"),
                 ("workspace", self.ui.shorten_path(str(self.workspace))),
                 ("context", f"{used:,} of {window:,} tokens",
-                 f"{100 * used // window}% used"),
+                 f"{100 * used // window}% used", f"set by {set_by}"),
                 ("said", _plural(len(session.messages), "message"),
                  _plural(session.usage.requests, "request"),
                  _plural(session.usage.tool_calls, "tool call")),
@@ -4806,7 +4847,8 @@ class Repl:
     def cmd_stats(self) -> bool:
         usage = self.agent.session.usage
         used = self.agent.session.token_estimate()
-        limit = self.policy.context_budget or self.config.num_ctx
+        limit, set_by = self._context_limit()
+        limit = max(1, limit)
         self.ui.table(
             ["", ""],
             [
@@ -4818,7 +4860,8 @@ class Repl:
                 ("prompt tokens", str(usage.prompt_tokens)),
                 ("output tokens", str(usage.completion_tokens)),
                 ("speed", f"{usage.tokens_per_second():.1f} tok/s"),
-                ("context", f"~{used} / {limit} ({100 * used / max(1, limit):.0f}%)"),
+                ("context", f"~{used:,} of {limit:,} tokens "
+                             f"({100 * used // limit}%)", f"set by {set_by}"),
                 ("compactions", str(self.agent.session.compactions)),
                 ("reclaimed", f"~{self.agent.session.superseded_chars // 4} tokens"
                               " of superseded reads and test runs"),

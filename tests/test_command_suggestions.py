@@ -77,3 +77,71 @@ class TestTheAliasTableStaysHonest:
         """An alias that is also a command name would make the command
         unreachable, which is how /status used to be."""
         assert not set(ALIASES) & set(COMMANDS)
+
+
+class TestTheDispatcherActuallyExpands:
+    """The table existed and was never consulted.
+
+    The dispatcher's guard read ``name not in COMMANDS and name not in
+    ALIASES``, so it skipped resolution in precisely the case the table
+    exists for. /mo, /m, /e, /eff, /t, /th, /mem, /sc, /st, /se, /c, /co and
+    /status all fell past every branch and came back "unknown command".
+    Four of the eighteen worked anyway, by being named a second time in a
+    branch of their own -- which is why the table looked like it worked.
+    """
+
+    def _repl(self):
+        import io
+
+        from wynxo.cli import Repl
+        from wynxo.ui import UI
+
+        repl = Repl.__new__(Repl)
+        ui = UI()
+        ui.console.file = io.StringIO()
+        ui.console.width = ui.width = 100
+        repl.ui = ui
+        return repl
+
+    def test_every_alias_reaches_the_command_it_names(self):
+        repl = self._repl()
+        for alias, target in sorted(ALIASES.items()):
+            assert repl._expand(alias) == target, alias
+
+    def test_an_exact_command_is_left_alone(self):
+        """/mode must not be resolved to /model by prefix matching."""
+        repl = self._repl()
+        for command in COMMANDS:
+            assert repl._expand(command) == command, command
+
+    def test_an_unambiguous_prefix_still_works(self):
+        assert self._repl()._expand("/doct") == "/doctor"
+
+    def test_a_plural_still_works(self):
+        assert self._repl()._expand("/themes") == "/theme"
+
+    def test_an_ambiguous_prefix_is_reported_rather_than_guessed(self):
+        repl = self._repl()
+        assert repl._expand("/se") == "/sessions"     # an explicit alias
+        assert repl._expand("/d") is None             # three commands, no alias
+        shown = repl.ui.console.file.getvalue()
+        assert "could be any of these" in shown
+        for command in ("/dictate", "/diff", "/doctor"):
+            assert command in shown
+
+    def test_a_typo_is_not_described_as_an_unfinished_command(self):
+        """"/mdoe could be any of these" claims there is a command called
+        /mdoe. There is not; it is a misspelling of one."""
+        repl = self._repl()
+        assert repl._expand("/mdoe") is None
+        shown = repl.ui.console.file.getvalue()
+        assert "did you mean" in shown
+        assert "could be any of these" not in shown
+        assert "/mode" in shown
+
+    def test_nonsense_says_so_plainly(self):
+        repl = self._repl()
+        assert repl._expand("/xyzzy") is None
+        shown = repl.ui.console.file.getvalue()
+        assert "no command called /xyzzy" in shown
+        assert "did you mean" not in shown

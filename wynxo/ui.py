@@ -801,11 +801,17 @@ class UI:
         an offer. They were the same call, so "/session <id> to pick one up"
         arrived with the same weight as "resumed 4f21a0 -- 12 messages", and
         the eye had to read both to find out which was which. Held at FAINT
-        and indented under whatever it follows, an offer can be skipped at a
+        and set apart from whatever it follows, an offer can be skipped at a
         glance and still be there when it is wanted.
+
+        The blank row matters more than it sounds. Printed tight under a
+        listing, an indented faint line reads as one more row of it -- so
+        "/session list -- 6 other conversations" arrived looking like a
+        seventh fact about this one.
         """
         body = sanitise(message).strip()
         if body:
+            self.console.print()
             self.detail_line(body, FAINT)
 
     def outcome(self, report: str) -> None:
