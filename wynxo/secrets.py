@@ -146,6 +146,25 @@ _KNOWN_TOKEN = re.compile(
 # reverse-DNS app schemes, and those are nowhere near it.
 _URL_CRED = re.compile(r"([a-zA-Z][\w+.-]{0,31}://[^\s:/@]+):([^\s:/@]+)@")
 
+# An HTTP authorization header, and the credential after its scheme word.
+#
+# Its own rule because neither of the others reaches it. The assignment rule
+# will not: its value pattern forbids spaces, so a quoted value beginning
+# with a scheme word ends at the space and only the word itself is examined.
+# The token rule will not either, unless the credential happens to be a JWT
+# or carry a vendor prefix -- and an opaque session token carries neither.
+# So a header holding a live credential reached the model untouched whenever
+# the credential was not one of the shapes already listed above.
+#
+# Keyed on the scheme word, which is safe: these appear in HTTP auth and
+# essentially nowhere else, so there is nothing ordinary to over-redact. The
+# word is kept and only what follows it is masked, so the code still reads.
+# Sixteen characters, because a short one after a scheme word is a
+# placeholder in a snippet rather than a credential -- and a real one is
+# never that short.
+_AUTH_SCHEME = re.compile(
+    r"\b(Bearer|Basic|Token|ApiKey)([ \t]+)([A-Za-z0-9+/=._~-]{16,})")
+
 # The body has to actually span lines. A real key does; the one-line string
 # literal that *builds* the replacement ("BEGIN...\\n{MASK}\\n...END") does
 # not, and without this wynxo could not read this very file.
@@ -286,6 +305,15 @@ def redact(text: str) -> tuple[str, int]:
         return MASK
 
     text = _KNOWN_TOKEN.sub(mask_token, text)
+
+    def mask_scheme(match: re.Match) -> str:
+        nonlocal count
+        if _is_placeholder(match.group(3)):
+            return match.group(0)
+        count += 1
+        return f"{match.group(1)}{match.group(2)}{MASK}"
+
+    text = _AUTH_SCHEME.sub(mask_scheme, text)
     return text, count
 
 
