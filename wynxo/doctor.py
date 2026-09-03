@@ -22,8 +22,8 @@ from enum import Enum
 
 from .config import MIN_USABLE_CONTEXT, Config
 from .parsing import parse_turn
-from .provider import (OllamaClient, ProviderError, fits_on_gpu,
-                       same_model)
+from .provider import (OllamaClient, ProviderError, faster_on_gpu,
+                       gpu_share, same_model)
 from .ui import ACCENT, BAD, GOOD, MUTED, WARN, UI
 
 
@@ -344,29 +344,51 @@ class Doctor:
                 f"the model's own default, which is usually far smaller -- "
                 f"that is the whole difference.")
             fix.append(
-                f"About {fitting:,} tokens would fit entirely on the GPU: "
-                f"try `/ctx {fitting}`, then `/doctor` again.")
+                f"`/ctx {fitting}` would keep it entirely on the GPU. Try "
+                f"that, then `/doctor` again.")
             if fitting < MIN_USABLE_CONTEXT:
                 fix.append(
                     f"That is below the {MIN_USABLE_CONTEXT:,} an agent "
                     f"really wants, so expect more compaction mid-task. A "
                     f"smaller quantisation of {self.config.model} buys the "
                     f"window back.")
+        elif (paging := self._memory_squeeze(mine, weights)):
+            # The card is not the only ceiling, and on a small machine it
+            # is not the interesting one: a model needs its weights and its
+            # cache resident somewhere, and what will not fit in the card
+            # and the RAM together is read off disk on every token.
+            window, budget = paging
+            facts.append(f"{gigabytes(budget)} of card and RAM together")
+            fix.append(
+                f"It needs {gigabytes(mine.size)} at num_ctx="
+                f"{self.config.num_ctx:,}, and this machine has about "
+                f"{gigabytes(budget)} to give it once the system has its "
+                f"share -- so part of it is being read off disk on every "
+                f"token, which is slower than the CPU by a long way.")
+            if window:
+                fix.append(
+                    f"`/ctx {window}` brings it inside that. That is the "
+                    f"difference between memory and disk, and it is worth "
+                    f"more here than any GPU setting.")
         else:
-            # No window is small enough, so recommending one is advice that
-            # cannot work. This used to fall back to halving num_ctx --
-            # which is the same instruction the user has already followed
-            # as far as it goes, offered again with no more reason.
+            # The window is not the lever here. This used to fall back to
+            # halving num_ctx, which on a card the weights already do not
+            # fit is somebody changing a setting for two points: layers go
+            # to the GPU whole, each with its slice of the cache, so
+            # shrinking the cache moves a fraction of a fraction.
+            floor = mine.share_at(weights, self.config.num_ctx, 2048)
             fix.append(
-                f"The weights alone need more than this card has (about "
-                f"{gigabytes(mine.size_vram)} of it usable), so no context "
-                f"window is small enough. A smaller model, or a tighter "
-                f"quantisation of this one, is the only thing that helps.")
-        if (smaller := await self._smaller_model(mine.size_vram)) is not None:
+                f"{gigabytes(weights)} of weights against about "
+                f"{gigabytes(mine.size_vram)} of card, so the context "
+                f"window is not the lever: even `/ctx 2048` would only "
+                f"reach {floor:.0%}. A smaller model, or a tighter "
+                f"quantisation of this one, is what helps.")
+        if (better := await self._better_model(mine.size_vram, share)) is not None:
             fix.append(
-                f"{smaller.name} is already installed at "
-                f"{gigabytes(smaller.size)} and would fit whole: "
-                f"`/model {smaller.name}`.")
+                f"`/model {better.name}` -- installed already at "
+                f"{gigabytes(better.size)}, and about "
+                f"{gpu_share(better.size, mine.size_vram):.0%} of it would "
+                f"run on the GPU.")
         self.checks.append(Check(
             "model in memory", Status.WARN,
             f"{share:.0%} on the GPU, the rest on the CPU",
@@ -374,18 +396,34 @@ class Doctor:
             facts=facts,
         ))
 
-    async def _smaller_model(self, vram: int):
-        """The largest installed model that would run entirely on this card.
+    SYSTEM_MEMORY = 2_000_000_000
+    """RAM this machine needs for everything that is not the model."""
 
-        "A smaller model is the fix" is advice, not help: it leaves the one
-        question that matters -- which one -- to somebody who has just been
-        told their setup is slow.
+    def _memory_squeeze(self, loaded, weights: int):
+        """(window that would fit, budget) when the model is paging, else ()."""
+        from .platforms import total_memory
+
+        ram = total_memory()
+        if not ram or not loaded.size:
+            return ()
+        budget = loaded.size_vram + max(0, ram - self.SYSTEM_MEMORY)
+        if loaded.size <= budget:
+            return ()
+        return (loaded.context_within(weights, self.config.num_ctx, budget),
+                budget)
+
+    async def _better_model(self, vram: int, share: float):
+        """The installed model that would run most of itself on this card.
+
+        Ranked by how much of it lands on the GPU rather than by whether it
+        fits whole: a 4.4 GB model on a 3.6 GB card runs about four fifths
+        there, and four fifths is transformative next to a fifth.
         """
         try:
             installed = await self.client.list_models()
         except ProviderError:
             return None
-        for candidate in fits_on_gpu(installed, vram):
+        for candidate in faster_on_gpu(installed, vram, share):
             if not same_model(candidate.name, self.config.model):
                 return candidate
         return None

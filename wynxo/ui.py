@@ -701,6 +701,32 @@ class UI:
         self.console.file.write("\x1b[3J")   # erase saved lines
         self.console.file.flush()
 
+    def shorten_model(self, name: str, room: int) -> str:
+        """A model tag trimmed to fit, from the least useful end.
+
+        The namespace goes first. ``huihui_ai/Qwen3.8-abliterated:27b`` is
+        the same model as ``Qwen3.8-abliterated:27b``, and the part before
+        the slash is who published it -- which is not something anybody
+        reads while typing, and it is a third of a narrow terminal.
+
+        Then the head of the name, keeping the tag, because the tag is the
+        size and the size is what tells you what to expect. Cut blindly
+        from the right, a thirty-three character name at forty columns left
+        ``huihui_ai/Qwen3.8-abliterated:`` and pushed the effort level and
+        the context percentage off the line entirely -- so the one string
+        on it that never changes survived, and the two facts that do were
+        the ones that went.
+        """
+        name = name.strip()
+        if room <= 0 or cell_len(name) <= room:
+            return name
+        if "/" in name and cell_len(bare := name.rsplit("/", 1)[-1]) <= room:
+            return bare
+        name = name.rsplit("/", 1)[-1]
+        if cell_len(name) <= room:
+            return name
+        return self.g.ellipsis + name[-(max(1, room - 1)):]
+
     def shorten_path(self, path: str) -> str:
         """~/code/proj rather than /home/you/code/proj, and never the full
         thing when it would push everything else off the line."""
@@ -1132,6 +1158,17 @@ class UI:
                 value = value[:-1]
             if value:
                 out.append(value, style=self._token_style(token))
+        if out.plain != line.rstrip("\n"):
+            # A lexer that does not give the line back is a lexer that ate
+            # it, and colour is never worth a word of somebody's output.
+            #
+            # pygments' session lexers do exactly this. BashSessionLexer
+            # -- which is what "console" resolves to -- returns *no tokens
+            # at all* for a line with no shell prompt on it, so every line
+            # of every command's output rendered as an empty gutter: the
+            # expansion was there, the text was gone, and nothing said so
+            # because a blank line is what an empty result looks like.
+            return rendered
         return out
 
     def code_gutter(self) -> Text:

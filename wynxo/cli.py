@@ -40,8 +40,8 @@ from . import livediff
 from .doctor import run_doctor
 from .effort import ORDER, resolve
 from .permissions import Decision
-from .provider import (ProviderError, check_context, make_client,
-                       same_model)
+from .provider import (ProviderError, check_context, gpu_share,
+                       make_client, same_model)
 from .queue import Pending
 from .session import Session
 from .keys import KeyWatcher
@@ -75,13 +75,22 @@ def _first_sentence(text: str) -> str:
     return head[:stop + 1] if stop > 0 else head
 
 
-def _is_a_sentence(text: str) -> bool:
+def _is_a_sentence(text: str, tool: str = "") -> bool:
     """Whether a tool's "target" is really prose.
 
     A target is a thing: a path, a pattern, a count. Three or more words
     with no path separator in them is a tool describing itself, which
     belongs under the head rather than on it.
+
+    Never for shell, whose target is a command by construction. ``ls wynxo
+    | head -4`` is five words with no slash in it, and it is not a tool
+    describing itself -- it is the single most important thing on the
+    block. Judged prose, it was moved off the head line and printed in the
+    row the command's own output should have been in, so the block said
+    what was run twice and what came of it not at all.
     """
+    if tool == "shell":
+        return False
     words = text.split()
     return len(words) >= 3 and "/" not in text and "\\" not in text
 
@@ -121,7 +130,14 @@ _ACTIVITY = {
     "shell": "running", "todo_write": "planning", "launch_application": "launching",
     "run_tests": "testing",
 }
-_LANGUAGE = {"read_file": "python", "shell": "console"}
+_LANGUAGE = {"read_file": "python", "shell": "text"}
+"""How to highlight a tool's output, where it is known.
+
+shell was "console", which is pygments' *session* lexer: it expects a
+transcript with prompts and commands in it, and what a shell tool returns
+is the output on its own. Beyond that, a command prints whatever it prints
+-- a file listing, JSON, a stack trace, a progress bar -- and "text" is the
+honest answer to what language that is."""
 
 # Keys that work *while the agent is running*, not just at the prompt.
 LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail",
@@ -1096,9 +1112,22 @@ class TerminalCallbacks(Callbacks):
         self._held_output.clear()
         target, detail = self._call_summary(name, ok, display, output)
         self.ui.tool_call(name, target, detail, ok=ok)
-        # Ctrl-T: the whole output under the block, when it says more than
-        # the block's one dim line already did.
-        if self.verbose_tools and len(output.strip().splitlines()) > 1:
+        # Ctrl-T: the whole output under the block, whenever it says more
+        # than the block's one dim line already did.
+        #
+        # It used to require more than one line of it, which is the same
+        # bug from the other end: `which firefox` answers in one line, the
+        # detail toggle showed nothing for it, and that is exactly the
+        # command somebody turns the toggle on for. What matters is
+        # whether the block already carries the whole answer, not how many
+        # lines the answer happens to have.
+        whole = output.strip()
+        # Compared the way the detail was made, or the two differ by the
+        # "ERROR:" the detail had stripped off and a one-line failure is
+        # printed twice -- once as the block's own reason, once as a
+        # highlighted quote of the same sentence.
+        spoken = whole if ok else whole.split("ERROR:", 1)[-1].strip()
+        if self.verbose_tools and whole and spoken != detail.strip():
             # Whole lines. Slicing at four thousand characters cut the
             # last one wherever it happened to land -- usually mid-token,
             # sometimes mid-escape -- and said nothing about the rest.
@@ -1195,14 +1224,33 @@ class TerminalCallbacks(Callbacks):
         rest = len(body.splitlines()) - 1
         if not target:
             return "", first[:110] + (f"  (+{rest} lines)" if rest else "")
-        if _is_a_sentence(target):
+        if _is_a_sentence(target, name):
             # Some tools summarise themselves in prose -- run_tests reports
             # "syntax check passed (compileall)" -- and prose on the head
             # line reads as a filename that got out of hand. The head is
             # for what was acted on; anything that is really a sentence
             # belongs underneath with the rest of the outcome.
             return "", target[:110]
-        return target, (_trim_echo(first, name, target)[:110]
+        detail = _trim_echo(first, name, target)
+        if not detail.strip(" $"):
+            # The display said nothing the head line had not already said,
+            # so fall through to what the tool actually produced. shell's
+            # display is "$ <command>" and the command is the head, so
+            # trimming the echo left a bare "$" -- and what the command
+            # printed appeared nowhere: not in the block, and not under it
+            # either, because the expansion only ever fired on output with
+            # more than one line in it. `which firefox` is one line, and it
+            # is the whole answer.
+            if spoken := sanitise(output).strip():
+                lines = spoken.splitlines()
+                detail, rest = lines[0], len(lines) - 1
+                if not ok:
+                    # Same rule as the display path above, which this
+                    # falls through from: the cross already says it
+                    # failed, so "ERROR:" in front of the reason is the
+                    # mark repeated in words.
+                    detail = detail.split("ERROR:", 1)[-1].strip() or detail
+        return target, (detail[:110]
                         + (f"  (+{rest} lines)" if rest else ""))
 
     def _commit_card(self) -> None:
@@ -1781,43 +1829,97 @@ class Repl:
         # Head and detail is the shape every other block here uses.
         fits = mine.context_that_fits(weights, self.config.num_ctx)
         vram = mine.size_vram
+        # Every line that offers a command leads with it. Trailed at the
+        # end of a sentence, "/model qwen2.5-coder:7b" wrapped between the
+        # command and its argument -- so the one thing on screen meant to
+        # be typed came out as two, and could not be copied.
         note = [f"{self.config.model} is {mine.on_gpu:.0%} on the GPU -- "
                 f"most of why generation feels slow"]
         if fits >= MIN_USABLE_CONTEXT:
-            note.append(f"the KV cache grows with the context window, and "
-                        f"num_ctx is {self.config.num_ctx:,}. About {fits:,} "
-                        f"tokens would fit entirely on the GPU: /ctx {fits}")
+            note.append(f"/ctx {fits} would keep it entirely on the GPU: "
+                        f"the KV cache grows with the context window, and "
+                        f"num_ctx is {self.config.num_ctx:,}")
         elif fits:
-            note.append(f"only about {fits:,} tokens of context would fit on "
-                        f"the GPU, which is tight for an agent: /ctx {fits} "
-                        f"trades context for speed")
+            note.append(f"/ctx {fits} is all that would fit on the GPU, "
+                        f"which is tight for an agent -- it trades context "
+                        f"for speed")
+        elif (paging := self._memory_squeeze(mine, weights)):
+            # The card is not the only ceiling. A model needs its weights
+            # and its cache resident somewhere, and when that comes to more
+            # than the card and the machine's RAM together the rest is read
+            # off disk on every token -- which is slow in a way no amount
+            # of CPU makes up for, and is the one condition where a smaller
+            # window helps a machine with no GPU room left to gain.
+            window, budget = paging
+            note.append(
+                f"it needs {_gigabytes(mine.size)} at num_ctx="
+                f"{self.config.num_ctx:,}, and this machine has about "
+                f"{_gigabytes(budget)} of card and RAM to give it -- so "
+                f"part of it is being read off disk on every token")
+            if window:
+                note.append(f"/ctx {window} brings it inside that, which is "
+                            f"the difference between memory and disk")
         else:
-            note.append(f"the weights alone need more than this card has "
-                        f"(about {_gigabytes(vram)} of it usable), so no "
-                        f"context window is small enough")
-        if (smaller := self._smaller_model(installed, vram)) is not None:
-            note.append(f"{smaller.name} is already installed at "
-                        f"{_gigabytes(smaller.size)} and would fit whole: "
-                        f"/model {smaller.name}")
+            # The window is not the lever here, and saying "halve num_ctx"
+            # would send somebody to change a setting for two points. The
+            # weights are what does not fit on the card, and layers go
+            # there whole with their slice of the cache, so shrinking the
+            # cache moves a fraction of a fraction.
+            floor = mine.share_at(weights, self.config.num_ctx, 2048)
+            note.append(
+                f"{_gigabytes(weights)} of weights against about "
+                f"{_gigabytes(vram)} of card, so the context window is not "
+                f"the lever: even /ctx 2048 would only reach {floor:.0%}")
+        if (better := self._better_model(installed, vram, mine.on_gpu)) is not None:
+            note.append(f"/model {better.name} -- installed already at "
+                        f"{_gigabytes(better.size)}, and about "
+                        f"{gpu_share(better.size, vram):.0%} of it would "
+                        f"run on the GPU")
         note.append("/doctor explains it in full")
         self.ui.console.print()
         self.ui.warn("\n".join(note))
 
-    def _smaller_model(self, installed: list, vram: int):
-        """The largest model already on this machine that would fit the GPU.
+    SYSTEM_MEMORY = 2_000_000_000
+    """RAM this machine needs for everything that is not the model.
+
+    A desktop, a browser, the editor the agent is being pointed at. Left
+    out of the budget, "it fits" would be true right up to the moment the
+    machine started swapping, which is the condition being diagnosed."""
+
+    def _memory_squeeze(self, loaded, weights: int):
+        """(window that would fit, budget) when the model is paging, else ().
+
+        The card is not the only ceiling, and on a small machine it is not
+        the interesting one. A 20.1 GB model on a card with 3.6 GB and a
+        machine with 16 GB is over the line once the system has its share,
+        and the remainder is read off disk on every token.
+        """
+        from .platforms import total_memory
+
+        ram = total_memory()
+        if not ram or not loaded.size:
+            return ()
+        budget = loaded.size_vram + max(0, ram - self.SYSTEM_MEMORY)
+        if loaded.size <= budget:
+            return ()
+        return (loaded.context_within(weights, self.config.num_ctx, budget),
+                budget)
+
+    def _better_model(self, installed: list, vram: int, share: float):
+        """The model already here that would run most of itself on the GPU.
 
         "A smaller model is the fix" is advice, not help: it leaves the one
         question that matters -- which one -- to somebody who has just been
-        told their setup is slow. wynxo knows what is installed and roughly
-        how much VRAM there is, so it can name one.
+        told their setup is slow.
 
-        The largest that fits, because that is the most capable one that
-        stays fast. None when the current model already fits, or when
-        nothing installed does -- there is no honest recommendation there.
+        Not a fits-or-does-not test. A 4.4 GB model on a 3.6 GB card runs
+        about four fifths on the GPU, and four fifths is transformative
+        next to the fifth a 17.7 GB model manages; ruling it out for not
+        fitting whole would be withholding the answer for being imperfect.
         """
-        from .provider import fits_on_gpu
+        from .provider import faster_on_gpu
 
-        for candidate in fits_on_gpu(installed, vram):
+        for candidate in faster_on_gpu(installed, vram, share):
             if not same_model(candidate.name, self.config.model):
                 return candidate
         return None
@@ -1839,24 +1941,50 @@ class Repl:
         """
         if not self.config.warm_start:
             return
-        # The exact prompt the first question will carry in front of it:
-        # the system message and the tool schemas, which together are the
-        # five thousand tokens a local model reads before writing a word.
-        # Read now, in the background, they are cached by the time anyone
-        # presses enter -- and if the server does not reuse the prefix, the
-        # only cost is arithmetic done early while somebody was typing.
+        try:
+            self._warming = asyncio.ensure_future(self._warm())
+        except RuntimeError:
+            self._warming = None            # no loop: nothing to warm into
+
+    async def _warm(self) -> None:
+        """Load the model, and read the prompt into it if that is cheap.
+
+        Two steps, because the second one is only a good idea on a machine
+        that can do it quickly.
+
+        Reading the prompt in advance is worth a lot: the system prompt and
+        the tool schemas come to somewhere north of five thousand tokens,
+        and Ollama reuses a matching prefix, so a first question that
+        arrives afterwards pays only for itself.
+
+        But Ollama runs one request at a time per model. On a machine where
+        most of the model is on the CPU, reading five thousand tokens takes
+        longer than anybody will wait -- and the first question queues
+        behind it, so the priming meant to save that turn *becomes* that
+        turn's wait. A minute and a half of "loading the model" to answer
+        "hi", against five seconds for `ollama run`, which sends two
+        tokens and nothing else.
+
+        So the weights are loaded first, the placement is read back, and
+        the prompt goes in only when the model is sitting on the GPU where
+        reading it is quick.
+        """
+        await self.client.warm(self.config.model)
+        try:
+            loaded = await self.client.running()
+        except Exception:                                   # noqa: BLE001
+            return
+        mine = next((m for m in loaded
+                     if same_model(m.name, self.config.model)), None)
+        if mine is not None and mine.split:
+            return
         try:
             wire = self.agent.session.wire()
             tools = (self.agent.tools.ollama_schemas()
                      if self.agent.native_tools else None)
         except Exception:                                   # noqa: BLE001
-            wire, tools = None, None
-        try:
-            self._warming = asyncio.ensure_future(
-                self.client.warm(self.config.model, messages=wire,
-                                 tools=tools))
-        except RuntimeError:
-            self._warming = None            # no loop: nothing to warm into
+            return
+        await self.client.warm(self.config.model, messages=wire, tools=tools)
 
     async def _offer_endpoint_discovery(self) -> str | None:
         """The configured server answered nothing: look on this machine and
@@ -2552,7 +2680,14 @@ class Repl:
         # to it. So did the rate, the token count and the turn duration --
         # they are the live numbers of a turn that has finished, and the
         # strip shows them while it runs, which is when they mean anything.
-        pieces += [self.config.model,
+        # The model gets a share of the line, not all of it. A namespaced
+        # tag from the hub runs to thirty-odd characters, and at anything
+        # under a hundred columns that pushed the effort level, the context
+        # figure and every key hint off the border -- so the longest string
+        # on the line, and the only one that never changes, was the one
+        # that survived.
+        pieces += [self.ui.shorten_model(self.config.model,
+                                         max(12, self.ui.width // 3)),
                    self.policy.name,
                    f"ctx {100 * used / max(1, limit):.0f}%"]
         if self.agent.permissions.mode is not Mode.MANUAL:

@@ -377,3 +377,44 @@ def ollama_server_help() -> str:
         "    [Service]\n"
         '    Environment="OLLAMA_HOST=0.0.0.0:11434"'
     )
+
+
+def total_memory() -> int:
+    """Bytes of RAM on this machine, or 0 when it cannot be told.
+
+    Used to answer the question no GPU figure can: a model needs its
+    weights plus its KV cache resident *somewhere*, and when that comes to
+    more than the card and the RAM together the rest is read off disk on
+    every token. That is not slow in the way a CPU is slow -- it is slow in
+    the way a disk is, and it is the one condition where a smaller context
+    window helps a machine that has no GPU room to gain.
+
+    Zero rather than a guess where the platform will not say, and every
+    caller treats zero as "say nothing".
+    """
+    import os
+
+    try:
+        return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, ValueError, OSError):
+        pass
+    try:                                    # Windows
+        import ctypes
+
+        class _Status(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong),
+                        ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong),
+                        ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+        status = _Status()
+        status.dwLength = ctypes.sizeof(_Status)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+        return int(status.ullTotalPhys)
+    except Exception:                                   # noqa: BLE001
+        return 0

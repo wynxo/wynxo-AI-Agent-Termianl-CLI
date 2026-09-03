@@ -148,7 +148,7 @@ class TestItSaysSoWithoutBeingAsked:
         repl = self._repl([Loaded("qwen3-coder:30b",
                                   size=21 * GB, size_vram=8 * GB)])
         said = await self._said(repl)
-        assert "/ctx" not in said
+        assert "not the lever" in said, said
         assert "8.0 GB" in said, "say how much card there actually is"
 
     async def test_it_names_a_model_that_would_fit(self):
@@ -308,7 +308,7 @@ class TestTheDoctorAgreesWithTheLiveWarning:
     """Two places say the same thing and must not disagree: the line at the
     end of a slow turn, and the check you run when you go looking."""
 
-    def _doctor(self, loaded, installed, num_ctx=32768):
+    def _doctor(self, loaded, installed, num_ctx=32768, ram=64 * GB):
         from types import SimpleNamespace
 
         from wynxo.doctor import Doctor
@@ -325,7 +325,17 @@ class TestTheDoctorAgreesWithTheLiveWarning:
         made.checks = []
         made.config = SimpleNamespace(model="qwen3-coder:30b", num_ctx=num_ctx)
         made.client = SimpleNamespace(running=running, list_models=list_models)
+        made.ram = ram
         return made
+
+    async def _check(self, doc):
+        """With the machine's RAM pinned. Otherwise the branch taken
+        depends on how much memory the developer happens to have."""
+        from unittest.mock import patch
+
+        with patch("wynxo.platforms.total_memory", return_value=int(doc.ram)):
+            await doc.check_memory()
+        return doc.checks[-1]
 
     async def test_it_does_not_recommend_a_window_that_cannot_help(self):
         """It fell back to halving num_ctx when the weights themselves do
@@ -336,9 +346,8 @@ class TestTheDoctorAgreesWithTheLiveWarning:
         doc = self._doctor(
             [Loaded("qwen3-coder:30b", size=21 * GB, size_vram=6 * GB)],
             [ModelInfo(name="qwen3-coder:30b", size=18 * GB)])
-        await doc.check_memory()
-        fix = doc.checks[-1].fix
-        assert "/ctx" not in fix
+        fix = (await self._check(doc)).fix
+        assert "not the lever" in fix, fix
         assert "smaller model" in fix
 
     async def test_it_names_the_same_model_the_live_warning_would(self):
@@ -349,8 +358,7 @@ class TestTheDoctorAgreesWithTheLiveWarning:
         doc = self._doctor(
             [Loaded("qwen3-coder:30b", size=21 * GB, size_vram=6 * GB)],
             installed)
-        await doc.check_memory()
-        assert "/model qwen2.5-coder:7b" in doc.checks[-1].fix
+        assert "/model qwen2.5-coder:7b" in (await self._check(doc)).fix
 
     async def test_a_window_that_would_fit_is_still_offered(self):
         from wynxo.provider import ModelInfo
@@ -358,5 +366,122 @@ class TestTheDoctorAgreesWithTheLiveWarning:
         doc = self._doctor(
             [Loaded("qwen3-coder:30b", size=21 * GB, size_vram=20 * GB)],
             [ModelInfo(name="qwen3-coder:30b", size=18 * GB)])
-        await doc.check_memory()
-        assert "/ctx 21504" in doc.checks[-1].fix
+        assert "/ctx 21504" in (await self._check(doc)).fix
+
+
+class TestAnOfferIsSomethingYouCanType:
+    """A command wrapped between itself and its argument is not a command
+    any more: "/model qwen2.5-coder:7b" came out as "/model" at the end of
+    one line and the name at the start of the next, which cannot be copied
+    and does not read as one thing."""
+
+    async def _lines(self, width, loaded, installed):
+        from types import SimpleNamespace
+
+        from wynxo.cli import Repl
+        from wynxo.ui import UI
+
+        ui = UI()
+        ui.console.file = io.StringIO()
+        ui.console.width = ui.width = width
+
+        async def running():
+            return loaded
+
+        async def list_models():
+            return installed
+
+        repl = Repl.__new__(Repl)
+        repl.ui = ui
+        repl._placement_checked = 0
+        repl.config = SimpleNamespace(model="qwen3-coder:30b", num_ctx=32768)
+        repl.client = SimpleNamespace(running=running, list_models=list_models)
+        await repl._report_placement()
+        return ui.console.file.getvalue().splitlines()
+
+    @pytest.mark.parametrize("width", [50, 62, 72, 80, 98, 120])
+    async def test_a_command_is_never_split_from_its_argument(self, width):
+        from wynxo.provider import ModelInfo
+
+        lines = await self._lines(
+            width,
+            [Loaded("qwen3-coder:30b", size=21 * GB, size_vram=6 * GB)],
+            [ModelInfo(name="qwen3-coder:30b", size=18 * GB),
+             ModelInfo(name="qwen2.5-coder:7b", size=4 * GB)])
+        body = "\n".join(lines)
+        assert "/model" in body, body
+        for line in lines:
+            stripped = line.strip()
+            assert stripped != "/model", (width, lines)
+            if stripped.startswith("/model"):
+                assert "qwen2.5-coder:7b" in stripped, (width, line)
+
+
+class TestTheCardIsNotTheOnlyCeiling:
+    """A model needs its weights and its cache resident somewhere. What
+    will not fit in the card and the RAM together is read off disk on every
+    token, which is slower than the CPU by a long way -- and it is the one
+    condition where a smaller window helps a machine with no GPU room left
+    to gain.
+
+    The numbers here are from a real machine: a 27B at Q4_K_M, 17.7 GB of
+    weights, 20.1 GB in memory at 32,768 tokens, 3.6 GB of it on a small
+    card, in a box with 16 GB of RAM.
+    """
+
+    async def _said(self, ram, *, size=20.1, vram=3.6, weights=17.7,
+                    num_ctx=32768, width=98):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from wynxo.cli import Repl
+        from wynxo.provider import ModelInfo
+        from wynxo.ui import UI
+
+        ui = UI()
+        ui.console.file = io.StringIO()
+        ui.console.width = ui.width = width
+
+        async def running():
+            return [Loaded("m", size=int(size * GB), size_vram=int(vram * GB))]
+
+        async def list_models():
+            return [ModelInfo(name="m", size=int(weights * GB))]
+
+        repl = Repl.__new__(Repl)
+        repl.ui = ui
+        repl._placement_checked = 0
+        repl.config = SimpleNamespace(model="m", num_ctx=num_ctx)
+        repl.client = SimpleNamespace(running=running, list_models=list_models)
+        with patch("wynxo.platforms.total_memory", return_value=int(ram * GB)):
+            await repl._report_placement()
+        return repl.ui.console.file.getvalue()
+
+    async def test_a_model_bigger_than_the_machine_is_named_as_such(self):
+        said = await self._said(16.9)
+        assert "off disk" in said, said
+        assert "20.1 GB" in said, "say what it needs"
+
+    async def test_the_window_that_stops_the_paging_is_offered(self):
+        """This is the one recommendation that helps a machine which has no
+        GPU room left to win: 20.1 GB down to about 18.4."""
+        said = await self._said(16.9)
+        assert "/ctx 10240" in said, said
+
+    async def test_a_roomy_machine_is_not_told_it_is_paging(self):
+        """The same card in a 64 GB box holds the whole model in RAM. The
+        GPU share is unchanged and disk has nothing to do with it."""
+        said = await self._said(64)
+        assert "off disk" not in said
+        assert "not the lever" in said
+
+    async def test_a_machine_that_will_not_say_its_memory_says_nothing(self):
+        """Zero is "could not tell", and a diagnosis from a number that was
+        never read is worse than no diagnosis."""
+        said = await self._said(0)
+        assert "off disk" not in said
+
+    async def test_the_gpu_line_is_still_the_headline(self):
+        said = await self._said(16.9)
+        assert said.lstrip().startswith("!")
+        assert "18% on the GPU" in said

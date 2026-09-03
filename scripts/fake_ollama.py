@@ -27,6 +27,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 MODELS = [
     ("qwen3-coder:30b", 18_600_000_000, "30.5B", "Q4_K_M"),
     ("qwen3:8b", 5_200_000_000, "8.2B", "Q4_K_M"),
+    # A real name from a real machine. Namespaced tags from the hub run to
+    # thirty-odd characters, which is a third of a terminal, and every
+    # header, strip and border that shows the model has to survive one.
+    ("huihui_ai/Qwen3.8-abliterated:27b", 16_400_000_000, "27B", "Q4_K_M"),
 ]
 CONTEXT_LENGTH = 262_144
 
