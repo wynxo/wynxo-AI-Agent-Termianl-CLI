@@ -20,10 +20,7 @@ from rich.box import ASCII as ASCII_BOX, ROUNDED
 from rich.cells import cell_len
 from rich.console import Console, Control, Group
 from rich.live import Live
-from rich.markdown import Markdown
-from rich.padding import Padding
 from rich.rule import Rule
-from rich.syntax import Syntax
 from rich.text import Text
 
 from .platforms import is_narrow, terminal_width
@@ -55,9 +52,22 @@ def _ansi_of(style: str) -> str:
         return ""
 
 
-CODE_SPAN = "#e6c07b"
+CODE_SPAN = PALETTE.code
 """`inline code` in the model's prose. Warm against the purple, so it reads
-as a name rather than as emphasis."""
+as a name rather than as emphasis.
+
+A palette role now, not a constant. It was a hardcoded amber, so an answer
+containing code was the one thing on screen /theme could not reach -- and
+under a warm theme it was the same hue as the accent, which made a file
+name read as a heading."""
+
+KEYWORD = PALETTE.keyword
+LITERAL = PALETTE.literal
+SYMBOL = PALETTE.symbol
+"""Syntax colour for a fenced block, in the same four roles the palette
+defines. Highlighted code used raw ANSI names -- magenta keywords, cyan
+numbers -- so a block and an inline span of the same expression came out in
+two unrelated colour schemes."""
 
 MIN_ACTIVITY_WIDTH = 16
 """Cells kept for the activity text before the stats start claiming space."""
@@ -69,7 +79,8 @@ MIN_ACTIVITY_WIDTH = 16
 # restart. Pushing the new values into them is blunt, but it is one place and
 # the alternative is threading a palette object through seventy call sites.
 _COLOUR_NAMES = ("ACCENT", "MUTED", "FAINT", "GOOD", "WARN", "BAD",
-                 "BAR_STYLE", "BAR_ACCENT", "BAR_DIM")
+                 "BAR_STYLE", "BAR_ACCENT", "BAR_DIM",
+                 "CODE_SPAN", "KEYWORD", "LITERAL", "SYMBOL")
 
 _COLOUR_CONSUMERS = ("wynxo.cli", "wynxo.wizard", "wynxo.doctor")
 """Modules to look in. Being on this list is not enough to be rewritten --
@@ -105,6 +116,7 @@ def apply_palette(palette: Palette) -> None:
     last.
     """
     global PALETTE, ACCENT, MUTED, FAINT, GOOD, WARN, BAD, BAR_STYLE, BAR_ACCENT, BAR_DIM
+    global CODE_SPAN, KEYWORD, LITERAL, SYMBOL
     here = globals()
     # Captured before the rebind: it is the *old* value that identifies a
     # name in another module as one of ours.
@@ -126,6 +138,10 @@ def apply_palette(palette: Palette) -> None:
     BAR_STYLE = f"on {palette.bar_bg}"
     BAR_ACCENT = palette.bar_accent
     BAR_DIM = palette.bar_dim
+    CODE_SPAN = palette.code
+    KEYWORD = palette.keyword
+    LITERAL = palette.literal
+    SYMBOL = palette.symbol
 
     import sys as _sys
 
@@ -548,7 +564,6 @@ class UI:
         self.palette = resolve_theme(theme)
         apply_palette(self.palette)
         self.show_thinking = show_thinking
-        self.code_theme = self.palette.code_theme
         self.narrow = is_narrow()
         """Phone-width terminals get a stacked layout instead of tables."""
         self.width = terminal_width()
@@ -837,15 +852,23 @@ class UI:
             self.detail_line(line.strip(), MUTED, indent=depth)
 
     def assistant_markdown(self, text: str) -> None:
+        """An answer that arrived all at once, drawn like one that streamed.
+
+        Through the same CodeStreamer, fed in one go. It went through rich's
+        Markdown, so turning streaming off changed what the answer looked
+        like: rich's own headings, its own bullets, and code in a pygments
+        theme inside a filled panel -- a third code renderer, in a third
+        colour scheme, for the same text the streamed path draws with the
+        palette. The measure, the marks and the code all come from one place
+        now, and `--no-stream` is a question of when the words appear rather
+        than of what they look like.
+        """
         if not text.strip():
             return
-        text = sanitise(text)
         self.console.print()
-        # Flush with everything else. The answer is the thing the session
-        # is for; it does not need setting in from the edge to be found --
-        # but it does want a measure, for the same reason a book has one.
-        self.console.print(Markdown(text, code_theme=self.code_theme),
-                           width=min(self.width, MEASURE))
+        streamer = CodeStreamer(self)
+        streamer.feed(text)
+        streamer.finish()
         self.console.print()
 
     # -- tools -------------------------------------------------------------
@@ -994,20 +1017,24 @@ class UI:
     def code(self, text: str, language: str = "text") -> None:
         """A block of somebody else's code or output.
 
-        Set one step in from the transcript, because it is quoted material
-        rather than the agent talking. Syntax() draws a filled background
-        band, so a block started hard against column zero reads as a panel
-        that has escaped the conversation rather than as part of it.
+        Drawn a line at a time through the same highlighter a streamed
+        fenced block uses. It went through rich's Syntax with a pygments
+        theme, so the transcript had two code renderers with two unrelated
+        colour schemes: the same Python was one set of colours when the
+        model wrote it and another when a tool printed it, and only one of
+        them followed /theme. Syntax also fills a background band behind
+        every row, which is the panel look the rest of this design has been
+        taking out.
         """
         body = sanitise(text).rstrip("\n")
         if not body.strip():
             return
         lines = body.split("\n")
         dropped = max(0, len(lines) - self.MAX_CODE_LINES)
-        self.console.print(
-            Padding(Syntax("\n".join(lines[:self.MAX_CODE_LINES]), language,
-                           theme=self.code_theme, word_wrap=True),
-                    (0, 0, 0, 2)))
+        gutter = self.code_gutter()
+        for line in lines[:self.MAX_CODE_LINES]:
+            self.console.print(gutter + self.highlight(line, language),
+                               highlight=False, overflow="fold")
         if dropped:
             self.detail_line(
                 f"{self.g.ellipsis} {dropped} more line"
@@ -1045,18 +1072,47 @@ class UI:
                 out.append(value, style=self._token_style(token))
         return out
 
+    def code_gutter(self) -> Text:
+        """The two cells a line of quoted code opens with.
+
+        A rule rather than a box. Indentation alone was doing the whole job
+        of saying "this is code and not the answer", and two spaces is the
+        same thing a tool's detail line uses -- so a fenced block read as a
+        deeply indented paragraph that happened to be coloured. One column
+        of rule says it outright, and costs a column rather than a frame.
+
+        Declined where the rule would not be one cell wide: U+2502 is East
+        Asian Width Ambiguous, and a terminal that draws it as two would
+        push every line of every block one column right of the line above
+        it. Plain indentation there, which is what this was before.
+        """
+        if self.g.unicode and not sprite._ambiguous_is_wide():
+            return Text(f"{self.g.vbar} ", style=FAINT)
+        return Text("  ")
+
     def code_line(self, line: str, language: str = "text",
                   indent: str = "") -> None:
-        self.console.print(Text(indent) + self.highlight(line, language),
-                           highlight=False)
+        self.console.print(
+            Text(indent) + self.code_gutter() + self.highlight(line, language),
+            highlight=False)
 
     def _token_style(self, token) -> str:
+        """A pygments token as one of the palette's four syntax roles.
+
+        It named raw ANSI colours -- magenta, cyan, bright_blue -- so code
+        was the one part of the interface /theme could not touch, and on a
+        terminal whose magenta is not the theme's the block clashed with
+        everything around it. Comments go to FAINT rather than MUTED: they
+        are the one part of a program you are meant to be able to skip, and
+        that is exactly what FAINT is for.
+        """
         from pygments.token import (Comment, Error, Keyword, Name, Number,
                                     Operator, String)
 
-        for kind, style in ((Comment, MUTED), (String, "green"), (Number, "cyan"),
-                            (Keyword, "magenta"), (Name.Function, "bright_blue"),
-                            (Name.Class, "bright_blue"), (Operator, "bright_white"),
+        for kind, style in ((Comment, FAINT), (String, LITERAL),
+                            (Number, LITERAL), (Keyword, KEYWORD),
+                            (Name.Function, SYMBOL), (Name.Class, SYMBOL),
+                            (Name.Builtin, SYMBOL), (Operator, MUTED),
                             (Error, BAD)):
             if token in kind:
                 return style
@@ -1417,7 +1473,11 @@ class CodeStreamer:
             return
         self._ensure_started()
         self._clear_partial()
-        self.ui.code_line(whole, self.language, indent=self.indent + "  ")
+        # The gutter is code_line's, not this caller's. Adding two spaces
+        # here as well put streamed code four columns in while a block from
+        # a tool sat at two -- the same content, two indentations, depending
+        # only on who printed it.
+        self.ui.code_line(whole, self.language, indent=self.indent)
 
     def _show_partial(self) -> None:
         """Put the half-written line in the live region, highlighted.
@@ -1429,7 +1489,9 @@ class CodeStreamer:
         """
         if self.ui.bar is None:
             return
-        line = Text(self.indent + "  ")
+        # The same gutter the committed line gets, so a line does not shift
+        # sideways at the moment it stops being provisional.
+        line = Text(self.indent) + self.ui.code_gutter()
         line.append_text(self.ui.highlight(self.partial, self.language))
         self.ui.bar.set_lead(line)
 

@@ -24,7 +24,11 @@ import pytest
 from wynxo import theme
 
 TEXT_ROLES = ("accent", "text", "muted", "faint", "good", "warn", "bad",
-              "bar_text", "bar_dim", "bar_accent")
+              "bar_text", "bar_dim", "bar_accent",
+              # Syntax colour draws code, and code is read more carefully
+              # than prose: a number you cannot quite make out is a number
+              # you have to go and check.
+              "code", "keyword", "literal", "symbol")
 
 READABLE = 4.5
 """WCAG AA for body text. Not decoration: every one of these draws words."""

@@ -4150,7 +4150,6 @@ class Repl:
 
         self.ui.palette = theme_module.resolve(choice)
         apply_palette(self.ui.palette)
-        self.ui.code_theme = self.ui.palette.code_theme
         self.ui.success(f"theme: {choice}")
         self._preview_theme()
         return True

@@ -140,7 +140,13 @@ class TestFencedCodeIsActuallyHighlighted:
 
     def test_a_streamed_fence_reaches_the_screen_highlighted(self):
         """End to end: through the streamer, not just the helper."""
-        ui = UI()
+        import wynxo.ui as ui_module
+
+        # Named explicitly. The palette is process-global, so whichever test
+        # ran last decides it -- and under "minimal" every syntax role is
+        # deliberately the same colour, which would make this pass or fail
+        # on test ordering rather than on the code.
+        ui = UI(theme="purple")
         ui.console.file = io.StringIO()
         # A console that will actually emit colour. Setting _force_terminal
         # alone leaves color_system None, so every style is dropped on the
@@ -155,5 +161,48 @@ class TestFencedCodeIsActuallyHighlighted:
         streamer.finish()
         out = ui.console.file.getvalue()
         assert "for x in range(3):" in re.sub(r"\x1b\[[0-9;]*m", "", out)
-        # magenta is what _token_style gives a keyword.
-        assert "\x1b[35m" in out, "the keyword arrived uncoloured"
+        red, green, blue = (int(ui_module.KEYWORD[i:i + 2], 16)
+                            for i in (1, 3, 5))
+        assert f"\x1b[38;2;{red};{green};{blue}m" in out, \
+            "the keyword arrived uncoloured"
+
+
+class TestCodeFollowsTheTheme:
+    """Code was the one thing on screen /theme could not reach.
+
+    Inline spans were a hardcoded amber and highlighted blocks used raw ANSI
+    names, so an answer containing code was coloured by a scheme unrelated to
+    everything around it -- and the same expression in prose and in a fenced
+    block came out two different colours.
+    """
+
+    THEMES = ("purple", "midnight", "sakura", "kawaii", "ember", "catboy")
+
+    def test_switching_theme_switches_the_syntax_colours(self):
+        import wynxo.ui as ui_module
+
+        seen = set()
+        for theme in self.THEMES:
+            UI(theme=theme)
+            seen.add((ui_module.CODE_SPAN, ui_module.KEYWORD,
+                      ui_module.LITERAL, ui_module.SYMBOL))
+        assert len(seen) == len(self.THEMES), \
+            "two themes share a syntax palette, so /theme does nothing here"
+
+    def test_a_keyword_is_the_themes_keyword_colour(self):
+        import wynxo.ui as ui_module
+
+        for theme in self.THEMES:
+            ui = UI(theme=theme)
+            rendered = ui.highlight("for x in y:", "python")
+            styles = {str(span.style) for span in rendered.spans}
+            assert ui_module.KEYWORD in styles, theme
+
+    def test_comments_are_the_ignorable_colour(self):
+        """They are the one part of a program you may skip, which is what
+        FAINT is for. They were MUTED, the same weight as the operators."""
+        import wynxo.ui as ui_module
+
+        ui = UI(theme="purple")
+        rendered = ui.highlight("# just a note", "python")
+        assert {str(s.style) for s in rendered.spans} == {ui_module.FAINT}

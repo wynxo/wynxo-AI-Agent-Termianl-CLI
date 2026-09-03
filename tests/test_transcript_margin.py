@@ -43,6 +43,19 @@ def _lines(ui) -> list[str]:
     return [line for line in plain.split("\n") if line.strip()]
 
 
+def _content_column(line: str) -> int:
+    """Which column a line's words begin in.
+
+    Not the same as counting leading spaces. A quoted block opens with a
+    rule in column zero and its text still starts at two, so measuring the
+    blank prefix would call it flush with the edge when it is not.
+    """
+    body = line.lstrip()
+    if body[:1] in ("\u2502", "|"):
+        body = body[1:].lstrip()
+    return len(line) - len(body)
+
+
 class TestCodeBlocksAreIndented:
     """Somebody else's code is not the agent talking, so it is set in."""
 
@@ -51,7 +64,17 @@ class TestCodeBlocksAreIndented:
         ui.code("x = 1\ny = 2\n", "python")
         assert _lines(ui), "nothing was drawn"
         for line in _lines(ui):
-            assert line.startswith("  "), repr(line)
+            assert _content_column(line) == 2, repr(line)
+
+    def test_a_block_carries_a_rule_in_the_margin(self):
+        """Indentation alone was doing the whole job of saying "this is code
+        and not the answer" -- and two spaces is what a tool's detail line
+        uses, so a block read as a deeply indented paragraph that happened
+        to be coloured. One column of rule says it outright."""
+        ui = _ui()
+        ui.code("x = 1\ny = 2\n", "python")
+        for line in _lines(ui):
+            assert line.startswith("\u2502 "), repr(line)
 
     def test_the_content_is_still_there(self):
         ui = _ui()
@@ -65,11 +88,9 @@ class TestCodeBlocksAreIndented:
         answer.assistant_markdown("a sentence")
         block = _ui()
         block.code("x = 1\n", "python")
-        prose = min(len(line) - len(line.lstrip())
-                    for line in _lines(answer))
+        prose = min(_content_column(line) for line in _lines(answer))
         assert prose == 0
-        assert all(len(line) - len(line.lstrip()) > prose
-                   for line in _lines(block))
+        assert all(_content_column(line) > prose for line in _lines(block))
 
 
 class TestVerboseToolOutputSaysWhetherItWorked:
@@ -119,9 +140,9 @@ class TestVerboseToolOutputSaysWhetherItWorked:
         output, so the output is what carries the indent."""
         for ok in (True, False):
             head, *rest = _lines(self._run(ok))
-            assert not head.startswith(" "), repr(head)
+            assert _content_column(head) == 0, repr(head)
             for line in rest:
-                assert line.startswith("  "), repr(line)
+                assert _content_column(line) == 2, repr(line)
 
 
 class TestTheCompletionReportKeepsItsShape:

@@ -39,7 +39,24 @@ class Palette:
     bar_dim: str
     bar_accent: str
 
-    code_theme: str      # pygments theme for fenced blocks
+    code: str            # `inline code` in the model's prose
+    keyword: str         # a language's structure words
+    literal: str         # strings and numbers
+    symbol: str          # the names a program defines
+    """Syntax colour, as four roles rather than as a pygments theme.
+
+    Code was the one thing on screen /theme could not reach: inline spans
+    were a hardcoded amber and highlighted blocks used raw ANSI names --
+    magenta keywords, cyan numbers -- so an answer containing code was
+    coloured by a scheme unrelated to the rest of the interface, and the
+    same expression in prose and in a fenced block came out two different
+    colours.
+
+    Four roles because that is what the eye actually separates in a line of
+    code: what the language provides, what the program says, what it names,
+    and everything else. Finer distinctions than that are a pygments theme's
+    business, and this is drawn a line at a time as it streams.
+    """
 
     def as_dict(self) -> dict[str, str]:
         return {k: v for k, v in self.__dict__.items() if k != "name"}
@@ -72,7 +89,10 @@ PURPLE = Palette(
     bar_text="#e6e0f0",
     bar_dim="#a99cc4",
     bar_accent="#c9a6ff",
-    code_theme="material",
+    code='#e6c07b',
+    keyword='#c48fff',
+    literal='#8fd9a8',
+    symbol='#8ec8f0',
 )
 
 MIDNIGHT = Palette(
@@ -89,7 +109,10 @@ MIDNIGHT = Palette(
     bar_text="#dfe7ef",
     bar_dim="#9fb3c6",
     bar_accent="#8fd4ff",
-    code_theme="monokai",
+    code='#e6c07b',
+    keyword='#79c7ff',
+    literal='#8fd9a8',
+    symbol='#a9b7f5',
 )
 
 # Pink and violet, turned up. Same legibility rules as PURPLE -- the accent
@@ -109,7 +132,10 @@ SAKURA = Palette(
     bar_text="#fbe9f6",
     bar_dim="#d0a8d4",
     bar_accent="#ffb3e6",
-    code_theme="material",
+    code='#ffd08a',
+    keyword='#ff9fe0',
+    literal='#9df0b8',
+    symbol='#a9c8ff',
 )
 
 # Soft candy pink with lavender highlights. Unlike sakura's saturated neon,
@@ -129,7 +155,10 @@ KAWAII = Palette(
     bar_text="#fff2fa",
     bar_dim="#e3bddd",
     bar_accent="#ffc0e3",
-    code_theme="material",
+    code='#ffd8a0',
+    keyword='#ffaad6',
+    literal='#a8f0c0',
+    symbol='#a9d4ff',
 )
 
 EMBER = Palette(
@@ -146,7 +175,10 @@ EMBER = Palette(
     bar_text="#f0e6de",
     bar_dim="#c4ab98",
     bar_accent="#ffb87a",
-    code_theme="gruvbox-dark",
+    code='#f0c674',
+    keyword='#ffb072',
+    literal='#a8d98a',
+    symbol='#8fc6d9',
 )
 
 # A 16-colour fallback for terminals that cannot do more, and for anyone who
@@ -165,7 +197,10 @@ PLAIN = Palette(
     bar_text="default",
     bar_dim="bright_black",
     bar_accent="bright_magenta",
-    code_theme="ansi_dark",
+    code='yellow',
+    keyword='bright_magenta',
+    literal='green',
+    symbol='bright_cyan',
 )
 
 # Catboy heaven: the premium personality theme. Violet and pink over a
@@ -192,7 +227,10 @@ CATBOY = Palette(
     bar_text="#f2e9ff",
     bar_dim="#b9a3d4",
     bar_accent="#ff9fd6",    # pink, against the violet accent
-    code_theme="material",
+    code='#ffcf7a',
+    keyword='#d49aff',
+    literal='#8ff0c4',
+    symbol='#9ad0ff',
 )
 
 # Reduced-motion theme: the same plain grey palette with no animation
@@ -212,7 +250,10 @@ MINIMAL = Palette(
     bar_text="default",
     bar_dim="bright_black",
     bar_accent="bright_white",
-    code_theme="ansi_dark",
+    code='bright_white',
+    keyword='bright_white',
+    literal='white',
+    symbol='white',
 )
 
 PALETTES: dict[str, Palette] = {

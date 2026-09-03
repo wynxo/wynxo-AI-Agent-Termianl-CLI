@@ -624,7 +624,12 @@ class TestCodeStreamsLive:
 
         growing = [l for l in leads if l and "def check" in l]
         assert len(growing) > 3, f"only {len(growing)} states: {growing}"
-        assert any(l.strip() == "def c" for l in leads if l)
+        # The provisional line carries the same margin rule the committed
+        # one gets, so that a line does not shift sideways at the moment it
+        # stops being provisional. What is being pinned here is the growth,
+        # not the gutter.
+        assert any(l.strip().lstrip("\u2502| ") == "def c"
+                   for l in leads if l), leads
 
     def test_the_finished_block_is_still_correct(self):
         streamer, _ = self.setup_streamer()
