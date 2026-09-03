@@ -206,3 +206,169 @@ class TestCodeFollowsTheTheme:
         ui = UI(theme="purple")
         rendered = ui.highlight("# just a note", "python")
         assert {str(s.style) for s in rendered.spans} == {ui_module.FAINT}
+
+
+def styled_runs(text: str, width: int, theme: str = "purple"):
+    """What reached the screen, grouped by the colour it arrived in."""
+    from rich.console import COLOR_SYSTEMS
+
+    ui = UI(theme=theme)
+    ui.console.file = io.StringIO()
+    ui.console._force_terminal = True
+    ui.console._color_system = COLOR_SYSTEMS["truecolor"]
+    ui.console.width = ui.width = width
+    streamer = CodeStreamer(ui)
+    for char in text:
+        streamer.feed(char)
+    streamer.finish()
+
+    runs, pen = {}, ""
+    for part in re.split(r"(\x1b\[[0-9;]*m)", ui.console.file.getvalue()):
+        if part.startswith("\x1b"):
+            pen = part
+            continue
+        runs[pen] = runs.get(pen, "") + part
+    return {k: v.replace("\n", "") for k, v in runs.items()}
+
+
+def _pen(colour: str) -> str:
+    red, green, blue = (int(colour[i:i + 2], 16) for i in (1, 3, 5))
+    return f"\x1b[38;2;{red};{green};{blue}m"
+
+
+class TestAWrapIsNotTheEndOfALine:
+    """A wrap closed an open code span, so the backtick that really closed
+    it *opened* one -- and the rest of the sentence came out in the code
+    colour until the next wrap turned it off again. Narrower terminals wrap
+    more, so the answer was most wrong exactly where there was least room.
+    """
+
+    PROSE = ("The retry loop sleeps a fixed `RETRY_BACKOFF` between attempts, "
+             "so three failures cost about the same as one.")
+
+    @pytest.mark.parametrize("width", [30, 34, 42, 55, 70, 100])
+    def test_a_code_span_colours_itself_and_nothing_else(self, width):
+        import wynxo.ui as ui_module
+
+        UI(theme="purple")           # pin the palette: it is process-global
+        runs = styled_runs(self.PROSE, width)
+        assert runs.get(_pen(ui_module.CODE_SPAN), "") == "RETRY_BACKOFF"
+
+    @pytest.mark.parametrize("width", [30, 34, 42, 55, 70])
+    def test_bold_ends_where_it_was_closed(self, width):
+        runs = styled_runs(
+            "Some words before the **emphasis here** and a good deal of "
+            "ordinary sentence after it.", width)
+        assert runs.get("\x1b[1m", "") == "emphasis here"
+
+    @pytest.mark.parametrize("width", [30, 42, 70])
+    def test_nothing_is_lost_to_the_wrap(self, width):
+        runs = styled_runs(self.PROSE, width)
+        recovered = "".join(runs.values()).replace(" ", "")
+        wanted = self.PROSE.replace("`", "").replace(" ", "")
+        assert recovered == wanted
+
+    def test_a_real_line_end_still_closes_a_stray_backtick(self):
+        """The rule this preserves: one unpaired mark must not colour the
+        rest of the answer."""
+        import wynxo.ui as ui_module
+
+        UI(theme="purple")
+        runs = styled_runs("an `unclosed span\nand the next line entirely", 200)
+        assert "next line" not in runs.get(_pen(ui_module.CODE_SPAN), "")
+
+
+class TestStylingSurvivesTheBar:
+    """Every real turn streams through the activity bar, and the bar takes a
+    different path: the colour lives in the line's spans rather than going
+    out as escapes. Only the second path was ever looked at.
+
+    Carrying a word down to the next line rebuilt the part that stayed
+    behind out of ``line.plain`` -- a fresh Text made from the characters,
+    which is every span thrown away. So a sentence with a code span and a
+    bold word came out entirely plain as soon as it wrapped, and it looked
+    deliberate because the wrap was the only visible difference. The first
+    paragraph of an answer is usually plain up to its first wrap, which is
+    how this survived being looked at.
+    """
+
+    PROSE = ("The **total** wait becomes `RETRY_BACKOFF * (2**n - 1)`, which "
+             "is worth checking against `request_timeout` before raising it.")
+
+    def _plain(self, text, width, with_bar):
+        """Everything that reached the screen, escapes stripped."""
+        return re.sub(r"\x1b\[[0-9;]*m", "",
+                      self._written(text, width, with_bar))
+
+    def _written(self, text, width, with_bar):
+        from rich.console import COLOR_SYSTEMS
+
+        from wynxo.ui import ActivityBar
+
+        ui = UI(theme="purple")
+        ui.console.file = io.StringIO()
+        ui.console._force_terminal = True
+        ui.console._color_system = COLOR_SYSTEMS["truecolor"]
+        ui.console.width = ui.width = width
+        if with_bar:
+            ui.bar = ActivityBar(ui, effort="low")
+        streamer = CodeStreamer(ui)
+        for char in text:
+            streamer.feed(char)
+        streamer.finish()
+        return ui.console.file.getvalue()
+
+    def _runs(self, text, width, with_bar):
+        runs = {}
+        for line in self._written(text, width, with_bar).split("\n"):
+            pen = ""
+            for part in re.split(r"(\x1b\[[0-9;]*m)", line):
+                if part.startswith("\x1b"):
+                    pen = part
+                    continue
+                runs[pen] = runs.get(pen, "") + part
+        return runs
+
+    @pytest.mark.parametrize("width", [30, 34, 42, 60, 84])
+    @pytest.mark.parametrize("with_bar", [False, True])
+    def test_a_wrap_never_costs_the_colour_before_it(self, width, with_bar):
+        import wynxo.ui as ui_module
+
+        UI(theme="purple")
+        runs = self._runs(self.PROSE, width, with_bar)
+        red, green, blue = (int(ui_module.CODE_SPAN[i:i + 2], 16)
+                            for i in (1, 3, 5))
+        code = runs.get(f"\x1b[38;2;{red};{green};{blue}m", "")
+        assert code == "RETRY_BACKOFF * (2**n - 1)request_timeout"
+        assert runs.get("\x1b[1m", "") == "total"
+
+    @pytest.mark.parametrize("width", [30, 34, 42, 60, 84])
+    @pytest.mark.parametrize("with_bar", [False, True])
+    def test_neither_path_loses_a_character(self, width, with_bar):
+        """Where they wrap is allowed to differ -- with a live region the
+        line is still provisional and a word can be carried down whole,
+        while without one it has already been written and cannot be taken
+        back. What reaches the screen may not differ."""
+        # Spelled out rather than derived: stripping "**" from the source
+        # would take the one inside (2**n) with it, which is exactly the
+        # character this whole file exists to protect.
+        wanted = ("The total wait becomes RETRY_BACKOFF * (2**n - 1), which "
+                  "is worth checking against request_timeout before raising "
+                  "it.")
+        shown = self._plain(self.PROSE, width, with_bar)
+        assert "".join(shown.split()) == "".join(wanted.split())
+
+    @pytest.mark.parametrize("width", [30, 34, 42, 60, 84])
+    def test_the_two_paths_emphasise_the_same_words(self, width):
+        import wynxo.ui as ui_module
+
+        UI(theme="purple")
+        red, green, blue = (int(ui_module.CODE_SPAN[i:i + 2], 16)
+                            for i in (1, 3, 5))
+        code_pen = f"\x1b[38;2;{red};{green};{blue}m"
+
+        def emphasis(with_bar):
+            runs = self._runs(self.PROSE, width, with_bar)
+            return (runs.get(code_pen, ""), runs.get("\x1b[1m", ""))
+
+        assert emphasis(False) == emphasis(True)

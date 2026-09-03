@@ -34,11 +34,16 @@ class EffortPolicy:
     name: EffortName
 
     headline: str
-    """One line, in plain terms: how fast, how smart. This is what people
-    actually choose on."""
+    """One line, in plain terms: how much it thinks and how smart that makes
+    it. This is what people actually choose on."""
 
     speed: str
-    """Relative wall-clock cost, for the picker."""
+    """Relative wall-clock cost, shown beside the headline.
+
+    Kept out of the headline rather than repeated in it. Every headline used
+    to name the speed too -- "a little thinking, quick, reasonably smart" --
+    so the picker either said it twice or, as it did for the whole of this
+    field's life, never said it at all."""
 
     # --- loop shape -------------------------------------------------------
     plan: PlanMode
@@ -133,7 +138,7 @@ class EffortPolicy:
 POLICIES: dict[EffortName, EffortPolicy] = {
     "low": EffortPolicy(
         name="low",
-        headline="least thinking, fastest, least smart",
+        headline="least thinking, least smart",
         speed="fastest",
         plan="none",
         max_iterations=6,
@@ -150,7 +155,7 @@ POLICIES: dict[EffortName, EffortPolicy] = {
     ),
     "medium": EffortPolicy(
         name="medium",
-        headline="a little thinking, quick, reasonably smart",
+        headline="a little thinking, reasonably smart",
         speed="quick",
         plan="inline",
         max_iterations=16,
@@ -167,7 +172,7 @@ POLICIES: dict[EffortName, EffortPolicy] = {
     ),
     "high": EffortPolicy(
         name="high",
-        headline="real thinking, slower, noticeably smarter",
+        headline="real thinking, noticeably smarter",
         speed="slower",
         plan="explicit",
         max_iterations=40,
@@ -184,7 +189,7 @@ POLICIES: dict[EffortName, EffortPolicy] = {
     ),
     "xhigh": EffortPolicy(
         name="xhigh",
-        headline="hard thinking, slow, very thorough",
+        headline="hard thinking, very thorough",
         speed="slow",
         plan="explicit",
         max_iterations=80,
@@ -201,7 +206,7 @@ POLICIES: dict[EffortName, EffortPolicy] = {
     ),
     "max": EffortPolicy(
         name="max",
-        headline="maximum thinking, very slow, near its best",
+        headline="maximum thinking, near its best",
         speed="very slow",
         plan="critique",
         max_iterations=150,
@@ -218,7 +223,7 @@ POLICIES: dict[EffortName, EffortPolicy] = {
     ),
     "ultra": EffortPolicy(
         name="ultra",
-        headline="most thinking possible, slowest, smartest",
+        headline="most thinking possible, smartest",
         speed="slowest",
         plan="critique",
         max_iterations=400,

@@ -226,3 +226,81 @@ def test_the_table_holds_frozen_rows():
     with pytest.raises(Exception):
         COMMAND_LIST[0].name = "/nope"
     assert isinstance(COMMAND_LIST[0], Command)
+
+
+class TestTheEffortBandFiresWhereItSaysItDoes:
+    """Twenty-two cells of solid block, for a one-word request.
+
+    The docstring said "only on the way up, and only into max or ultra".
+    The code drew the band on every upward step, so /effort high answered
+    with a colour bar spelling HIGH -- the same decoration that had already
+    been taken out of the status strip for saying in four cells what the
+    word beside it said in four letters.
+    """
+
+    def _repl(self, animations=True, live=True):
+        import io
+
+        from wynxo.config import Config
+        from wynxo.ui import UI
+
+        repl = Repl.__new__(Repl)
+        ui = UI()
+        ui.console.file = io.StringIO()
+        ui.console.width = ui.width = 100
+        ui.live_ok = live
+        repl.ui = ui
+        repl.config = Config(animations=animations)
+        repl.drawn = []
+        return repl
+
+    async def _step(self, repl, previous, current):
+        import wynxo.ui as ui_module
+
+        real_celebrate, real_surge = ui_module.celebrate, ui_module.surge
+        ui_module.celebrate = lambda *a, **k: repl.drawn.append("band")
+
+        async def fake_surge(*a, **k):
+            repl.drawn.append("surge")
+
+        ui_module.surge = fake_surge
+        try:
+            await Repl._effort_surge(repl, previous, current)
+        finally:
+            ui_module.celebrate, ui_module.surge = real_celebrate, real_surge
+        return repl.drawn
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("previous,current", [
+        ("low", "medium"), ("low", "high"), ("medium", "high"),
+        ("high", "xhigh"), ("low", "xhigh"),
+    ])
+    async def test_an_ordinary_step_up_draws_nothing(self, previous, current):
+        repl = self._repl()
+        assert await self._step(repl, previous, current) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("current", ["max", "ultra"])
+    async def test_the_top_two_still_get_it(self, current):
+        repl = self._repl()
+        assert await self._step(repl, "low", current) == ["surge"]
+
+    @pytest.mark.asyncio
+    async def test_stepping_down_never_celebrates(self):
+        repl = self._repl()
+        assert await self._step(repl, "ultra", "max") == []
+
+    @pytest.mark.asyncio
+    async def test_staying_put_draws_nothing(self):
+        repl = self._repl()
+        assert await self._step(repl, "max", "max") == []
+
+    @pytest.mark.asyncio
+    async def test_reduced_motion_is_honoured(self):
+        repl = self._repl(animations=False)
+        assert await self._step(repl, "low", "ultra") == []
+
+    @pytest.mark.asyncio
+    async def test_with_nowhere_to_animate_it_is_drawn_once(self):
+        repl = self._repl(live=False)
+        assert await self._step(repl, "low", "max") == ["band"]

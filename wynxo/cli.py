@@ -3112,15 +3112,30 @@ class Repl:
 
     async def cmd_effort(self, args: list[str]) -> bool:
         if not args:
-            options = [(n, resolve(n).headline) for n in ORDER]
+            # The badge is what a level costs you in time, which is the
+            # trade being made and the only thing the headline does not
+            # say. EffortPolicy has carried a `speed` for every level since
+            # it was written, documented "for the picker", and the picker
+            # had never shown it -- six values written and none read.
+            options = [
+                Choice(value=name,
+                       label=name,
+                       badge=("current" if name == self.policy.name
+                              else resolve(name).speed),
+                       badge_style=("badge" if name == self.policy.name
+                                    else "badge.muted"),
+                       hint=resolve(name).headline)
+                for name in ORDER
+            ]
             chosen = await self._pick("effort", options, self.policy.name)
             if chosen is None:
                 return True
             if chosen is NO_PICKER:
                 self.ui.table(
-                    ["level", "behaviour"],
-                    [(n + ("  <-" if n == self.policy.name else ""),
-                      resolve(n).describe()) for n in ORDER],
+                    ["level", "speed", "behaviour"],
+                    [(name + ("  <-" if name == self.policy.name else ""),
+                      resolve(name).speed, resolve(name).describe())
+                     for name in ORDER],
                     title="effort levels",
                 )
                 return True
@@ -3147,34 +3162,30 @@ class Repl:
         """Make stepping up to the top two levels feel like it costs
         something, because it does.
 
-        Only on the way up, and only into max or ultra: an animation that
-        played on every change would be noise, and one that played on the way
-        down would be celebrating the wrong direction.
+        Only on the way up, and only into max or ultra. That is what this
+        has always said and not what it did: every upward step drew the
+        band, so /effort high answered a one-word request with twenty-two
+        cells of solid block spelling HIGH -- the same decoration that was
+        taken out of the status strip for saying in four cells of colour
+        what the word beside it already said. The success line under this
+        names the level and what it changes; a band that fires on every
+        change says nothing the line does not, and one that fires rarely
+        means something.
         """
         from .ui import celebrate, surge
 
-        if current == previous or not self.config.animations:
+        if current not in ("max", "ultra") or not self.config.animations:
             return
-        step_up = ORDER.index(current) - ORDER.index(previous)
-        if step_up <= 0:
+        if ORDER.index(current) <= ORDER.index(previous):
             return          # celebrating the way down would be the wrong mood
 
-        level = ORDER.index(current)
-        label = {"max": "MAX EFFORT", "ultra": "ULTRA"}.get(
-            current, current.upper())
-
+        label = "ULTRA" if current == "ultra" else "MAX EFFORT"
         if not self.ui.live_ok:
-            # No live bar to animate into (a pipe, non-interactive): the band
-            # is drawn once instead.
-            celebrate(self.ui, label, level, step_up)
+            # Nowhere to animate (a pipe, a dumb terminal): drawn once.
+            celebrate(self.ui, label, ORDER.index(current), 1)
             return
-
-        # The top two still get the moving version, which is worth the extra
-        # half second precisely because it does not happen often.
-        if current in ("max", "ultra"):
-            await surge(self.ui, label, ACCENT if current == "ultra" else BAR_ACCENT)
-        else:
-            celebrate(self.ui, label, level, step_up)
+        await surge(self.ui, label,
+                    ACCENT if current == "ultra" else BAR_ACCENT)
 
     async def cmd_pull(self, args: list[str]) -> bool:
         """Download a model from Ollama, then make it the active one.

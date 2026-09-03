@@ -583,9 +583,31 @@ class UI:
         self._resized(terminal_width())
 
     def _resized(self, width: int) -> None:
-        """Adopt a new width, from either source."""
+        """Adopt a new width, from either source.
+
+        A live region has to be told, not just the wrap column. rich erases
+        its region by moving the cursor up as many rows as its last render
+        occupied -- arithmetic that is relative to where the cursor is, and
+        a terminal reflows every line on the screen when the window changes
+        width. After that the region no longer knows where it is, stops
+        erasing, and appends: resizing the window during a turn filled the
+        rest of it with a copy of the status strip per frame, twelve a
+        second, and with the companion on, a column of stranded sprite.
+
+        Taking it down and putting it back re-anchors it at the cursor,
+        which is the only place the arithmetic can start from.
+        """
+        if width == self.width:
+            return              # a height-only resize changes nothing here
         self.width = width
         self.narrow = width < 60
+        if self.bar is not None:
+            # Flagged, not done here. The bar re-measures from inside its
+            # own render, so this runs *during* a repaint about half the
+            # time -- and stopping a live region from inside its own render
+            # does nothing at all, quietly. The flag is drained at the top
+            # of refresh(), which is always outside one.
+            self.bar.needs_reanchor = True
 
     # -- chrome ------------------------------------------------------------
 
@@ -1047,10 +1069,12 @@ class UI:
             return
         lines = body.split("\n")
         dropped = max(0, len(lines) - self.MAX_CODE_LINES)
-        gutter = self.code_gutter()
+        # Through code_line, which is the one place that knows how a line
+        # of code is drawn. This had its own loop, so the two disagreed the
+        # moment either changed: a long line kept its gutter when the model
+        # streamed it and lost it when a tool printed it.
         for line in lines[:self.MAX_CODE_LINES]:
-            self.console.print(gutter + self.highlight(line, language),
-                               highlight=False, overflow="fold")
+            self.code_line(line, language)
         if dropped:
             self.detail_line(
                 f"{self.g.ellipsis} {dropped} more line"
@@ -1108,9 +1132,35 @@ class UI:
 
     def code_line(self, line: str, language: str = "text",
                   indent: str = "") -> None:
-        self.console.print(
-            Text(indent) + self.code_gutter() + self.highlight(line, language),
-            highlight=False)
+        """One line of code, wrapped inside its own column.
+
+        rich wraps at the console edge and resumes at column zero, so on a
+        narrow terminal the tail of a long line landed flush left with no
+        gutter -- reading as prose, in the column the answer uses, in the
+        middle of a code block. Broken here instead, by cells rather than
+        characters, and never reflowed: a line of code means what its
+        characters say and rearranging it would make it say something else.
+        """
+        gutter = self.code_gutter()
+        room = max(8, self.width - cell_len(gutter.plain)
+                   - cell_len(indent) - 1)
+        rendered = self.highlight(line, language)
+        # Where to cut, measured in cells but sliced by index -- the two
+        # differ the moment the code contains a wide character.
+        cuts, width = [], 0
+        for index, char in enumerate(rendered.plain):
+            size = cell_len(char)
+            if width and width + size > room:
+                cuts.append(index)
+                width = 0
+            width += size
+        for piece in (rendered.divide(cuts) if cuts else [rendered]):
+            # soft_wrap, not no_wrap: no_wrap truncates, which would answer
+            # a line too long by throwing characters away -- the failure
+            # this method exists to prevent. Each piece is already cut to
+            # fit, so there is nothing left for the terminal to wrap.
+            self.console.print(Text(indent) + gutter + piece,
+                               highlight=False, soft_wrap=True)
 
     def _token_style(self, token) -> str:
         """A pygments token as one of the palette's four syntax roles.
@@ -1529,7 +1579,7 @@ class CodeStreamer:
         """
         for char in text:
             if self.column + cell_len(char) > self.width:
-                self._newline()
+                self._newline(hard=False)
             if not self.column and self.indent:
                 self._write(self.indent)
             self._write(char)
@@ -1566,7 +1616,7 @@ class CodeStreamer:
                 else:
                     # Either the word is longer than the line, or the line has
                     # already gone to the terminal and cannot be taken back.
-                    self._newline()
+                    self._newline(hard=False)
             if not self.column:
                 self._write(self.indent)
             self._write(char)
@@ -1657,7 +1707,7 @@ class CodeStreamer:
         """Write held-back characters through the ordinary prose path."""
         for char in text:
             if self.column + 1 > self.width:
-                self._newline()
+                self._newline(hard=False)
             if not self.column:
                 self._write(self.indent)
             self._write(char)
@@ -1698,12 +1748,25 @@ class CodeStreamer:
         return self.ui.bar is not None
 
     def _carry_word_down(self) -> None:
-        """Move the half-written word to the next line, taking it with us."""
-        keep = self.line.plain[: len(self.line.plain) - len(self.word)]
+        """Move the half-written word to the next line, taking it with us.
+
+        The part that stays behind is *sliced*, not rebuilt. It was rebuilt
+        from ``self.line.plain`` -- a fresh Text made out of the characters,
+        which is every span on the line thrown away. So a line that wrapped
+        by carrying a word lost the colour of everything before it: a
+        sentence with `a code span` and a **bold** word in it came out
+        entirely plain, and it looked deliberate because the wrap was the
+        only visible difference.
+
+        Invisible until a wrap fell after something styled. The first
+        paragraph of an answer is usually plain up to its first wrap, which
+        is why this survived being looked at.
+        """
+        cut = len(self.line.plain) - len(self.word)
         carried = self.word
-        self.line = self._blank(keep)
-        self.column = cell_len(keep)
-        self._newline()
+        self.line = self.line[:cut]
+        self.column = cell_len(self.line.plain)
+        self._newline(hard=False)
         self.word = ""
         self._write(self.indent)
         self._write(carried)
@@ -1801,7 +1864,22 @@ class CodeStreamer:
             self.ui.console.file.write(self._pen_change() + text)
             self.ui.console.file.flush()
 
-    def _newline(self) -> None:
+    def _newline(self, hard: bool = True) -> None:
+        """End the line in progress.
+
+        ``hard`` is a real end of line in the text. ``hard=False`` is a
+        wrap, which is this renderer's own decision about where the terminal
+        runs out -- not something the model wrote.
+
+        The difference decides whether emphasis is reset, and it was not
+        being made. A wrap inside `a code span` closed the span, so the
+        backtick that really closed it *opened* one instead, and the rest of
+        the sentence came out in the code colour until the next wrap turned
+        it off again. Narrower terminals wrap more, so the answer was most
+        wrong exactly where there was least room to spare. The reasoning was
+        already written two lines down for the held marks -- "a wrap is not
+        the end of a line" -- and the emphasis state was missed by it.
+        """
         if self.started:
             if self.ui.bar is not None:
                 self.ui.bar.set_lead(None)
@@ -1811,13 +1889,15 @@ class CodeStreamer:
                 self.ui.console.file.write(
                     ("\x1b[0m" if self._pen_shown else "") + "\n")
                 self.ui.console.file.flush()
-        # Emphasis is reset: a line is where it ends, so one stray backtick
-        # or asterisk cannot colour the rest of the answer. What is *held*
-        # is not reset here -- a wrap is not the end of a line, and a
-        # half-seen "*" may still pair with the next character.
         self.line = self._blank()
         self.column = 0
-        self.in_span = self.in_bold = self.in_heading = False
+        # Emphasis is reset at a real end of line, so one stray backtick or
+        # asterisk cannot colour the rest of the answer -- but not at a
+        # wrap, which is where the terminal ran out rather than where the
+        # model stopped. What is *held* is never reset here: a half-seen
+        # "*" may still pair with the next character either way.
+        if hard:
+            self.in_span = self.in_bold = self.in_heading = False
         self._pen_shown = ""
 
     def _ensure_started(self) -> None:
@@ -2033,6 +2113,13 @@ class ActivityBar:
         """When an event last arrived. Only ever used to stop claiming
         activity, never to invent it."""
         self._live: Live | None = None
+        self.needs_reanchor = False
+        """Set when the terminal changed width, drained by refresh().
+
+        Not acted on where it is set: the bar re-measures the terminal from
+        inside its own render, so about half of all resizes are noticed
+        during a repaint, and stopping a live region from inside its own
+        render does nothing at all -- quietly."""
         self._painted = 0.0
         """When the live region was last repainted at someone's request.
         See REFRESH_INTERVAL: the stream asks once per character, and the
@@ -2355,6 +2442,10 @@ class ActivityBar:
         """
         if self._live is None:
             return
+        if self.needs_reanchor:
+            self.needs_reanchor = False
+            self._reanchor()
+            return              # _reanchor repaints on its way out
         now = time.monotonic()
         if not force and now - self._painted < self.REFRESH_INTERVAL:
             return
@@ -2558,6 +2649,28 @@ class ActivityBar:
         self.ui.refresh_size()
         self.tick()
         yield self._renderable()
+
+    def _reanchor(self) -> None:
+        """Put the live region back where the cursor is now.
+
+        rich erases its region by moving the cursor up as many rows as its
+        last render occupied. That arithmetic starts from where the cursor
+        is, and a terminal reflows every line on screen when the window
+        changes width -- so after a resize the region no longer knows where
+        it is, stops erasing, and appends instead. Resizing during a turn
+        filled the rest of it with one copy of the status strip per frame,
+        twelve a second, and with the companion on, a column of stranded
+        sprite between them.
+
+        Taking it down and putting it back is what re-anchors it: stop()
+        leaves the cursor on a fresh line and start() measures from there.
+        Never called from inside a render -- see needs_reanchor.
+        """
+        self.stop()
+        self.start()
+        self._painted = 0.0
+        if self._live is not None:
+            self._live.refresh()
 
     def stop(self) -> None:
         live, self._live = self._live, None
