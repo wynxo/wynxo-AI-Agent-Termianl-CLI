@@ -1804,9 +1804,22 @@ class Repl:
         """
         if not self.config.warm_start:
             return
+        # The exact prompt the first question will carry in front of it:
+        # the system message and the tool schemas, which together are the
+        # five thousand tokens a local model reads before writing a word.
+        # Read now, in the background, they are cached by the time anyone
+        # presses enter -- and if the server does not reuse the prefix, the
+        # only cost is arithmetic done early while somebody was typing.
+        try:
+            wire = self.agent.session.wire()
+            tools = (self.agent.tools.ollama_schemas()
+                     if self.agent.native_tools else None)
+        except Exception:                                   # noqa: BLE001
+            wire, tools = None, None
         try:
             self._warming = asyncio.ensure_future(
-                self.client.warm(self.config.model))
+                self.client.warm(self.config.model, messages=wire,
+                                 tools=tools))
         except RuntimeError:
             self._warming = None            # no loop: nothing to warm into
 

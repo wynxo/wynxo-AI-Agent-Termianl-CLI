@@ -393,8 +393,10 @@ class OllamaClient:
             ))
         return out
 
-    async def warm(self, model: str = "", num_ctx: int = 0) -> bool:
-        """Ask the server to load the model, without generating anything.
+    async def warm(self, model: str = "", num_ctx: int = 0,
+                   messages: list[dict] | None = None,
+                   tools: list[dict] | None = None) -> bool:
+        """Ask the server to load the model, and read the prompt into it.
 
         An empty message list is Ollama's documented way to say "load this
         and hold it": the model is read from disk and the KV cache is
@@ -407,7 +409,24 @@ class OllamaClient:
         behind a status line that said "thinking", which is not what was
         happening.
 
-        The options must be the ones every later request will carry.
+        Given ``messages``, it goes one step further and has the model
+        *read* them, one token of generation to make sure the prompt is
+        actually evaluated. That matters because loading the weights is
+        only half the wait. wynxo's system prompt and tool schemas come to
+        somewhere north of five thousand tokens, and a local model reads
+        every one of them before it writes a word -- where `ollama run`
+        sends your message and nothing else. Ollama keeps the KV cache
+        between requests and reuses whatever prefix matches, so a first
+        question that arrives after this shares all of it and pays only for
+        itself.
+
+        The prompt has to be the one the first real request will send, or
+        the prefix does not match and the work is thrown away. Nothing here
+        can tell whether the server honoured it; the cost of being wrong is
+        one request's worth of arithmetic done early, in the background,
+        while somebody types.
+
+        The options must be the ones every later request will carry too.
         Loading under a different num_ctx would be worse than not loading at
         all: Ollama would evict and reload the model on the first real
         question, so the wait would be paid twice.
@@ -416,12 +435,21 @@ class OllamaClient:
         a machine with no room -- each is the first request's problem to
         report properly, and none of them is a reason to fail a start-up.
         """
-        payload = {
+        payload: dict[str, Any] = {
             "model": model or self.config.model,
-            "messages": [],
+            "messages": messages or [],
             "keep_alive": self.config.keep_alive,
             "options": {"num_ctx": num_ctx or self.config.num_ctx},
         }
+        if messages:
+            # One token, discarded. Zero is accepted by some builds as "load
+            # only" and by others as "evaluate nothing", and a warm that
+            # quietly skipped the prefill would look exactly like one that
+            # worked.
+            payload["options"]["num_predict"] = 1
+            payload["stream"] = False
+            if tools:
+                payload["tools"] = tools
         try:
             r = await self._client.post("/api/chat", json=payload,
                                         timeout=self.config.request_timeout)
