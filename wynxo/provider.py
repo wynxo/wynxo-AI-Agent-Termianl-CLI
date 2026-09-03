@@ -410,7 +410,7 @@ class OllamaClient:
             prompt_tokens=as_int(data.get("prompt_eval_count")),
             completion_tokens=as_int(data.get("eval_count")),
             total_duration_ns=as_int(data.get("total_duration")),
-            load_duration_ns=as_int(data.get("total_duration")),
+            load_duration_ns=as_int(data.get("load_duration")),
         )
 
     def _explain_transient(self, exc: Exception, emitted: bool) -> str:
