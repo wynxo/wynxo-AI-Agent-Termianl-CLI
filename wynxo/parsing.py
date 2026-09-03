@@ -68,10 +68,14 @@ class ParsedTurn:
 _HIDDEN_TAGS = ("think", "thinking", "reasoning", "tool_call")
 
 
-# The argument a file-writing tool puts the actual code in. Watched while a
-# tool call streams so the file can be shown being written, rather than
-# appearing whole once the call completes.
-CODE_KEYS = ("content", "new_text", "new_string", "text")
+# The argument worth watching arrive. A file-writing tool puts the code in
+# one of these; shell puts the command in "command", which is the other
+# thing somebody wants to see being composed before it runs.
+#
+# Deliberately not every argument. A path, a pattern, a line number are
+# short and arrive in a flash, and watching them appear says nothing --
+# what is worth the screen is the long value the model is composing.
+CODE_KEYS = ("content", "new_text", "new_string", "text", "command")
 
 _ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f",
             '"': '"', "\\": "\\", "/": "/"}
@@ -239,6 +243,55 @@ class LiveContentFilter:
         began inside the block. The reasoning already streamed cannot be
         un-printed, but the caller can pass start_in_thinking=True next turn
         and every turn after this one comes out clean."""
+
+    def call_name(self) -> str:
+        """The tool being called, as soon as the half-written call says.
+
+        The name comes before the arguments in every tool-call format worth
+        supporting, so it is known before there is any code to show -- which
+        is what lets the display decide whether it is watching a file being
+        written or a command being composed, rather than assuming one and
+        mislabelling the other.
+
+        Empty until the name's closing quote has arrived: a name read out of
+        a value still being written would be the wrong name.
+        """
+        return self._finished_string(("name",))
+
+    def call_path(self) -> str:
+        """What the half-written call is about to act on, if it says.
+
+        The path comes before the content in every writing tool's
+        arguments, so it is known before there is a single line to show --
+        which is the difference between watching "write_file . (unnamed)"
+        fill up and watching demo.py being written.
+        """
+        return self._finished_string(("path", "file_path", "file"))
+
+    def _finished_string(self, keys) -> str:
+        """The value of the first of ``keys``, once its closing quote is in.
+
+        Only when finished: a value still being written would be read out
+        half-formed, and a path shown as "dem" is worse than no path.
+        """
+        if self.open_tag != "tool_call":
+            return ""
+        for key in keys:
+            marker = f'"{key}"'
+            at = self.buffer.find(marker)
+            if at == -1:
+                continue
+            rest = self.buffer[at + len(marker):]
+            colon = rest.find(":")
+            if colon == -1:
+                continue
+            rest = rest[colon + 1:].lstrip()
+            if not rest.startswith('"'):
+                continue
+            end = _first_unescaped_quote(rest[1:])
+            if end != -1:
+                return rest[1:1 + end]
+        return ""
 
     def code_delta(self) -> str:
         """New code written since this was last asked, while a call streams.

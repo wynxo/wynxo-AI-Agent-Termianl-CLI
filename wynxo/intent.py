@@ -54,6 +54,14 @@ class Intent:
     targets: tuple[str, ...] = ()
     """For a system action: what to launch, in the user's own words. Passed
     to the catalog as-is -- resolving it is the OS's job, not ours."""
+    command: str = ""
+    """A command to run inside the last target, when it is a terminal.
+
+    "open a terminal and run main.py" is one request, not two: the terminal
+    and what it should be running arrive together, and splitting them opens
+    an empty window and calls it done. It applies to the last target
+    because that is where the sentence puts it -- "the calculator, then the
+    browser, then a terminal running main.py"."""
     then_coding: bool = False
     """A genuinely combined request ("open the editor and inspect this
     repo"): do the action, then carry on into the agent loop. Only ever set
@@ -84,6 +92,7 @@ Classify the user's message. Answer with one JSON object and nothing else.
 
 {"kind": "conversation" | "system_action" | "coding",
  "targets": [],
+ "command": "",
  "then_coding": false}
 
 conversation   chat, greetings, reactions, opinions, questions about you,
@@ -92,6 +101,13 @@ system_action  the user wants an application or program opened, launched,
                started or run on their machine. Put what they called it in
                "targets", in their own words. Do not translate it into a
                filename.
+               Several are allowed, in the order asked for: "open the
+               calculator then the browser" -> ["the calculator", "the
+               browser"].
+               If they also say what should run inside a terminal, put that
+               in "command": "open the terminal and run main.py" ->
+               targets ["the terminal"], command "main.py". Leave
+               "command" empty otherwise.
 coding         the user wants something done to code, files, tests or this
                project: read, find, explain, fix, add, refactor, run tests.
 
@@ -132,7 +148,16 @@ def parse(raw: str) -> Intent | None:
                     str(t).strip() for t in raw_targets
                     if isinstance(t, (str, int, float)) and str(t).strip()
                 )[:4]
+                command = data.get("command")
+                command = (str(command).strip()
+                           if isinstance(command, (str, int, float)) else "")
                 return Intent(kind=kind, targets=targets,
+                              # Only where it can mean anything. A command
+                              # on a conversation or a coding turn is the
+                              # model filling in a field it was shown, and
+                              # acting on it would run something nobody
+                              # asked for.
+                              command=command if kind == SYSTEM_ACTION else "",
                               then_coding=bool(data.get("then_coding")))
 
     # A bare word, which is what a very small model tends to answer with.
@@ -176,5 +201,6 @@ async def classify(call, request: str, *, chatting: bool) -> Intent:
         # the user's own; hand the whole message to the catalog and let it
         # decide whether anything matches.
         decided = Intent(kind=SYSTEM_ACTION, targets=(request,),
+                         command=decided.command,
                          then_coding=decided.then_coding)
     return decided

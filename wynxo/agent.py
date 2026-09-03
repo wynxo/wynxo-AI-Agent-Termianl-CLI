@@ -418,6 +418,18 @@ class Callbacks:
     async def on_tool_result(self, name: str, ok: bool, display: str, output: str, event: ToolEvent | None = None) -> None: ...
     async def on_tool_output(self, name: str, line: str) -> None: ...
     async def on_code(self, text: str) -> None: ...
+
+    async def on_code_target(self, name: str, path: str = "") -> None:
+        """Which tool the code now streaming belongs to, and on what.
+
+        Sent as soon as the half-written call says, which is before the
+        long argument it is about to write. A display that does not care
+        can ignore it -- but one that does can tell a file being written
+        from a command being composed, instead of assuming the first and
+        mislabelling the second, and can head the block with the file's
+        name instead of "(unnamed)".
+        """
+
     async def on_todos(self, rendered: str) -> None: ...
     async def on_warning(self, message: str) -> None: ...
 
@@ -466,9 +478,15 @@ class Agent:
         self.permissions = PermissionStore()
         self.permissions.preapprove(config.auto_approve)
 
-        self.native_tools = True
-        """Set false when the model's template cannot do tool calls, in which
-        case tools are described in the prompt in Hermes format instead."""
+        self.native_tools = not config.stream_tool_calls
+        """Whether tool calls go through the server's own parser.
+
+        False when the model's template cannot do tool calls, in which case
+        tools are described in the prompt in Hermes format instead -- and
+        also when stream_tool_calls asks for that path deliberately, so the
+        command or the file being written can be watched arriving. Set here
+        as well as in detect_capabilities so the very first request of a
+        session already honours the setting."""
 
         self.project_map = ""
         """A one-page layout of the codebase, refreshed by the CLI. Local
@@ -564,13 +582,21 @@ class Agent:
         it turns Hermes-style prompted calls back off. Without the reset, a
         model switch could only ever downgrade the tool-calling path, never
         upgrade it, and the better path would stay silently unused.
+
+        ``stream_tool_calls`` overrides the detection in the other
+        direction: a model that *can* use the native path is asked not to,
+        because the native path is the one where a tool call cannot be
+        watched being written. That is a choice about what to see, not a
+        fact about the model, so it survives detection rather than being
+        overwritten by it.
         """
         try:
             info = await self.client.show(self.config.model)
         except ProviderError:
             return
         self._model_info = info
-        self.native_tools = not info.capabilities_known or info.supports_tools
+        self.native_tools = ((not info.capabilities_known or info.supports_tools)
+                             and not self.config.stream_tool_calls)
         if info.capabilities_known and not info.supports_tools:
             await self.cb.on_warning(
                 f"{self.config.model} has no native tool support; using Hermes-style "
@@ -623,6 +649,12 @@ class Agent:
         # text-mode form of a tool call, applied to the native one.
         argument_buffer = ""
         argument_shown = 0
+        named: tuple[str, str] = ("", "")
+        """(tool, path) for the arguments now streaming, once the call says.
+
+        A pair rather than the name alone because the path can arrive after
+        the name does -- so the display is told again when it does, and the
+        block it has already headed "(unnamed)" gets its file."""
         truncated = False
         evidence = ModelEvidence()
         # The request is about to go out and nothing on screen says so. The
@@ -673,6 +705,16 @@ class Agent:
                     # tool call" and "the file exists", which on a slow local
                     # model is long enough to wonder whether it is working.
                     if code := live_filter.code_delta():
+                        # The name first, and only once. It is known before
+                        # any argument has arrived, which is what lets the
+                        # display label the block correctly rather than
+                        # guessing "write_file" and being wrong about every
+                        # shell command.
+                        called = live_filter.call_name()
+                        where = live_filter.call_path()
+                        if called and (called, where) != named:
+                            named = (called, where)
+                            await self.cb.on_code_target(called, where)
                         await self.cb.on_code(code)
             if chunk.arguments_delta and stream_content:
                 argument_buffer += chunk.arguments_delta
@@ -865,8 +907,17 @@ class Agent:
                               elapsed=time.monotonic() - started)
 
         outcomes = []
-        for target in decision.targets or (request,):
-            result = await launcher.invoke({"query": target})
+        targets = list(decision.targets or (request,))
+        for index, target in enumerate(targets):
+            args = {"query": target}
+            # The command goes to the last target, which is where the
+            # sentence puts it: "kcalc, then firefox, then konsole running
+            # main.py".
+            if decision.command and index == len(targets) - 1:
+                args["command"] = decision.command
+                if not await self._may_launch(launcher, args):
+                    break
+            result = await launcher.invoke(args)
             self._note_terminal(result)
             await self.cb.on_tool_result(
                 launcher.name, result.ok, result.display or target,
@@ -874,7 +925,14 @@ class Agent:
             self.session.add_tool_result(launcher.name, result.output)
             outcomes.append(result)
 
-        content = "\n".join(r.output for r in outcomes if r.output).strip()
+        # What the tool told the *model* is not what the user should read.
+        # launch_application's output ends with an instruction to reply and
+        # stop -- scaffolding, aimed at the model -- and this content is
+        # shown verbatim. Three applications meant three copies of it as
+        # the answer to "open kcalc, firefox and konsole".
+        content = "\n".join(
+            r.metadata.get("said") or r.output for r in outcomes
+            if (r.metadata.get("said") or r.output)).strip()
         self.session.add_assistant(content)
         self.session.save()
         result = TurnResult(content=content, iterations=1,
@@ -892,6 +950,35 @@ class Agent:
             follow.content = f"{content}\n\n{follow.content}".strip()
             return follow
         return result
+
+    async def _may_launch(self, launcher, args: dict) -> bool:
+        """Ask before a launch that carries a command. True to go ahead.
+
+        This path does not go through the tool loop, so it does not get the
+        tool loop's permission check for free -- and a launch carrying a
+        command is a command. It runs outside every guard the shell tool
+        has, in a window wynxo does not own, so it is asked about on the
+        same terms rather than waved through as "just opening an
+        application".
+        """
+        from .permissions import summarise_call
+
+        if not self.permissions.needs_prompt(launcher.name, launcher.mutating,
+                                             args):
+            return True
+        summary = summarise_call(launcher.name, args, self.workspace)
+        decision = await self.cb.ask_permission(
+            launcher.name, summary, args.get("command", ""))
+        if decision is Decision.ALLOW_ALWAYS:
+            self.permissions.remember(launcher.name, args)
+            return True
+        if decision in (Decision.DENY, Decision.ABORT):
+            self.permissions.record_denial(launcher.name, summary)
+            self.session.add_tool_result(
+                launcher.name,
+                "The user declined to run that command. Do not retry it.")
+            return False
+        return True
 
     async def _run_tool_calls(self, turn: ParsedTurn) -> bool:
         """Execute a turn's tool calls. Returns False if the user aborted.

@@ -22,7 +22,8 @@ from enum import Enum
 
 from .config import MIN_USABLE_CONTEXT, Config
 from .parsing import parse_turn
-from .provider import OllamaClient, ProviderError, same_model
+from .provider import (OllamaClient, ProviderError, faster_on_gpu,
+                       gpu_share, same_model)
 from .ui import ACCENT, BAD, GOOD, MUTED, WARN, UI
 
 
@@ -330,32 +331,102 @@ class Doctor:
         # stops complaining.
         weights = await self._weights_of(self.config.model)
         fitting = mine.context_that_fits(weights, self.config.num_ctx)
-        smaller = fitting or max(4096, self.config.num_ctx // 2)
         fix = [
             "Every token is generated at the speed of the slowest part, so "
             "this is the main reason generation feels slow: a split model "
             "is typically several times slower than one that fits entirely "
             "on the GPU.",
-            f"The KV cache grows with the context window. wynxo asks for "
-            f"num_ctx={self.config.num_ctx:,}; `ollama run` uses the "
-            f"model's own default, which is usually far smaller -- that is "
-            f"the whole difference.",
-            (f"About {fitting:,} tokens of context would fit entirely on "
-             f"the GPU: try `/ctx {smaller}`, then `/doctor` again."
-             if fitting else
-             f"Try `/ctx {smaller}`, then `/doctor` again."),
         ]
-        if smaller < MIN_USABLE_CONTEXT:
+        if fitting:
             fix.append(
-                f"That is below the {MIN_USABLE_CONTEXT:,} an agent really "
-                f"wants, so expect more compaction mid-task. A smaller "
-                f"quantisation of {self.config.model} buys the window back.")
+                f"The KV cache grows with the context window. wynxo asks "
+                f"for num_ctx={self.config.num_ctx:,}; `ollama run` uses "
+                f"the model's own default, which is usually far smaller -- "
+                f"that is the whole difference.")
+            fix.append(
+                f"`/ctx {fitting}` would keep it entirely on the GPU. Try "
+                f"that, then `/doctor` again.")
+            if fitting < MIN_USABLE_CONTEXT:
+                fix.append(
+                    f"That is below the {MIN_USABLE_CONTEXT:,} an agent "
+                    f"really wants, so expect more compaction mid-task. A "
+                    f"smaller quantisation of {self.config.model} buys the "
+                    f"window back.")
+        elif (paging := self._memory_squeeze(mine, weights)):
+            # The card is not the only ceiling, and on a small machine it
+            # is not the interesting one: a model needs its weights and its
+            # cache resident somewhere, and what will not fit in the card
+            # and the RAM together is read off disk on every token.
+            window, budget = paging
+            facts.append(f"{gigabytes(budget)} of card and RAM together")
+            fix.append(
+                f"It needs {gigabytes(mine.size)} at num_ctx="
+                f"{self.config.num_ctx:,}, and this machine has about "
+                f"{gigabytes(budget)} to give it once the system has its "
+                f"share -- so part of it is being read off disk on every "
+                f"token, which is slower than the CPU by a long way.")
+            if window:
+                fix.append(
+                    f"`/ctx {window}` brings it inside that. That is the "
+                    f"difference between memory and disk, and it is worth "
+                    f"more here than any GPU setting.")
+        else:
+            # The window is not the lever here. This used to fall back to
+            # halving num_ctx, which on a card the weights already do not
+            # fit is somebody changing a setting for two points: layers go
+            # to the GPU whole, each with its slice of the cache, so
+            # shrinking the cache moves a fraction of a fraction.
+            floor = mine.share_at(weights, self.config.num_ctx, 2048)
+            fix.append(
+                f"{gigabytes(weights)} of weights against about "
+                f"{gigabytes(mine.size_vram)} of card, so the context "
+                f"window is not the lever: even `/ctx 2048` would only "
+                f"reach {floor:.0%}. A smaller model, or a tighter "
+                f"quantisation of this one, is what helps.")
+        if (better := await self._better_model(mine.size_vram, share)) is not None:
+            fix.append(
+                f"`/model {better.name}` -- installed already at "
+                f"{gigabytes(better.size)}, and about "
+                f"{gpu_share(better.size, mine.size_vram):.0%} of it would "
+                f"run on the GPU.")
         self.checks.append(Check(
             "model in memory", Status.WARN,
             f"{share:.0%} on the GPU, the rest on the CPU",
             fix="\n".join(fix),
             facts=facts,
         ))
+
+    SYSTEM_MEMORY = 2_000_000_000
+    """RAM this machine needs for everything that is not the model."""
+
+    def _memory_squeeze(self, loaded, weights: int):
+        """(window that would fit, budget) when the model is paging, else ()."""
+        from .platforms import total_memory
+
+        ram = total_memory()
+        if not ram or not loaded.size:
+            return ()
+        budget = loaded.size_vram + max(0, ram - self.SYSTEM_MEMORY)
+        if loaded.size <= budget:
+            return ()
+        return (loaded.context_within(weights, self.config.num_ctx, budget),
+                budget)
+
+    async def _better_model(self, vram: int, share: float):
+        """The installed model that would run most of itself on this card.
+
+        Ranked by how much of it lands on the GPU rather than by whether it
+        fits whole: a 4.4 GB model on a 3.6 GB card runs about four fifths
+        there, and four fifths is transformative next to a fifth.
+        """
+        try:
+            installed = await self.client.list_models()
+        except ProviderError:
+            return None
+        for candidate in faster_on_gpu(installed, vram, share):
+            if not same_model(candidate.name, self.config.model):
+                return candidate
+        return None
 
     async def _weights_of(self, model: str) -> int:
         """The model's size on disk, which is what its weights cost loaded.

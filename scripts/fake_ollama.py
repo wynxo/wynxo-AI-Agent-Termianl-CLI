@@ -27,6 +27,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 MODELS = [
     ("qwen3-coder:30b", 18_600_000_000, "30.5B", "Q4_K_M"),
     ("qwen3:8b", 5_200_000_000, "8.2B", "Q4_K_M"),
+    # A real name from a real machine. Namespaced tags from the hub run to
+    # thirty-odd characters, which is a third of a terminal, and every
+    # header, strip and border that shows the model has to survive one.
+    ("huihui_ai/Qwen3.8-abliterated:27b", 16_400_000_000, "27B", "Q4_K_M"),
 ]
 CONTEXT_LENGTH = 262_144
 
@@ -77,6 +81,58 @@ def _last_request(messages: list[dict]) -> dict:
             continue
         return message
     return {}
+
+
+PROMPTED_TOOLS = "## Calling tools"
+"""The marker wynxo puts in the system prompt when it wants tool calls as
+text rather than through the server's own parser.
+
+A real model reads that section and answers with a <tool_call> block. This
+harness has to as well, or the prompted path -- the one where a command or
+a file can be watched being written, because content streams and a parsed
+tool call does not -- cannot be exercised here at all."""
+
+_ALL_TOOLS = {"read_file", "write_file", "edit_file", "list_dir", "glob",
+              "grep", "shell", "todo_write", "launch_application",
+              "run_tests"}
+
+
+def _prompted(messages: list[dict]) -> bool:
+    return any(PROMPTED_TOOLS in str(m.get("content") or "")
+               for m in messages or [])
+
+
+def _as_text(reply: dict) -> dict:
+    """A reply's tool calls rewritten the way a model without native ones
+    would write them: a <tool_call> block in ordinary content."""
+    calls = reply.get("tool_calls")
+    if not calls:
+        return reply
+    blocks = []
+    for call in calls:
+        fn = call.get("function", call)
+        blocks.append("<tool_call>\n"
+                      + json.dumps({"name": fn.get("name"),
+                                    "arguments": fn.get("arguments", {})})
+                      + "\n</tool_call>")
+    out = {k: v for k, v in reply.items() if k != "tool_calls"}
+    out["content"] = (out.get("content", "") + "\n".join(blocks)).strip()
+    return out
+
+
+def reply_for(messages: list[dict], tools: list | None) -> dict:
+    """What to answer, in the shape this request asked for.
+
+    One place, so every branch of decide() below can go on returning a
+    native tool call and still be usable on the prompted path.
+    """
+    if tools or not _prompted(messages):
+        return decide(messages, tools)
+    # Described in the prompt rather than sent as schemas: decide() is
+    # given the names it would have had, and its answer is rewritten.
+    offered = [{"function": {"name": n, "parameters": {"properties": {}}}}
+               for n in sorted(_ALL_TOOLS)]
+    return _as_text(decide(messages, offered))
 
 
 def decide(messages: list[dict], tools: list | None) -> dict:
@@ -274,7 +330,7 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(think, str) and think not in ("low", "medium", "high", "max"):
             return self._send({"error": f'invalid think value: "{think}"'}, 400)
 
-        reply = decide(payload.get("messages", []), payload.get("tools"))
+        reply = reply_for(payload.get("messages", []), payload.get("tools"))
         content = reply.get("content", "")
         thinking = reply.get("thinking", "") if think else ""
         tool_calls = reply.get("tool_calls")

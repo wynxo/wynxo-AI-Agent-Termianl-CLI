@@ -40,8 +40,8 @@ from . import livediff
 from .doctor import run_doctor
 from .effort import ORDER, resolve
 from .permissions import Decision
-from .provider import (ProviderError, check_context, make_client,
-                       same_model)
+from .provider import (ProviderError, check_context, gpu_share,
+                       make_client, same_model)
 from .queue import Pending
 from .session import Session
 from .keys import KeyWatcher
@@ -75,13 +75,22 @@ def _first_sentence(text: str) -> str:
     return head[:stop + 1] if stop > 0 else head
 
 
-def _is_a_sentence(text: str) -> bool:
+def _is_a_sentence(text: str, tool: str = "") -> bool:
     """Whether a tool's "target" is really prose.
 
     A target is a thing: a path, a pattern, a count. Three or more words
     with no path separator in them is a tool describing itself, which
     belongs under the head rather than on it.
+
+    Never for shell, whose target is a command by construction. ``ls wynxo
+    | head -4`` is five words with no slash in it, and it is not a tool
+    describing itself -- it is the single most important thing on the
+    block. Judged prose, it was moved off the head line and printed in the
+    row the command's own output should have been in, so the block said
+    what was run twice and what came of it not at all.
     """
+    if tool == "shell":
+        return False
     words = text.split()
     return len(words) >= 3 and "/" not in text and "\\" not in text
 
@@ -121,7 +130,14 @@ _ACTIVITY = {
     "shell": "running", "todo_write": "planning", "launch_application": "launching",
     "run_tests": "testing",
 }
-_LANGUAGE = {"read_file": "python", "shell": "console"}
+_LANGUAGE = {"read_file": "python", "shell": "text"}
+"""How to highlight a tool's output, where it is known.
+
+shell was "console", which is pygments' *session* lexer: it expects a
+transcript with prompts and commands in it, and what a shell tool returns
+is the output on its own. Beyond that, a command prints whatever it prints
+-- a file listing, JSON, a stack trace, a progress bar -- and "text" is the
+honest answer to what language that is."""
 
 # Keys that work *while the agent is running*, not just at the prompt.
 LIVE_KEYS = {"ctrl+o": "thinking", "ctrl+t": "detail",
@@ -422,6 +438,9 @@ COMMAND_LIST: tuple[Command, ...] = (
                      "last answer)", "cmd_copy", ("last",)),
     Command("/memory", "show, add to, or forget long-term memory", "cmd_memory"),
     Command("/thinking", "show or hide the model's reasoning", "cmd_thinking"),
+    Command("/stream",
+            "watch tool calls being written: on | off",
+            "cmd_stream", ("on", "off")),
     Command("/plan", "show the current plan", "cmd_plan"),
     Command("/new", "start a new chat: fresh history, screen and log", "cmd_new"),
     Command("/resume",
@@ -561,6 +580,11 @@ def gallery_columns(width: int) -> int:
     return max(1, room // (sprite.WIDTH + len(STATE_GAP)))
 
 
+def _gigabytes(size: int) -> str:
+    """A byte count as a person would say it."""
+    return f"{size / 1e9:.1f} GB" if size else "an unknown amount"
+
+
 class TerminalCallbacks(Callbacks):
     """Wires the agent's events to the terminal."""
 
@@ -637,6 +661,11 @@ class TerminalCallbacks(Callbacks):
         """Ctrl-T: show full tool output instead of a one-line summary."""
         self.tokens = 0
         self._coder: CodeStreamer | None = None
+        self._code_tool = ""
+        """The tool whose argument is currently streaming, once the
+        half-written call has named itself."""
+        self._code_path = ""
+        """What that call is about to act on, once it says."""
         """The file currently being written, while a tool call streams."""
         self._thinking_buffer: list[str] = []
         """Every thought of the whole session, shown or not.
@@ -1091,9 +1120,22 @@ class TerminalCallbacks(Callbacks):
         self._held_output.clear()
         target, detail = self._call_summary(name, ok, display, output)
         self.ui.tool_call(name, target, detail, ok=ok)
-        # Ctrl-T: the whole output under the block, when it says more than
-        # the block's one dim line already did.
-        if self.verbose_tools and len(output.strip().splitlines()) > 1:
+        # Ctrl-T: the whole output under the block, whenever it says more
+        # than the block's one dim line already did.
+        #
+        # It used to require more than one line of it, which is the same
+        # bug from the other end: `which firefox` answers in one line, the
+        # detail toggle showed nothing for it, and that is exactly the
+        # command somebody turns the toggle on for. What matters is
+        # whether the block already carries the whole answer, not how many
+        # lines the answer happens to have.
+        whole = output.strip()
+        # Compared the way the detail was made, or the two differ by the
+        # "ERROR:" the detail had stripped off and a one-line failure is
+        # printed twice -- once as the block's own reason, once as a
+        # highlighted quote of the same sentence.
+        spoken = whole if ok else whole.split("ERROR:", 1)[-1].strip()
+        if self.verbose_tools and whole and spoken != detail.strip():
             # Whole lines. Slicing at four thousand characters cut the
             # last one wherever it happened to land -- usually mid-token,
             # sometimes mid-escape -- and said nothing about the rest.
@@ -1106,22 +1148,58 @@ class TerminalCallbacks(Callbacks):
         async with self._status_lock:
             await self._on_code_locked(text)
 
-    async def _on_code_locked(self, text: str) -> None:
-        """Code arriving inside a tool call, shown as it is written.
+    WRITES_A_FILE = frozenset({"write_file", "edit_file", "multi_edit",
+                               "github_write"})
+    """Tools whose streaming argument is a file's contents.
 
-        Its own streamer rather than the prose one: this is known to be a
-        file's contents, so none of the fence-detection guesswork applies and
+    Everything else that streams -- shell, and whatever else puts a long
+    value in a named argument -- is written into the transcript instead. A
+    diff card is a picture of a file changing, and a command is not that."""
+
+    async def on_code_target(self, name: str, path: str = "") -> None:
+        """Which tool the code about to stream belongs to, and on what.
+
+        Arrives before the first fragment, because the name and the path
+        both come before the long argument in the call. Without it the
+        display had to assume, and it assumed write_file -- so a shell
+        command being composed opened a diff card headed with a filename
+        it did not have and a verb it had not earned, and a file really
+        being written was headed "(unnamed)" until the call finished.
+        """
+        async with self._status_lock:
+            self._code_tool = name
+            self._code_path = path or self._code_path
+            if path and self.card is not None and self.card.live \
+                    and not self.card.path:
+                self.card.path = path
+            if self.bar is not None:
+                # The strip said "thinking" while a file was visibly being
+                # written under it. No tool has *started* yet -- the call
+                # is still being composed -- but what it is going to be is
+                # already known, and that is what the region is for.
+                self.bar.update(activity=_ACTIVITY.get(name, "writing"),
+                                detail=path,
+                                state=self._companion_state(name))
+                self.bar.refresh(force=True)
+
+    async def _on_code_locked(self, text: str) -> None:
+        """An argument arriving inside a tool call, shown as it is written.
+
+        Its own streamer rather than the prose one: this is a value out of
+        a JSON object, so none of the fence-detection guesswork applies and
         every character can go straight out.
         """
         if self._streaming:
             self._end_stream()
-        if self.card is None or not self.card.live:
+        writing = self._code_tool in self.WRITES_A_FILE or not self._code_tool
+        if writing and (self.card is None or not self.card.live):
             # The fragments arrive before the call has been parsed, so there
-            # is no tool name or path yet. Opened blank and filled in by
-            # on_tool_start; opening it there instead meant the card was
-            # created after the stream it existed to catch.
-            self.card = livediff.DiffCard(tool="write_file")
-        if self.card.live:
+            # is no path yet. Opened blank and filled in by on_tool_start;
+            # opening it there instead meant the card was created after the
+            # stream it existed to catch.
+            self.card = livediff.DiffCard(tool=self._code_tool or "write_file",
+                                          path=self._code_path)
+        if writing and self.card is not None and self.card.live:
             # An edit in flight: the fragments belong to its card, which
             # draws in the live region. Streaming them into the conversation
             # as well would put the whole file on screen twice.
@@ -1129,7 +1207,9 @@ class TerminalCallbacks(Callbacks):
             return
         if self._coder is None:
             self.ui.console.print()
-            self.ui.console.print(Text("  writing", style=f"bold {MUTED}"))
+            self.ui.console.print(
+                Text("  " + _ACTIVITY.get(self._code_tool, "writing"),
+                     style=f"bold {MUTED}"))
             self._coder = CodeStreamer(self.ui, indent="  ",
                                        style=MUTED, code=False, literal=True)
         self.typed.feed(self._write_code, text)
@@ -1190,14 +1270,33 @@ class TerminalCallbacks(Callbacks):
         rest = len(body.splitlines()) - 1
         if not target:
             return "", first[:110] + (f"  (+{rest} lines)" if rest else "")
-        if _is_a_sentence(target):
+        if _is_a_sentence(target, name):
             # Some tools summarise themselves in prose -- run_tests reports
             # "syntax check passed (compileall)" -- and prose on the head
             # line reads as a filename that got out of hand. The head is
             # for what was acted on; anything that is really a sentence
             # belongs underneath with the rest of the outcome.
             return "", target[:110]
-        return target, (_trim_echo(first, name, target)[:110]
+        detail = _trim_echo(first, name, target)
+        if not detail.strip(" $"):
+            # The display said nothing the head line had not already said,
+            # so fall through to what the tool actually produced. shell's
+            # display is "$ <command>" and the command is the head, so
+            # trimming the echo left a bare "$" -- and what the command
+            # printed appeared nowhere: not in the block, and not under it
+            # either, because the expansion only ever fired on output with
+            # more than one line in it. `which firefox` is one line, and it
+            # is the whole answer.
+            if spoken := sanitise(output).strip():
+                lines = spoken.splitlines()
+                detail, rest = lines[0], len(lines) - 1
+                if not ok:
+                    # Same rule as the display path above, which this
+                    # falls through from: the cross already says it
+                    # failed, so "ERROR:" in front of the reason is the
+                    # mark repeated in words.
+                    detail = detail.split("ERROR:", 1)[-1].strip() or detail
+        return target, (detail[:110]
                         + (f"  (+{rest} lines)" if rest else ""))
 
     def _commit_card(self) -> None:
@@ -1264,6 +1363,7 @@ class TerminalCallbacks(Callbacks):
 
     def _end_code(self) -> None:
         self.typed.flush()
+        self._code_tool = self._code_path = ""
         if self._coder is not None:
             self._coder.finish()
             self._coder = None
@@ -1757,35 +1857,119 @@ class Repl:
         self._placement_checked = self.PLACEMENT_TRIES
         if not mine.split:
             return
+
+        installed: list = []
         weights = 0
         try:
-            for entry in await self.client.list_models():
-                if same_model(entry.name, self.config.model):
-                    weights = entry.size
-                    break
+            installed = await self.client.list_models()
         except Exception:                                   # noqa: BLE001
             pass
+        for entry in installed:
+            if same_model(entry.name, self.config.model):
+                weights = entry.size
+                break
+
+        # One block, not three. It went out as a warn() followed by two
+        # info()s, and info() has no marker -- so the warning wrapped under
+        # its own "!" at column two while the explanation under it started
+        # hard against column zero. Three ragged paragraphs for one fact.
+        # Head and detail is the shape every other block here uses.
         fits = mine.context_that_fits(weights, self.config.num_ctx)
-        self.ui.console.print()
-        self.ui.warn(f"{self.config.model} is {mine.on_gpu:.0%} on the GPU; "
-                     f"the rest is running on the CPU, which is most of why "
-                     f"generation feels slow.")
+        vram = mine.size_vram
+        # Every line that offers a command leads with it. Trailed at the
+        # end of a sentence, "/model qwen2.5-coder:7b" wrapped between the
+        # command and its argument -- so the one thing on screen meant to
+        # be typed came out as two, and could not be copied.
+        note = [f"{self.config.model} is {mine.on_gpu:.0%} on the GPU -- "
+                f"most of why generation feels slow"]
         if fits >= MIN_USABLE_CONTEXT:
-            self.ui.info(f"the KV cache grows with the context window, and "
-                         f"num_ctx is {self.config.num_ctx:,}. About "
-                         f"{fits:,} tokens would fit entirely on the GPU: "
-                         f"/ctx {fits}")
+            note.append(f"/ctx {fits} would keep it entirely on the GPU: "
+                        f"the KV cache grows with the context window, and "
+                        f"num_ctx is {self.config.num_ctx:,}")
         elif fits:
-            self.ui.info(f"only about {fits:,} tokens of context would fit "
-                         f"on the GPU, which is tight for an agent. "
-                         f"/ctx {fits} trades context for speed; a smaller "
-                         f"quantisation of {self.config.model} buys back "
-                         f"both.")
+            note.append(f"/ctx {fits} is all that would fit on the GPU, "
+                        f"which is tight for an agent -- it trades context "
+                        f"for speed")
+        elif (paging := self._memory_squeeze(mine, weights)):
+            # The card is not the only ceiling. A model needs its weights
+            # and its cache resident somewhere, and when that comes to more
+            # than the card and the machine's RAM together the rest is read
+            # off disk on every token -- which is slow in a way no amount
+            # of CPU makes up for, and is the one condition where a smaller
+            # window helps a machine with no GPU room left to gain.
+            window, budget = paging
+            note.append(
+                f"it needs {_gigabytes(mine.size)} at num_ctx="
+                f"{self.config.num_ctx:,}, and this machine has about "
+                f"{_gigabytes(budget)} of card and RAM to give it -- so "
+                f"part of it is being read off disk on every token")
+            if window:
+                note.append(f"/ctx {window} brings it inside that, which is "
+                            f"the difference between memory and disk")
         else:
-            self.ui.info("the weights alone do not fit on this GPU, so no "
-                         "context window is small enough. A smaller model "
-                         "or a tighter quantisation is the fix.")
-        self.ui.info("/doctor explains it in full.")
+            # The window is not the lever here, and saying "halve num_ctx"
+            # would send somebody to change a setting for two points. The
+            # weights are what does not fit on the card, and layers go
+            # there whole with their slice of the cache, so shrinking the
+            # cache moves a fraction of a fraction.
+            floor = mine.share_at(weights, self.config.num_ctx, 2048)
+            note.append(
+                f"{_gigabytes(weights)} of weights against about "
+                f"{_gigabytes(vram)} of card, so the context window is not "
+                f"the lever: even /ctx 2048 would only reach {floor:.0%}")
+        if (better := self._better_model(installed, vram, mine.on_gpu)) is not None:
+            note.append(f"/model {better.name} -- installed already at "
+                        f"{_gigabytes(better.size)}, and about "
+                        f"{gpu_share(better.size, vram):.0%} of it would "
+                        f"run on the GPU")
+        note.append("/doctor explains it in full")
+        self.ui.console.print()
+        self.ui.warn("\n".join(note))
+
+    SYSTEM_MEMORY = 2_000_000_000
+    """RAM this machine needs for everything that is not the model.
+
+    A desktop, a browser, the editor the agent is being pointed at. Left
+    out of the budget, "it fits" would be true right up to the moment the
+    machine started swapping, which is the condition being diagnosed."""
+
+    def _memory_squeeze(self, loaded, weights: int):
+        """(window that would fit, budget) when the model is paging, else ().
+
+        The card is not the only ceiling, and on a small machine it is not
+        the interesting one. A 20.1 GB model on a card with 3.6 GB and a
+        machine with 16 GB is over the line once the system has its share,
+        and the remainder is read off disk on every token.
+        """
+        from .platforms import total_memory
+
+        ram = total_memory()
+        if not ram or not loaded.size:
+            return ()
+        budget = loaded.size_vram + max(0, ram - self.SYSTEM_MEMORY)
+        if loaded.size <= budget:
+            return ()
+        return (loaded.context_within(weights, self.config.num_ctx, budget),
+                budget)
+
+    def _better_model(self, installed: list, vram: int, share: float):
+        """The model already here that would run most of itself on the GPU.
+
+        "A smaller model is the fix" is advice, not help: it leaves the one
+        question that matters -- which one -- to somebody who has just been
+        told their setup is slow.
+
+        Not a fits-or-does-not test. A 4.4 GB model on a 3.6 GB card runs
+        about four fifths on the GPU, and four fifths is transformative
+        next to the fifth a 17.7 GB model manages; ruling it out for not
+        fitting whole would be withholding the answer for being imperfect.
+        """
+        from .provider import faster_on_gpu
+
+        for candidate in faster_on_gpu(installed, vram, share):
+            if not same_model(candidate.name, self.config.model):
+                return candidate
+        return None
 
     def _start_warming(self) -> None:
         """Load the model while the user is typing, not after.
@@ -1804,24 +1988,50 @@ class Repl:
         """
         if not self.config.warm_start:
             return
-        # The exact prompt the first question will carry in front of it:
-        # the system message and the tool schemas, which together are the
-        # five thousand tokens a local model reads before writing a word.
-        # Read now, in the background, they are cached by the time anyone
-        # presses enter -- and if the server does not reuse the prefix, the
-        # only cost is arithmetic done early while somebody was typing.
+        try:
+            self._warming = asyncio.ensure_future(self._warm())
+        except RuntimeError:
+            self._warming = None            # no loop: nothing to warm into
+
+    async def _warm(self) -> None:
+        """Load the model, and read the prompt into it if that is cheap.
+
+        Two steps, because the second one is only a good idea on a machine
+        that can do it quickly.
+
+        Reading the prompt in advance is worth a lot: the system prompt and
+        the tool schemas come to somewhere north of five thousand tokens,
+        and Ollama reuses a matching prefix, so a first question that
+        arrives afterwards pays only for itself.
+
+        But Ollama runs one request at a time per model. On a machine where
+        most of the model is on the CPU, reading five thousand tokens takes
+        longer than anybody will wait -- and the first question queues
+        behind it, so the priming meant to save that turn *becomes* that
+        turn's wait. A minute and a half of "loading the model" to answer
+        "hi", against five seconds for `ollama run`, which sends two
+        tokens and nothing else.
+
+        So the weights are loaded first, the placement is read back, and
+        the prompt goes in only when the model is sitting on the GPU where
+        reading it is quick.
+        """
+        await self.client.warm(self.config.model)
+        try:
+            loaded = await self.client.running()
+        except Exception:                                   # noqa: BLE001
+            return
+        mine = next((m for m in loaded
+                     if same_model(m.name, self.config.model)), None)
+        if mine is not None and mine.split:
+            return
         try:
             wire = self.agent.session.wire()
             tools = (self.agent.tools.ollama_schemas()
                      if self.agent.native_tools else None)
         except Exception:                                   # noqa: BLE001
-            wire, tools = None, None
-        try:
-            self._warming = asyncio.ensure_future(
-                self.client.warm(self.config.model, messages=wire,
-                                 tools=tools))
-        except RuntimeError:
-            self._warming = None            # no loop: nothing to warm into
+            return
+        await self.client.warm(self.config.model, messages=wire, tools=tools)
 
     async def _offer_endpoint_discovery(self) -> str | None:
         """The configured server answered nothing: look on this machine and
@@ -2517,7 +2727,14 @@ class Repl:
         # to it. So did the rate, the token count and the turn duration --
         # they are the live numbers of a turn that has finished, and the
         # strip shows them while it runs, which is when they mean anything.
-        pieces += [self.config.model,
+        # The model gets a share of the line, not all of it. A namespaced
+        # tag from the hub runs to thirty-odd characters, and at anything
+        # under a hundred columns that pushed the effort level, the context
+        # figure and every key hint off the border -- so the longest string
+        # on the line, and the only one that never changes, was the one
+        # that survived.
+        pieces += [self.ui.shorten_model(self.config.model,
+                                         max(12, self.ui.width // 3)),
                    self.policy.name,
                    f"ctx {100 * used / max(1, limit):.0f}%"]
         if self.agent.permissions.mode is not Mode.MANUAL:
@@ -4619,6 +4836,69 @@ class Repl:
             # The chooser is a prompt_toolkit Application too, and its
             # teardown takes the SIGINT handler with it.
             self._arm_interrupt()
+
+    async def cmd_stream(self, args: list[str]) -> bool:
+        """Watch a tool call being written, or do not.
+
+        Ollama's native tool-calling parses the model's output before
+        handing it over -- the arguments on the wire are a parsed map, not
+        a string, so a half-written call cannot be represented and the
+        whole thing arrives in one message once the parser has finished
+        it. There is nothing partial to show. Revealing a finished string
+        slowly would be an animation pretending to be a stream.
+
+        Asked for as text instead, a tool call is ordinary content, and
+        ordinary content streams: the command, or the file being written,
+        appears a character at a time exactly as the answer does.
+
+        A real trade, so it is a choice rather than a default. Native calls
+        are parsed by the server against the model's own template and are
+        the sturdier path on a tool-tuned model. What the other one buys,
+        besides being watchable, is a shorter prompt -- the same tools cost
+        about 3,400 tokens as JSON schemas and 1,300 described in prose --
+        and on a model reading its prompt at CPU speed that is most of a
+        minute off every request.
+        """
+        want = args[0].lower() if args else ""
+        if want in ("yes", "show", "live"):
+            want = "on"
+        elif want in ("no", "hide"):
+            want = "off"
+        now = "on" if self.config.stream_tool_calls else "off"
+        if want not in ("on", "off"):
+            chosen = await self._pick(
+                "tool calls",
+                [("on", "watch the command or the file being written, and "
+                        "send a shorter prompt"),
+                 ("off", "let the server parse tool calls -- sturdier, but "
+                         "they arrive finished")],
+                now,
+            )
+            if chosen is NO_PICKER:
+                self.ui.info(f"watching tool calls is {now}  "
+                             f"{self.ui.g.dot}  /stream on | off")
+                return True
+            if chosen is None:
+                return True
+            want = chosen
+        if want == now:
+            return True
+        self.config.stream_tool_calls = want == "on"
+        self.config.save()
+        # Detection reads the setting, so this is what actually moves the
+        # agent onto the other path -- and it refreshes the system prompt,
+        # which is where the tool descriptions live when they are not sent
+        # as schemas.
+        await self.agent.detect_capabilities()
+        if want == "on":
+            self.ui.success("tool calls stream as they are written")
+            self.ui.info("the model writes them as text now, which is also "
+                         "about 1,900 fewer tokens a request")
+        else:
+            self.ui.success("tool calls are parsed by the server")
+            self.ui.info("sturdier, and they arrive finished rather than "
+                         "being written in front of you")
+        return True
 
     async def cmd_thinking(self, args: list[str]) -> bool:
         """Show or hide the model's reasoning.

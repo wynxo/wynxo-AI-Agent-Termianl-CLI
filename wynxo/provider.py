@@ -86,17 +86,101 @@ class Loaded:
         the weights alone, where no window is small enough and the fix is a
         smaller model or a tighter quantisation instead.
         """
+        return self.context_within(weights, num_ctx, self.size_vram)
+
+    def context_within(self, weights: int, num_ctx: int, budget: int) -> int:
+        """The largest window whose whole model stays inside ``budget``.
+
+        The same arithmetic against any ceiling, because the card is not
+        the only one that matters. A model needs its weights and its cache
+        resident *somewhere*, and when that comes to more than the card and
+        the machine's RAM together the rest is read off disk on every
+        token -- which is slow in a way no amount of CPU makes up for, and
+        is the one condition where a smaller window helps a machine with no
+        GPU room left to gain.
+        """
         if weights <= 0 or num_ctx <= 0 or self.size <= weights:
             return 0
         per_token = (self.size - weights) / num_ctx
-        if per_token <= 0:
-            return 0
-        room = self.size_vram - weights
-        if room <= 0:
+        room = budget - weights
+        if per_token <= 0 or room <= 0:
             return 0
         # Down to a round number: this is an estimate, and a recommendation
         # of "13,417" claims a precision it does not have.
         return int(room / per_token) // 1024 * 1024
+
+    def share_at(self, weights: int, num_ctx: int, want: int) -> float:
+        """How much of this model would sit on the GPU at ``want`` tokens.
+
+        Layers are placed whole, each with its slice of the KV cache, so
+        what fits is ``vram / (weights + kv)`` -- and shrinking the window
+        shrinks only the kv half of that. Where the weights already do not
+        fit there is almost nothing to win: 17.7 GB of weights against 2.4
+        GB of cache means going from a 32k window to a 2k one moves
+        eighteen percent of the model onto the card instead of twenty, and
+        telling somebody to halve their context there sends them to change
+        a setting for two points.
+
+        Checked against a real machine: 17.7 GB of weights, 20.1 GB in
+        memory at 32,768 tokens, 3.6 GB of it on the card. This predicts
+        17.9%; Ollama reported 18%.
+        """
+        if weights <= 0 or num_ctx <= 0 or self.size <= weights:
+            return self.on_gpu
+        per_token = (self.size - weights) / num_ctx
+        need = weights + per_token * max(0, want)
+        return min(1.0, self.size_vram / need) if need > 0 else 1.0
+
+
+FAST_ENOUGH = 0.8
+"""The share on the GPU past which a model counts as fast.
+
+Not a fits-or-does-not line. Generation runs at the speed of the slowest
+part, and a fifth of a model on the CPU is a modest tax where four fifths
+of it there is the difference between forty tokens a second and five."""
+
+
+def gpu_share(weights: int, vram: int) -> float:
+    """Roughly how much of a model of this size would sit on the GPU.
+
+    Weights only, which makes it an upper bound and says so: a model also
+    needs a KV cache, and how big that is depends on its shape. What the
+    number is for is comparing candidates, and for that it is enough --
+    generation runs at the speed of the slowest part, so this is very
+    nearly the speed.
+    """
+    if weights <= 0:
+        return 0.0
+    return min(1.0, max(0, vram) / weights)
+
+
+def faster_on_gpu(models: list["ModelInfo"], vram: int,
+                  better_than: float) -> list["ModelInfo"]:
+    """Installed models that would run more of themselves on this card.
+
+    Not a fits-or-does-not test. A 4.4 GB model on a 3.6 GB card runs about
+    four fifths on the GPU, and four fifths is transformative next to the
+    fifth a 17.7 GB model manages -- so ruling it out for not fitting whole
+    would be withholding the answer for being imperfect.
+
+    ``vram`` is estimated from what Ollama managed to place on the card for
+    the model it has loaded. It fills the GPU as far as it can, so that is a
+    fair reading of the card's capacity, and an underestimate rather than an
+    over one.
+    """
+    if vram <= 0:
+        return []
+    scored = [(gpu_share(m.size, vram), m) for m in models if m.size > 0]
+    good = [(share, m) for share, m in scored if share > better_than + 0.2]
+    # Above the bar, the largest wins; below it, the one with most of
+    # itself on the card. Ranked on share alone, a 3B that fits whole beat
+    # a 7B at four fifths -- and at four fifths the 7B is already fast, so
+    # that is trading away most of the model to win a few percent of a
+    # speed you already had. Clamping the share is what makes "fast enough"
+    # a bar rather than a race.
+    good.sort(key=lambda pair: (min(pair[0], FAST_ENOUGH), pair[1].size),
+              reverse=True)
+    return [m for _, m in good]
 
 
 def same_model(a: str, b: str) -> bool:
