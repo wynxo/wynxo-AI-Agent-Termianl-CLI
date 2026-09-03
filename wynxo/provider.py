@@ -896,11 +896,26 @@ def _openai_messages(messages: list[dict]) -> list[dict]:
     protocol wants ``type: function`` on every call, ``function.arguments``
     as a JSON string, and a matching ``tool_call_id`` on each tool result -
     the call id is carried through so the pair lines up.
+
+    Ollama's wire shape carries no ids at all, so most conversations reach
+    here without them and both sides have to invent the same ones. The
+    announcing side numbered its calls by position within the message and
+    the answering side did not: every result with no stored id fell back to
+    a flat "call_0". A turn that called two tools therefore sent two answers
+    both claiming to answer the first, and left the second call unanswered
+    -- which a strict server rejects outright, and a lenient one acts on
+    with the results attributed to the wrong calls. Both sides count
+    positions now, which is the convention ``close_open_tool_calls`` was
+    already written against.
     """
     out: list[dict] = []
+    answered = 0
+    """How many results have followed the current assistant message. The
+    nth answers the nth call."""
     for message in messages:
         role = message.get("role", "user")
         if role == "assistant":
+            answered = 0
             item: dict[str, Any] = {
                 "role": "assistant",
                 "content": message.get("content") or None,
@@ -927,10 +942,12 @@ def _openai_messages(messages: list[dict]) -> list[dict]:
             out.append({
                 "role": "tool",
                 "tool_call_id": message.get("tool_call_id")
-                               or message.get("id") or "call_0",
+                               or message.get("id") or f"call_{answered}",
                 "content": message.get("content") or "",
             })
+            answered += 1
         else:
+            answered = 0
             out.append({"role": role, "content": message.get("content") or ""})
     return out
 
