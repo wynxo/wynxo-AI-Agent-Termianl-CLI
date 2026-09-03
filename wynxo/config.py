@@ -79,6 +79,17 @@ class Config(Schema):
     keep_alive = Field(str, "How long Ollama keeps the model resident. A reload of "
                             "a 30B costs many seconds and makes the agent feel broken.",
                        default="30m")
+    warm_start = Field(bool, "Load the model at start-up rather than on the first "
+                             "question, so the wait happens while you are typing.",
+                       default=True)
+    """Most of why `ollama run` feels quicker: it loads the model as the
+    terminal opens. wynxo asked the server for nothing until you pressed
+    enter, so the first question of every session paid for a cold load --
+    tens of seconds for a 30B -- behind a line that said "thinking".
+
+    Settable because it is not free: it holds the model in memory from the
+    moment wynxo starts, which is wrong on a shared machine, and on a laptop
+    that runs several models it evicts whichever one was there."""
     request_timeout = Field(float, "Seconds to wait for a response. Local generation "
                                    "on CPU is genuinely slow; do not be stingy.",
                             default=600.0, ge=1.0, le=86400.0)

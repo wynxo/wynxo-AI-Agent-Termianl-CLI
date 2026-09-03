@@ -1296,6 +1296,10 @@ class Repl:
                                 else "mommy" if config.voice == "mommy"
                                 else "default")
         self._last_elapsed = 0.0
+        self._warming: "asyncio.Future | None" = None
+        """The background model load started at connect. Held so it is not
+        collected mid-flight, and so a turn can say what it is waiting
+        behind."""
 
         # The talker speaks; the coder works. Constructed here so /talker can
         # turn it on and off mid-session without rebuilding the agent.
@@ -1539,7 +1543,31 @@ class Repl:
             self.policy.name,
             str(self.workspace),
         )
+        self._start_warming()
         return True
+
+    def _start_warming(self) -> None:
+        """Load the model while the user is typing, not after.
+
+        Most of why `ollama run` feels quicker than wynxo: it loads the
+        model as the terminal opens, so it is resident by the time you have
+        finished typing. wynxo asked the server for nothing until you
+        pressed enter, so the first question of every session paid for a
+        cold load -- tens of seconds for a 30B -- behind a status line that
+        said "thinking".
+
+        Fired and not awaited: start-up must not wait on it, and it must not
+        be able to fail one. The reference is kept so the task is not
+        collected mid-flight and so a turn can tell whether the load it is
+        waiting behind is this one.
+        """
+        if not self.config.warm_start:
+            return
+        try:
+            self._warming = asyncio.ensure_future(
+                self.client.warm(self.config.model))
+        except RuntimeError:
+            self._warming = None            # no loop: nothing to warm into
 
     async def _offer_endpoint_discovery(self) -> str | None:
         """The configured server answered nothing: look on this machine and
@@ -1793,6 +1821,13 @@ class Repl:
         used = self.agent.session.token_estimate()
         limit = self.policy.context_budget or self.config.num_ctx
         bar.context_pct = 100 * used / max(1, limit)
+        if self._warming is not None and not self._warming.done():
+            # The wait at the start of a session is usually not the model
+            # thinking, it is the model being read off disk -- tens of
+            # seconds for a 30B, and the strip said "thinking" through all
+            # of it. Only until the load finishes: the first real stage the
+            # agent reports replaces this.
+            bar.activity = "loading the model"
         self.callbacks.bar = bar
         self.ui.bar = bar
 

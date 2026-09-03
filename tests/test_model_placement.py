@@ -124,3 +124,103 @@ class TestToolsThatCannotWorkAreNotOffered:
 
         monkeypatch.setattr("wynxo.gh.shutil.which", lambda name: None)
         assert "github_read" not in build_registry(tmp_path).describe()
+
+
+class TestTheModelIsLoadedBeforeItIsNeeded:
+    """`ollama run` loads the model as the terminal opens, so it is resident
+    by the time you have finished typing. wynxo asked the server for nothing
+    until you pressed enter, so the first question of every session paid for
+    a cold load -- tens of seconds for a 30B -- behind a line that said
+    "thinking", which is not what was happening.
+    """
+
+    def _client(self, handler):
+        import httpx
+
+        from wynxo.config import Config
+        from wynxo.provider import OllamaClient
+
+        client = OllamaClient(Config(model="qwen3-coder:30b", num_ctx=8192,
+                                     keep_alive="30m"))
+        client._client = httpx.AsyncClient(
+            base_url="http://warm.invalid",
+            transport=httpx.MockTransport(handler))
+        return client
+
+    @pytest.mark.asyncio
+    async def test_it_asks_for_a_load_and_nothing_else(self):
+        import json
+
+        import httpx
+
+        sent = {}
+
+        def handler(request):
+            sent["url"] = str(request.url)
+            sent["body"] = json.loads(request.read())
+            return httpx.Response(200, json={"done": True})
+
+        client = self._client(handler)
+        try:
+            assert await client.warm() is True
+        finally:
+            await client.aclose()
+        assert sent["url"].endswith("/api/chat")
+        # An empty message list is Ollama's documented "load and hold".
+        assert sent["body"]["messages"] == []
+        assert sent["body"]["keep_alive"] == "30m"
+
+    @pytest.mark.asyncio
+    async def test_it_loads_under_the_window_every_request_will_use(self):
+        """Loading under a different num_ctx is worse than not loading:
+        Ollama evicts and reloads on the first real question, so the wait is
+        paid twice."""
+        import json
+
+        import httpx
+
+        sent = {}
+
+        def handler(request):
+            sent.update(json.loads(request.read()))
+            return httpx.Response(200, json={"done": True})
+
+        client = self._client(handler)
+        try:
+            await client.warm()
+        finally:
+            await client.aclose()
+        assert sent["options"]["num_ctx"] == 8192
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["refused", "unreachable"])
+    async def test_a_failed_load_is_never_a_failed_start_up(self, outcome):
+        """Whatever is wrong is the first request's problem to report
+        properly, and none of it is a reason to fail a start-up."""
+        import httpx
+
+        def handler(request):
+            if outcome == "unreachable":
+                raise httpx.ConnectError("nothing there", request=request)
+            return httpx.Response(500, json={"error": "out of memory"})
+
+        client = self._client(handler)
+        try:
+            assert await client.warm() is False
+        finally:
+            await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_an_openai_server_has_nothing_to_warm(self):
+        """Loading is that server's business. Present so callers need not
+        ask which provider they are holding."""
+        from wynxo.config import Config, Endpoint
+        from wynxo.provider import OpenAIClient
+
+        client = OpenAIClient(Config(endpoints=[Endpoint(
+            name="local", url="http://openai.invalid", kind="openai")]))
+        try:
+            assert await client.warm() is False
+            assert await client.running() == []
+        finally:
+            await client.aclose()

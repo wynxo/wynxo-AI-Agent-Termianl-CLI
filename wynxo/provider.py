@@ -342,6 +342,42 @@ class OllamaClient:
             ))
         return out
 
+    async def warm(self, model: str = "", num_ctx: int = 0) -> bool:
+        """Ask the server to load the model, without generating anything.
+
+        An empty message list is Ollama's documented way to say "load this
+        and hold it": the model is read from disk and the KV cache is
+        allocated, and nothing is generated.
+
+        This is most of why `ollama run` feels quicker. It loads the model
+        while you are still typing your first message; wynxo asked nothing
+        of the server until you pressed enter, so the first question of
+        every session paid for a cold load -- tens of seconds for a 30B --
+        behind a status line that said "thinking", which is not what was
+        happening.
+
+        The options must be the ones every later request will carry.
+        Loading under a different num_ctx would be worse than not loading at
+        all: Ollama would evict and reload the model on the first real
+        question, so the wait would be paid twice.
+
+        Never raises. A server too old for this, a model that is not there,
+        a machine with no room -- each is the first request's problem to
+        report properly, and none of them is a reason to fail a start-up.
+        """
+        payload = {
+            "model": model or self.config.model,
+            "messages": [],
+            "keep_alive": self.config.keep_alive,
+            "options": {"num_ctx": num_ctx or self.config.num_ctx},
+        }
+        try:
+            r = await self._client.post("/api/chat", json=payload,
+                                        timeout=self.config.request_timeout)
+            return r.status_code < 400
+        except (httpx.HTTPError, ValueError):
+            return False
+
     async def pull(self, model: str) -> AsyncIterator[str]:
         """Stream human-readable progress while a model downloads."""
         payload = {"model": model, "stream": True}
@@ -636,6 +672,20 @@ class OpenAIClient:
 
     async def __aexit__(self, *exc) -> None:
         await self.aclose()
+
+    async def running(self) -> list["Loaded"]:
+        """Nothing. The protocol has no notion of a resident model.
+
+        Present so callers do not have to ask which provider they are
+        holding: an empty list already means "could not tell", which is
+        exactly the truth here, and every caller treats it as "say
+        nothing".
+        """
+        return []
+
+    async def warm(self, model: str = "", num_ctx: int = 0) -> bool:
+        """Nothing to warm. Loading is the server's business, not ours."""
+        return False
 
     async def ping(self) -> str:
         """Return a label or raise something readable if unreachable."""
