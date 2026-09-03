@@ -24,6 +24,7 @@ from rich.rule import Rule
 from rich.text import Text
 
 from .platforms import is_narrow, terminal_width
+from . import pacing
 from . import sprite
 
 from . import theme as _theme
@@ -2436,8 +2437,13 @@ class ActivityBar:
         self.lead = line
         self.refresh(force=line is None)
 
-    REFRESH_INTERVAL = 1.0 / 20
+    REFRESH_INTERVAL = pacing.TICK
     """The floor between two repaints asked for by the stream.
+
+    The same interval the answer is paced at, and it has to be: the pacer
+    releases one piece per frame, and a screen redrawn less often than that
+    puts two or three of them on at once -- which is the lumpiness it exists
+    to remove, reintroduced one layer down.
 
     A repaint is not free. Every one erases and redraws the whole pinned
     block -- the plan, the line being written, the strip -- which on a

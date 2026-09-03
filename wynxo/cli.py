@@ -45,6 +45,7 @@ from .session import Session
 from .keys import KeyWatcher
 from .journal import Journal, recent as recent_logs
 from .memory import Memory
+from .pacing import Typewriter
 from .pet import Pet
 from .select import (
     HINT, HINT_ASCII, Choice, choose, silence_cpr_warning,
@@ -637,6 +638,9 @@ class TerminalCallbacks(Callbacks):
         self._status_message = ""
         self._status_lock = asyncio.Lock()
         self._turn_lock = asyncio.Lock()
+        self.typed = Typewriter(self._status_lock)
+        """The answer's pacer. Started for the length of a turn where there
+        is a live region, and a straight pass-through everywhere else."""
 
     @property
     def card(self) -> "livediff.DiffCard | None":
@@ -811,8 +815,43 @@ class TerminalCallbacks(Callbacks):
         if self.bar is not None:
             self.bar.update(detail=message)
 
+    def _write_thought(self, text: str) -> None:
+        """One paced piece of the model's reasoning."""
+        if self._thinker is not None:
+            self._thinker.feed(text)
+
+    def _write_code(self, text: str) -> None:
+        """One paced piece of a file being written, in the transcript."""
+        if self._coder is not None:
+            self._coder.feed(text)
+
+    def _write_card(self, text: str) -> None:
+        """One paced piece of a file being written, into its live card."""
+        if self.card is not None and self.card.live:
+            self.card.feed(text)
+            if self.bar is not None:
+                self.bar.refresh()
+
+    def _write_content(self, text: str) -> None:
+        """One paced piece of the answer, on its way to the screen.
+
+        The fallback is not decoration: text held by the pacer has already
+        been generated, and dropping it because the block it belonged to was
+        closed underneath would lose the end of an answer with nothing on
+        screen to say so.
+        """
+        if self.streamer is not None:
+            self.streamer.feed(text)
+        else:
+            self.ui.console.print(text, end="", soft_wrap=True)
+
     def _end_stream(self) -> None:
         """Close whichever transient block is open, so the next starts clean."""
+        # Before anything else writes. Whatever the pacer is still holding
+        # was generated *before* the line that is about to go out, and a
+        # tool line landing in the middle of a held sentence is the one
+        # thing the streamer's own ordering rules exist to prevent.
+        self.typed.flush()
         self._end_thinking()
         if self._streaming:
             if self.streamer is not None:
@@ -850,7 +889,7 @@ class TerminalCallbacks(Callbacks):
                 self.ui.console.print()
                 self.ui.console.print(ThoughtStreamer.head(self.ui))
                 self._thinker = ThoughtStreamer(self.ui)
-            self._thinker.feed(text)
+            self.typed.feed(self._write_thought, text)
 
     def _end_thinking(self) -> None:
         if self._thinker is not None:
@@ -878,7 +917,10 @@ class TerminalCallbacks(Callbacks):
                 self.bar.update(activity="writing", detail="",
                                 tokens=self.tokens,
                                 state=self._companion_state())
-            self.streamer.feed(text)
+            # Through the pacer, not straight at the streamer: a chunk is
+            # whatever the model happened to emit in one go, and shown whole
+            # it reads as text being pasted rather than written.
+            self.typed.feed(self._write_content, text)
 
     async def on_stage(self, name: str, detail: str = "") -> None:
         async with self._status_lock:
@@ -962,6 +1004,10 @@ class TerminalCallbacks(Callbacks):
 
     async def _on_tool_result_locked(self, name: str, ok: bool, display: str, output: str, event: ToolEvent | None = None) -> None:
         self.active_tool = ""
+        # Before the card is finished: anything the pacer is still holding
+        # is part of the file that was being written, and finishing the card
+        # around it would settle the diff against half its own content.
+        self.typed.flush()
         if self.card is not None and self.card.tool == name and self.card.live:
             settled = ""
             if ok and not self.card.streamed and self.workspace is not None:
@@ -1054,16 +1100,14 @@ class TerminalCallbacks(Callbacks):
             # An edit in flight: the fragments belong to its card, which
             # draws in the live region. Streaming them into the conversation
             # as well would put the whole file on screen twice.
-            self.card.feed(text)
-            if self.bar is not None:
-                self.bar.refresh()
+            self.typed.feed(self._write_card, text)
             return
         if self._coder is None:
             self.ui.console.print()
             self.ui.console.print(Text("  writing", style=f"bold {MUTED}"))
             self._coder = CodeStreamer(self.ui, indent="  ",
                                        style=MUTED, code=False, literal=True)
-        self._coder.feed(text)
+        self.typed.feed(self._write_code, text)
 
     def _companion_state(self, tool: str | None = None) -> str:
         """What the companion should be doing, from what the agent is doing.
@@ -1167,12 +1211,14 @@ class TerminalCallbacks(Callbacks):
         folded into _end_stream(): that runs *during* a turn as well, and
         would close the card moments after on_code opened it.
         """
+        self.typed.flush()
         if self.card is not None and self.card.live:
             self.card.finish(ok=False, error="interrupted")
             self._commit_card()
         self.active_tool = ""
 
     def _end_code(self) -> None:
+        self.typed.flush()
         if self._coder is not None:
             self._coder.finish()
             self._coder = None
@@ -1935,6 +1981,10 @@ class Repl:
             await self._talk(await self.talker.opening(text))
         self._task = asyncio.ensure_future(self.agent.run(text))
         bar.start()
+        # Only here. Outside a turn there is no live region to pace against,
+        # and in -p or a pipe the pacer is a pass-through -- output that is
+        # being read by a program should arrive as fast as it is produced.
+        self.callbacks.typed.start()
         # Only one thing may read stdin. prompt_toolkit is not reading during
         # a turn -- the prompt has returned -- so the watcher can hold the
         # terminal in cbreak mode and read it directly for the length of the
@@ -1959,6 +2009,9 @@ class Repl:
             # unflushed line with it.
             watcher.stop()
             self.callbacks.close_card()
+            # Stopped before the flush inside _end_stream, so the drain loop
+            # cannot write one more piece after the answer has been closed.
+            self.callbacks.typed.stop()
             self.callbacks._end_stream()
             bar.stop()
             self.callbacks.bar = None

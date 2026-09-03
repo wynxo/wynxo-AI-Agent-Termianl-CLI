@@ -588,11 +588,21 @@ class Agent:
         num_predict: int | None = None,
         silent: bool = False,
     ) -> ParsedTurn:
-        """``silent`` suppresses the thinking channel as well as content.
+        """``silent`` suppresses the stage line and the truncation warning.
 
-        For infrastructure calls -- the intent router, compaction -- whose
-        reasoning is not part of the user's conversation and should not land
-        in the thinking record they can open with Ctrl-O.
+        For infrastructure calls -- the intent router, compaction -- which
+        are not part of the user's conversation at all, and whose progress
+        should not be narrated as if they were.
+
+        ``stream_content`` governs the whole live view of a call, reasoning
+        included. A pass whose answer is deliberately withheld -- planning,
+        verification, a safety-sensitive turn held back until it can be
+        checked -- must not narrate its reasoning either. Reasoning streamed
+        from a call whose conclusion is hidden is at best a second
+        "thinking" block per turn with no answer under it, and at worst the
+        hole in the boundary the withholding exists to close: the model's
+        working is on the terminal long before anything decides whether the
+        answer may be shown.
         """
         content_parts: list[str] = []
         thinking_parts: list[str] = []
@@ -633,8 +643,11 @@ class Agent:
 
         async for chunk in stream:
             if chunk.thinking:
+                # Kept in thinking_parts either way: the record is complete
+                # even when the live view of it is not, so a summary or a
+                # log written afterwards still has the whole turn.
                 thinking_parts.append(chunk.thinking)
-                if not silent:
+                if not silent and stream_content:
                     await self.cb.on_thinking(chunk.thinking)
             if chunk.content:
                 content_parts.append(chunk.content)
