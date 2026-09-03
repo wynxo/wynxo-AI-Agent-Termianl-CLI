@@ -1,15 +1,4 @@
-"""What the agent is allowed to touch, and how much it asks first.
-
-Two independent dials, deliberately kept apart:
-
-* **Scope** is the boundary. Where may tools read and write at all? This is
-  enforced on every path, cannot be waived by a permission mode, and is the
-  thing standing between a confused model and your home directory.
-
-* **Mode** is the friction inside that boundary. How much does it ask before
-  acting? A wide scope with careful prompts is very different from a narrow
-  scope with none, and people want both combinations.
-"""
+"""What the agent is allowed to touch, and how much it asks first."""
 
 from __future__ import annotations
 
@@ -22,14 +11,8 @@ from pathlib import Path
 
 class Scope(Enum):
     FOLDER = "folder"
-    """Only the directory wynxo was started in. The default."""
-
     REPO = "repo"
-    """The whole git repository, found by walking up for a .git. Lets the
-    agent see a sibling package when you started in a subdirectory."""
-
     MACHINE = "machine"
-    """No path restriction at all. Everything the user account can reach."""
 
     @classmethod
     def parse(cls, value: str) -> "Scope":
@@ -49,25 +32,10 @@ class Scope(Enum):
 
 class Mode(Enum):
     PLAN = "plan"
-    """Read-only. No writes, no commands. It investigates and proposes."""
-
     MANUAL = "manual"
-    """Ask before every write or command. The default."""
-
     AUTO = "auto"
-    """Edit files inside scope without asking; still ask for shell commands
-    and anything that reaches off the machine."""
-
     REVIEW = "review"
-    """Edit freely, then show every change together at the end of the turn.
-
-    The middle ground between manual and auto: manual interrupts a ten-file
-    refactor ten times, and auto never shows you the shape of what happened.
-    This lets the work finish, then puts the whole diff in front of you with
-    one decision to make."""
-
     YOLO = "yolo"
-    """Never ask. For a container or a scratch checkout."""
 
     @classmethod
     def parse(cls, value: str) -> "Mode":
@@ -83,7 +51,7 @@ class Mode(Enum):
             return cls(key)
         except ValueError:
             raise KeyError(
-                f"unknown mode {value!r}; choose plan, manual, auto or yolo"
+                "unknown mode %r; choose plan, manual, auto, review or yolo" % value
             ) from None
 
     def describe(self) -> str:
@@ -97,7 +65,6 @@ class Mode(Enum):
 
 
 def git_root(start: Path) -> Path | None:
-    """The repository containing ``start``, if any."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
@@ -112,12 +79,8 @@ def git_root(start: Path) -> Path | None:
 
 @dataclass
 class Boundary:
-    """The resolved answer to 'where may tools go?'."""
-
     scope: Scope
     root: Path
-    """The directory tools are confined to. Meaningless when unrestricted."""
-
     unrestricted: bool = False
 
     def describe(self) -> str:
@@ -136,14 +99,9 @@ class Boundary:
         except ValueError:
             return False
         except (OSError, RuntimeError):
-            # resolve() gives up on a symlink loop (RuntimeError), a path the
-            # OS will not look at, or a name Windows rejects outright. A path
-            # this boundary cannot place is a path it cannot vouch for, so it
-            # is refused: the wall fails closed.
             return False
 
     def reject(self, raw: str) -> str:
-        """The message a tool shows when a path falls outside."""
         if self.scope is Scope.FOLDER:
             return (
                 f"{raw!r} is outside the project directory ({self.root}). "
@@ -159,18 +117,12 @@ class Boundary:
 
 
 def resolve(workspace: Path, scope: Scope) -> Boundary:
-    """Turn a scope choice into a concrete boundary."""
     workspace = workspace.resolve()
-
     if scope is Scope.MACHINE:
         return Boundary(scope=scope, root=workspace, unrestricted=True)
-
     if scope is Scope.REPO:
         root = git_root(workspace)
         if root is None:
-            # No repository to widen to; fall back rather than silently
-            # granting more than was asked for.
             return Boundary(scope=Scope.FOLDER, root=workspace)
         return Boundary(scope=scope, root=root.resolve())
-
     return Boundary(scope=Scope.FOLDER, root=workspace)
