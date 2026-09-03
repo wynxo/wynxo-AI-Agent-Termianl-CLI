@@ -418,6 +418,18 @@ class Callbacks:
     async def on_tool_result(self, name: str, ok: bool, display: str, output: str, event: ToolEvent | None = None) -> None: ...
     async def on_tool_output(self, name: str, line: str) -> None: ...
     async def on_code(self, text: str) -> None: ...
+
+    async def on_code_target(self, name: str, path: str = "") -> None:
+        """Which tool the code now streaming belongs to, and on what.
+
+        Sent as soon as the half-written call says, which is before the
+        long argument it is about to write. A display that does not care
+        can ignore it -- but one that does can tell a file being written
+        from a command being composed, instead of assuming the first and
+        mislabelling the second, and can head the block with the file's
+        name instead of "(unnamed)".
+        """
+
     async def on_todos(self, rendered: str) -> None: ...
     async def on_warning(self, message: str) -> None: ...
 
@@ -466,9 +478,15 @@ class Agent:
         self.permissions = PermissionStore()
         self.permissions.preapprove(config.auto_approve)
 
-        self.native_tools = True
-        """Set false when the model's template cannot do tool calls, in which
-        case tools are described in the prompt in Hermes format instead."""
+        self.native_tools = not config.stream_tool_calls
+        """Whether tool calls go through the server's own parser.
+
+        False when the model's template cannot do tool calls, in which case
+        tools are described in the prompt in Hermes format instead -- and
+        also when stream_tool_calls asks for that path deliberately, so the
+        command or the file being written can be watched arriving. Set here
+        as well as in detect_capabilities so the very first request of a
+        session already honours the setting."""
 
         self.project_map = ""
         """A one-page layout of the codebase, refreshed by the CLI. Local
@@ -564,13 +582,21 @@ class Agent:
         it turns Hermes-style prompted calls back off. Without the reset, a
         model switch could only ever downgrade the tool-calling path, never
         upgrade it, and the better path would stay silently unused.
+
+        ``stream_tool_calls`` overrides the detection in the other
+        direction: a model that *can* use the native path is asked not to,
+        because the native path is the one where a tool call cannot be
+        watched being written. That is a choice about what to see, not a
+        fact about the model, so it survives detection rather than being
+        overwritten by it.
         """
         try:
             info = await self.client.show(self.config.model)
         except ProviderError:
             return
         self._model_info = info
-        self.native_tools = not info.capabilities_known or info.supports_tools
+        self.native_tools = ((not info.capabilities_known or info.supports_tools)
+                             and not self.config.stream_tool_calls)
         if info.capabilities_known and not info.supports_tools:
             await self.cb.on_warning(
                 f"{self.config.model} has no native tool support; using Hermes-style "
@@ -623,6 +649,12 @@ class Agent:
         # text-mode form of a tool call, applied to the native one.
         argument_buffer = ""
         argument_shown = 0
+        named: tuple[str, str] = ("", "")
+        """(tool, path) for the arguments now streaming, once the call says.
+
+        A pair rather than the name alone because the path can arrive after
+        the name does -- so the display is told again when it does, and the
+        block it has already headed "(unnamed)" gets its file."""
         truncated = False
         evidence = ModelEvidence()
         # The request is about to go out and nothing on screen says so. The
@@ -673,6 +705,16 @@ class Agent:
                     # tool call" and "the file exists", which on a slow local
                     # model is long enough to wonder whether it is working.
                     if code := live_filter.code_delta():
+                        # The name first, and only once. It is known before
+                        # any argument has arrived, which is what lets the
+                        # display label the block correctly rather than
+                        # guessing "write_file" and being wrong about every
+                        # shell command.
+                        called = live_filter.call_name()
+                        where = live_filter.call_path()
+                        if called and (called, where) != named:
+                            named = (called, where)
+                            await self.cb.on_code_target(called, where)
                         await self.cb.on_code(code)
             if chunk.arguments_delta and stream_content:
                 argument_buffer += chunk.arguments_delta

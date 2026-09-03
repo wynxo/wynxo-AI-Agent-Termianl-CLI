@@ -79,6 +79,33 @@ class Config(Schema):
     keep_alive = Field(str, "How long Ollama keeps the model resident. A reload of "
                             "a 30B costs many seconds and makes the agent feel broken.",
                        default="30m")
+    stream_tool_calls = Field(
+        bool, "Let the model write tool calls as text, so the command or the "
+              "file being written appears as it is generated.",
+        default=False)
+    """Whether a tool call can be watched being written.
+
+    Ollama's native tool-calling parses the model's output before handing it
+    over: ``Arguments`` on the wire is a parsed map, not a string, so a
+    half-written one cannot be represented and the whole call arrives in a
+    single message once the parser has finished it. There is nothing
+    partial to show, and revealing a finished string slowly would be an
+    animation pretending to be a stream.
+
+    Asked for as text instead -- the Hermes-style ``<tool_call>`` block a
+    model without native support uses anyway -- the call is ordinary
+    content, and ordinary content streams. The file being written appears a
+    character at a time, exactly as the answer does.
+
+    Off by default because it is a real trade. Native tool calls are parsed
+    by the server against the model's own template and are the more
+    reliable path on a tool-tuned model; asked for as text they come back
+    as JSON that has to be read, and a model that formats it badly needs
+    the repair machinery. What it buys, besides being watchable, is a
+    shorter prompt: the schemas cost around 3,400 tokens as JSON against
+    1,300 for the same tools described in prose, and on a model that reads
+    its prompt at CPU speed that is most of a minute.
+    """
     warm_start = Field(bool, "Load the model at start-up rather than on the first "
                              "question, so the wait happens while you are typing.",
                        default=True)

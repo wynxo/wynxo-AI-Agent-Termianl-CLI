@@ -438,6 +438,9 @@ COMMAND_LIST: tuple[Command, ...] = (
                      "last answer)", "cmd_copy", ("last",)),
     Command("/memory", "show, add to, or forget long-term memory", "cmd_memory"),
     Command("/thinking", "show or hide the model's reasoning", "cmd_thinking"),
+    Command("/stream",
+            "watch tool calls being written: on | off",
+            "cmd_stream", ("on", "off")),
     Command("/plan", "show the current plan", "cmd_plan"),
     Command("/new", "start a new chat: fresh history, screen and log", "cmd_new"),
     Command("/resume",
@@ -658,6 +661,11 @@ class TerminalCallbacks(Callbacks):
         """Ctrl-T: show full tool output instead of a one-line summary."""
         self.tokens = 0
         self._coder: CodeStreamer | None = None
+        self._code_tool = ""
+        """The tool whose argument is currently streaming, once the
+        half-written call has named itself."""
+        self._code_path = ""
+        """What that call is about to act on, once it says."""
         """The file currently being written, while a tool call streams."""
         self._thinking_buffer: list[str] = []
         """Every thought of the whole session, shown or not.
@@ -1140,22 +1148,58 @@ class TerminalCallbacks(Callbacks):
         async with self._status_lock:
             await self._on_code_locked(text)
 
-    async def _on_code_locked(self, text: str) -> None:
-        """Code arriving inside a tool call, shown as it is written.
+    WRITES_A_FILE = frozenset({"write_file", "edit_file", "multi_edit",
+                               "github_write"})
+    """Tools whose streaming argument is a file's contents.
 
-        Its own streamer rather than the prose one: this is known to be a
-        file's contents, so none of the fence-detection guesswork applies and
+    Everything else that streams -- shell, and whatever else puts a long
+    value in a named argument -- is written into the transcript instead. A
+    diff card is a picture of a file changing, and a command is not that."""
+
+    async def on_code_target(self, name: str, path: str = "") -> None:
+        """Which tool the code about to stream belongs to, and on what.
+
+        Arrives before the first fragment, because the name and the path
+        both come before the long argument in the call. Without it the
+        display had to assume, and it assumed write_file -- so a shell
+        command being composed opened a diff card headed with a filename
+        it did not have and a verb it had not earned, and a file really
+        being written was headed "(unnamed)" until the call finished.
+        """
+        async with self._status_lock:
+            self._code_tool = name
+            self._code_path = path or self._code_path
+            if path and self.card is not None and self.card.live \
+                    and not self.card.path:
+                self.card.path = path
+            if self.bar is not None:
+                # The strip said "thinking" while a file was visibly being
+                # written under it. No tool has *started* yet -- the call
+                # is still being composed -- but what it is going to be is
+                # already known, and that is what the region is for.
+                self.bar.update(activity=_ACTIVITY.get(name, "writing"),
+                                detail=path,
+                                state=self._companion_state(name))
+                self.bar.refresh(force=True)
+
+    async def _on_code_locked(self, text: str) -> None:
+        """An argument arriving inside a tool call, shown as it is written.
+
+        Its own streamer rather than the prose one: this is a value out of
+        a JSON object, so none of the fence-detection guesswork applies and
         every character can go straight out.
         """
         if self._streaming:
             self._end_stream()
-        if self.card is None or not self.card.live:
+        writing = self._code_tool in self.WRITES_A_FILE or not self._code_tool
+        if writing and (self.card is None or not self.card.live):
             # The fragments arrive before the call has been parsed, so there
-            # is no tool name or path yet. Opened blank and filled in by
-            # on_tool_start; opening it there instead meant the card was
-            # created after the stream it existed to catch.
-            self.card = livediff.DiffCard(tool="write_file")
-        if self.card.live:
+            # is no path yet. Opened blank and filled in by on_tool_start;
+            # opening it there instead meant the card was created after the
+            # stream it existed to catch.
+            self.card = livediff.DiffCard(tool=self._code_tool or "write_file",
+                                          path=self._code_path)
+        if writing and self.card is not None and self.card.live:
             # An edit in flight: the fragments belong to its card, which
             # draws in the live region. Streaming them into the conversation
             # as well would put the whole file on screen twice.
@@ -1163,7 +1207,9 @@ class TerminalCallbacks(Callbacks):
             return
         if self._coder is None:
             self.ui.console.print()
-            self.ui.console.print(Text("  writing", style=f"bold {MUTED}"))
+            self.ui.console.print(
+                Text("  " + _ACTIVITY.get(self._code_tool, "writing"),
+                     style=f"bold {MUTED}"))
             self._coder = CodeStreamer(self.ui, indent="  ",
                                        style=MUTED, code=False, literal=True)
         self.typed.feed(self._write_code, text)
@@ -1317,6 +1363,7 @@ class TerminalCallbacks(Callbacks):
 
     def _end_code(self) -> None:
         self.typed.flush()
+        self._code_tool = self._code_path = ""
         if self._coder is not None:
             self._coder.finish()
             self._coder = None
@@ -4789,6 +4836,69 @@ class Repl:
             # The chooser is a prompt_toolkit Application too, and its
             # teardown takes the SIGINT handler with it.
             self._arm_interrupt()
+
+    async def cmd_stream(self, args: list[str]) -> bool:
+        """Watch a tool call being written, or do not.
+
+        Ollama's native tool-calling parses the model's output before
+        handing it over -- the arguments on the wire are a parsed map, not
+        a string, so a half-written call cannot be represented and the
+        whole thing arrives in one message once the parser has finished
+        it. There is nothing partial to show. Revealing a finished string
+        slowly would be an animation pretending to be a stream.
+
+        Asked for as text instead, a tool call is ordinary content, and
+        ordinary content streams: the command, or the file being written,
+        appears a character at a time exactly as the answer does.
+
+        A real trade, so it is a choice rather than a default. Native calls
+        are parsed by the server against the model's own template and are
+        the sturdier path on a tool-tuned model. What the other one buys,
+        besides being watchable, is a shorter prompt -- the same tools cost
+        about 3,400 tokens as JSON schemas and 1,300 described in prose --
+        and on a model reading its prompt at CPU speed that is most of a
+        minute off every request.
+        """
+        want = args[0].lower() if args else ""
+        if want in ("yes", "show", "live"):
+            want = "on"
+        elif want in ("no", "hide"):
+            want = "off"
+        now = "on" if self.config.stream_tool_calls else "off"
+        if want not in ("on", "off"):
+            chosen = await self._pick(
+                "tool calls",
+                [("on", "watch the command or the file being written, and "
+                        "send a shorter prompt"),
+                 ("off", "let the server parse tool calls -- sturdier, but "
+                         "they arrive finished")],
+                now,
+            )
+            if chosen is NO_PICKER:
+                self.ui.info(f"watching tool calls is {now}  "
+                             f"{self.ui.g.dot}  /stream on | off")
+                return True
+            if chosen is None:
+                return True
+            want = chosen
+        if want == now:
+            return True
+        self.config.stream_tool_calls = want == "on"
+        self.config.save()
+        # Detection reads the setting, so this is what actually moves the
+        # agent onto the other path -- and it refreshes the system prompt,
+        # which is where the tool descriptions live when they are not sent
+        # as schemas.
+        await self.agent.detect_capabilities()
+        if want == "on":
+            self.ui.success("tool calls stream as they are written")
+            self.ui.info("the model writes them as text now, which is also "
+                         "about 1,900 fewer tokens a request")
+        else:
+            self.ui.success("tool calls are parsed by the server")
+            self.ui.info("sturdier, and they arrive finished rather than "
+                         "being written in front of you")
+        return True
 
     async def cmd_thinking(self, args: list[str]) -> bool:
         """Show or hide the model's reasoning.

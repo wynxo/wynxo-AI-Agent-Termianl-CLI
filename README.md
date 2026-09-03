@@ -1146,6 +1146,7 @@ effort-level setting.
 /apps [refresh]          applications this machine has, for "open ..."
 /map [rebuild]           the project layout the model is given
 /thinking                show or hide the model's reasoning
+/stream [on|off]         watch tool calls being written
 /plan  ·  /todo          the current todo list
 /queue [run|clear]       what you typed while it was working
 /diff [staged]           uncommitted changes
