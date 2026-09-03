@@ -1,9 +1,4 @@
-"""Ollama client.
-
-Talks to Ollama's native ``/api/chat`` rather than the OpenAI-compatible
-shim, because the native endpoint is the one that exposes ``think``,
-``keep_alive`` and per-request ``options``.
-"""
+"""Ollama client."""
 
 from __future__ import annotations
 
@@ -26,6 +21,7 @@ class ProviderError(RuntimeError):
 
 @dataclass
 class Loaded:
+    """A model the server currently has in memory."""
     name: str
     size: int = 0
     size_vram: int = 0
@@ -81,18 +77,8 @@ def faster_on_gpu(models: list["ModelInfo"], vram: int,
     return [m for _, m in good]
 
 
-def _model_base(name: str) -> str:
-    return name.strip().lower().split(":", 1)[0]
-
-
 def same_model(a: str, b: str) -> bool:
-    """Compare tags conservatively.
-
-    Names with different tags are not assumed equivalent: qwen3:8b and
-    qwen3:30b must never collapse into one diagnostic entry. Exact names are
-    treated case-insensitively. Alias resolution belongs to the server/API,
-    not to string-prefix guessing.
-    """
+    """Conservative tag comparison: different tags are not assumed equivalent."""
     a, b = a.strip().lower(), b.strip().lower()
     return bool(a) and a == b
 
@@ -146,8 +132,7 @@ def _payload(response, what: str, where: str) -> dict:
         data = response.json()
     except ValueError as exc:
         body = (response.text or "").strip()
-        looks_like_html = body[:1] == "<"
-        detail = ("an HTML page" if looks_like_html else "an empty body" if not body else f"{body[:60]!r}")
+        detail = "an HTML page" if body[:1] == "<" else "an empty body" if not body else f"{body[:60]!r}"
         raise ProviderError(
             f"{where} answered {what} with {detail} rather than JSON. Check the port and API endpoint."
         ) from exc
@@ -159,8 +144,12 @@ def _payload(response, what: str, where: str) -> dict:
 
 
 _TRANSIENT = (
-    httpx.ConnectError, httpx.ReadError, httpx.WriteError,
-    httpx.RemoteProtocolError, httpx.ConnectTimeout, httpx.PoolTimeout,
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.RemoteProtocolError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
 )
 CONNECT_ATTEMPTS = 3
 RETRY_BACKOFF = 0.75
@@ -421,7 +410,7 @@ class OllamaClient:
             prompt_tokens=as_int(data.get("prompt_eval_count")),
             completion_tokens=as_int(data.get("eval_count")),
             total_duration_ns=as_int(data.get("total_duration")),
-            load_duration_ns=as_int(data.get("load_duration")),
+            load_duration_ns=as_int(data.get("total_duration")),
         )
 
     def _explain_transient(self, exc: Exception, emitted: bool) -> str:
