@@ -297,7 +297,28 @@ class SafeConsole(Console):
     three blank lines on screen, while two tool blocks in a row got none,
     so the transcript's rhythm depended on which blocks happened to be
     adjacent. ``gap()`` asks for a separation rather than for a newline,
-    and one place decides what that costs."""
+    and one place decides what that costs.
+
+    Known limitation, measured rather than guessed. While a turn runs this
+    does not hold only the transcript. The activity bar repaints through
+    the same console, and a repaint is a print of a Text rather than of
+    Controls, so ``_transient`` does not catch it; the escapes rich wraps a
+    repaint in are not caught either, because ``_ANSI_SGR`` strips colour
+    and hyperlinks and the cursor-hide rich emits (``ESC[?25l``) is a CSI
+    private-mode sequence. Instrumenting a real session finds this holding
+    ``'^C stop '`` and ``'ESC[?25l\n\n'`` at moments when the transcript
+    plainly ended somewhere else -- and in the second case a blank line
+    that was asked for is dropped, which is the missing separation under a
+    diff committed mid-turn.
+
+    Two fixes were tried and both reverted: marking the bar's own frame,
+    and widening the stripper to every escape. Each traded this defect for
+    a worse one -- with the tail corrected, blank lines that do reach the
+    screen started being suppressed instead, because the *committed*
+    transcript really had ended blank and the live region's rows were what
+    made it look otherwise. The two are entangled, and untangling them
+    means keeping the live region's writes out of the console's record of
+    the screen rather than filtering what gets recorded."""
 
     _transient = False
     """Set while a repaint that leaves nothing behind is being written."""
