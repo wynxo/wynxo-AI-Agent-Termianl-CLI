@@ -536,6 +536,29 @@ class CommandCompleter(Completer):
                     display_meta=COMMANDS.get(target, ""))
 
 
+STATE_GAP = "   "
+"""Between two states in the gallery /animate list and /pet draw."""
+
+STATE_INDENT = 2
+
+
+def gallery_columns(width: int) -> int:
+    """How many companion states fit across a terminal this wide.
+
+    From the terminal, not from a constant. Four was hard-coded, and four
+    of anything is only ever right at one width: even at the old sprite
+    size the gallery needed seventy columns and was drawn on any terminal
+    at all, so at sixty-two every row wrapped -- the cats came apart into
+    bands of pixels with their labels adrift underneath. The command exists
+    to show what the character looks like, and a version of it that mangles
+    the character is worse than not having it.
+    """
+    from . import sprite
+
+    room = width - STATE_INDENT
+    return max(1, room // (sprite.WIDTH + len(STATE_GAP)))
+
+
 class TerminalCallbacks(Callbacks):
     """Wires the agent's events to the terminal."""
 
@@ -916,7 +939,7 @@ class TerminalCallbacks(Callbacks):
             if self.bar is not None:
                 self.bar.update(activity="writing", detail="",
                                 tokens=self.tokens,
-                                state=self._companion_state())
+                                state=self._writing_state())
             # Through the pacer, not straight at the streamer: a chunk is
             # whatever the model happened to emit in one go, and shown whole
             # it reads as text being pasted rather than written.
@@ -1121,6 +1144,26 @@ class TerminalCallbacks(Callbacks):
         running = self.active_tool if tool is None else tool
         return companion.state_for(
             running or "", getattr(task, "value", "") or "").value
+
+    def _writing_state(self) -> str:
+        """The companion while the answer itself is streaming.
+
+        The task state machine has no entry for this. Generating an answer
+        is "thinking" to it from the first token to the last, so the strip
+        said "writing" beside a character sitting with its paw against its
+        chin, staring into the air -- the one place the two halves of the
+        live region disagreed about what was happening, in the state they
+        spend most of a turn in.
+
+        A running tool still wins: a file being written during a turn is
+        more specific than the fact that words are coming back, and it is
+        what the companion is for.
+        """
+        settled = self._companion_state()
+        if settled in (companion.State.THINKING.value,
+                       companion.State.IDLE.value):
+            return companion.State.CODING.value
+        return settled
 
     def _call_summary(self, name: str, ok: bool, display: str,
                       output: str) -> tuple[str, str]:
@@ -4636,13 +4679,13 @@ class Repl:
                      f"/log list  {dot}  /log off")
         return True
 
-    STATE_COLUMNS = 4
-    """States shown side by side. The companion is five rows tall, so a row
-    per state would be sixty lines to show twelve of them."""
-
     def _show_states(self, only: str = "") -> None:
         """Every state the companion has, drawn by the renderer that draws
         it during a turn.
+
+        Side by side, as many across as the terminal has room for: the
+        companion is six rows tall, so a row each would be seventy-two
+        lines to show twelve of them.
 
         Deliberately not a preview built from its own copy of the frames.
         There used to be one of those -- a whole module wrapping the scene
@@ -4659,9 +4702,10 @@ class Repl:
             self.ui.info("states: "
                          + " | ".join(s.value for s in State))
             return
-        gap = "   "
-        for start in range(0, len(states), self.STATE_COLUMNS):
-            group = states[start:start + self.STATE_COLUMNS]
+        gap = STATE_GAP
+        columns = gallery_columns(self.ui.width)
+        for start in range(0, len(states), columns):
+            group = states[start:start + columns]
             # The second frame, where there is one. Several states differ
             # from idle only in the part that moves -- the paws come up to
             # the keyboard, the progress bar starts filling -- so a gallery

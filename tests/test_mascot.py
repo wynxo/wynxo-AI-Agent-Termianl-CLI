@@ -101,8 +101,28 @@ class TestItIsOneCharacter:
         """The silhouette is the character. Written as one base with rows
         edited, so a state cannot quietly become a different animal."""
         for state, index, pixels in _frames():
-            assert set(pixels[9]) <= set(".LC"), f"{state.value}[{index}]"
-            assert "F" in pixels[3], f"{state.value}[{index}]: no head"
+            where = f"{state.value}[{index}]"
+            assert set(pixels[10]) <= set(".LfC"), f"{where}: the deck"
+            assert "L" in pixels[8], f"{where}: no laptop"
+            assert "F" in pixels[3], f"{where}: no head"
+            assert "F" in pixels[0] + pixels[1], f"{where}: no ears"
+
+    def test_every_frame_has_both_arms(self):
+        """The arms are what the sprite grew four columns and a row for. A
+        state that drops one has the character reaching for something, which
+        is a thing none of them mean."""
+        for state, index, pixels in _frames():
+            shoulders = pixels[7]
+            assert shoulders[:9].count("f") and shoulders[9:].count("f"), \
+                f"{state.value}[{index}]: {shoulders}"
+
+    def test_the_paws_are_somewhere_in_every_frame(self):
+        """On the near edge, up on the deck, or at the face while thinking
+        -- but never gone. A character whose hands vanish for a frame reads
+        as a glitch, and that is what the paws-off states used to be."""
+        for state, index, pixels in _frames():
+            below = "".join(pixels[5:])
+            assert "f" in below, f"{state.value}[{index}]: no paws anywhere"
 
     def test_success_and_error_do_not_share_a_silhouette(self):
         """The one pair that must never be confused at a glance, since one
@@ -158,3 +178,68 @@ class TestItGivesWayOnASmallTerminal:
         are third and fourth, so the threshold has to leave the words a
         usable column rather than just fitting the picture."""
         assert sprite.MIN_COLUMNS >= sprite.WIDTH * 2
+
+
+class TestTheGalleryFitsTheTerminal:
+    """/animate list and /pet draw every state side by side. How many fit
+    across is a property of the terminal, and it used to be the number 4 --
+    which needed seventy columns and was drawn on any terminal at all, so a
+    narrow one wrapped every row and the cats came apart into bands of
+    pixels with their labels adrift underneath."""
+
+    WIDTHS = (20, 40, 60, 62, 80, 100, 120, 200)
+
+    def test_a_row_of_states_fits_the_width_it_was_measured_for(self):
+        from wynxo.cli import STATE_GAP, STATE_INDENT, gallery_columns
+
+        for width in self.WIDTHS:
+            drawn = (STATE_INDENT
+                     + gallery_columns(width) * (sprite.WIDTH + len(STATE_GAP)))
+            assert drawn <= width or gallery_columns(width) == 1, width
+
+    def test_a_terminal_narrower_than_one_state_still_gets_one(self):
+        """Rather than zero columns, an empty gallery, or a division by
+        zero. One drawing that overflows says more than none."""
+        from wynxo.cli import gallery_columns
+
+        assert gallery_columns(10) == 1
+        assert gallery_columns(0) == 1
+
+    def test_a_wider_terminal_never_shows_fewer(self):
+        from wynxo.cli import gallery_columns
+
+        counts = [gallery_columns(w) for w in self.WIDTHS]
+        assert counts == sorted(counts)
+
+    def _lines(self, width: int) -> list[str]:
+        import io
+
+        from wynxo.cli import Repl
+        from wynxo.ui import UI
+
+        ui = UI()
+        ui.console.file = io.StringIO()
+        ui.console.width = ui.width = width
+        repl = Repl.__new__(Repl)
+        repl.ui = ui
+        repl._show_states()
+        return ui.console.file.getvalue().splitlines()
+
+    def test_nothing_the_gallery_draws_is_wrapped(self):
+        """The real symptom. A wrapped sprite row is not a narrower sprite,
+        it is half a cat on the next line -- so the check is that the
+        console never had to wrap anything, counted in lines."""
+        from math import ceil
+
+        from wynxo.cli import gallery_columns
+
+        for width in (60, 62, 80, 100, 120):
+            groups = ceil(len(State) / gallery_columns(width))
+            # Per group: the sprite's rows, the labels, and a blank line.
+            assert len(self._lines(width)) == groups * (sprite.HEIGHT + 2), \
+                width
+
+    def test_every_state_is_still_shown(self):
+        body = "\n".join(self._lines(62))
+        for state in State:
+            assert state.value in body, state.value

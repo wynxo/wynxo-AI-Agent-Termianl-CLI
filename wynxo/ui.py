@@ -2480,8 +2480,9 @@ class ActivityBar:
         self._live.refresh()
 
     def _renderable(self):
-        """The pinned block: plan on top, then the line being written, then
-        the status strip. Everything here is redrawn in place.
+        """The pinned block: the card, the line being written, the
+        companion and its status, then the strip. Everything here is
+        redrawn in place.
 
         No history of finished calls. Six of them used to be kept and
         redrawn here as "✓ read calc.py (5 lines)  0.00s", which is the
@@ -2504,9 +2505,17 @@ class ActivityBar:
                 body.append(line + "\n", style=BAR_DIM)
             body.rstrip()
             parts.append(body)
-        parts.extend(self._scene())
+        # The line being written comes first, directly under the lines
+        # already committed above it. It used to sit under the companion,
+        # which put six rows of cat between "    try:" and the half-written
+        # "        return await self._onc" that continues it -- the one
+        # place in the whole layout where a block of code was cut in half
+        # by something that was not code. What is being written belongs
+        # against what has been; the character and the strip are the
+        # furniture underneath both.
         if self.lead is not None and self.lead.plain:
             parts.append(self.lead)
+        parts.extend(self._scene())
         parts.append(self._render())
         return parts[0] if len(parts) == 1 else Group(*parts)
 

@@ -141,7 +141,6 @@ class TestThreeStreamsShareOneQueue:
 
     def test_flush_writes_every_stream_in_the_order_it_arrived(self, paper):
         order = []
-        first, second = _Pen(), _Pen()
         paper.feed(lambda t: order.append(("first", t)), "one")
         paper.feed(lambda t: order.append(("second", t)), "two")
         paper.flush()

@@ -39,11 +39,11 @@ from rich.text import Text
 
 from .companion import State
 
-WIDTH = 14
+WIDTH = 18
 """Columns. Also the pixel width -- one pixel per column."""
 
-HEIGHT = 5
-"""Terminal rows. Ten pixel rows, two to a row."""
+HEIGHT = 6
+"""Terminal rows. Twelve pixel rows, two to a row."""
 
 MIN_COLUMNS = 60
 """Below this the sprite is not drawn at all.
@@ -75,43 +75,63 @@ touch for most of this project's life."""
 # -- the character ----------------------------------------------------------
 
 _BODY = [
-    "...F......F...",   # ear tips
-    "...FF....FF...",   # ears, rising from the head's corners
-    "...FFFFFFFF...",   # the crown, narrower than the head
-    "..FFFFFFFFFF..",
-    "..FEEFFFFEEF..",   # eyes, set wide
-    "..FFFFffFFFF..",   # muzzle
-    "...FFFFFFFF...",   # jaw
-    "..LKKKKKKKKL..",   # the laptop: pale case, dark screen
-    "..LKKKKKKKKL..",
-    ".LLLLLLLLLLLL.",   # the deck
+    "....F........F....",   # ear tips
+    "....FF......FF....",   # ears, rising from the head's corners
+    "....FFFFFFFFFF....",   # crown, drawing in under the ears
+    "...FFFFFFFFFFFF...",   # brow -- also where the eyes go when they look up
+    "...FFEEFFFFEEFF...",   # eyes, set wide
+    "....FFFFffFFFF....",   # muzzle, and the jaw drawing in
+    "......FFFFFF......",   # neck
+    "..fFFFFFFFFFFFFf..",   # shoulders, and the tops of both arms
+    "..ffLKKKKKKKKLff..",   # upper arms, and the lid: pale case, dark screen
+    "...fLKKKKKKKKLf...",   # forearms coming in toward the keyboard
+    "...LLLLLLLLLLLL...",   # the deck, in front of the lid
+    "....ff......ff....",   # both paws, resting against the near edge
 ]
 """Every frame starts here and edits rows.
 
-Written as one base rather than as twelve independent pictures because the
+Written as one base rather than as a dozen independent pictures because the
 silhouette is the character: if the ears move a pixel between idle and
 thinking, it stops reading as the same animal and starts reading as an
 animation glitch. Only the rows a state has a reason to change are
 replaced, so nothing can drift by accident.
 
-The proportions were arrived at by drawing them and looking. The first
-version had a head ten pixels wide and four tall with the ears splayed out
-at its corners, which reads as a bat -- correct in a character grid, wrong
-the moment it is pixels. Upright ears rising from the corners of a squarer
-head, a crown a shade narrower than the jaw, and a two-pixel muzzle are
-what make it read as a cat.
+Three things in this drawing were arrived at by drawing them wrong first.
 
-The laptop is the other half. Drawn in one pale tone it was a plinth the
-head sat on; a dark screen inset into a pale case is what makes it an
-object in front of the character rather than part of it.
+The head has to come to a *neck*. Drawn as jaw straight into shoulders --
+a narrow row over a wider one, both in fur -- head and body fused into one
+blob and the laptop under it read as a plinth the face was sitting on. Six
+pixels at r6, narrower than either, is the whole separation, and it is what
+makes this a character at a desk rather than a mask on a keyboard.
+
+The paws have to break the silhouette. On the deck they were two dim
+pixels inside a pale bar: invisible at a glance, and a hand you cannot see
+cannot be seen to type. In front of it, against the terminal's own
+background, they are the two lowest shapes on the character -- and lifting
+one onto the deck is a full-contrast change from purple-on-nothing to
+purple-on-pale.
+
+And it grew from fourteen by ten to eighteen by twelve to have any of this
+at all. At the old size the character was a head with a laptop under its
+chin and no body: there was nowhere to put a hand, so "coding" was two dim
+pixels at the edges of the jaw, and the pose everybody draws for thinking
+-- eyes up, a paw at the face -- could not be drawn. Four columns and one
+terminal row buy shoulders, two arms, and two paws that can be somewhere
+specific.
+
+The screen faces us, which is not what you would see standing in front of
+somebody at a laptop. What is on it is half of what the companion is for,
+and the paws are stylised the same way, in front of the deck rather than
+hidden behind the lid.
 """
 
-EYES_OPEN = "FEEFFFFEEF"
-EYES_SHUT = "FFFFFFFFFF"     # nothing: at two pixels an eye either is or isn't
-EYES_GLAD = "FffFFFFffF"     # the corners lift, in the shadow colour
-EYES_LEFT = "EEFFFFEEFF"     # both eyes together -- one eye moving is a squint
-EYES_RIGHT = "FFEEFFFFEE"
-EYES_SHUT_R = "FRRFFFFRRF"   # shut, and the wrong colour
+# Eye rows are twelve pixels, columns 3..14 -- the width of the head.
+EYES_OPEN = "FFEEFFFFEEFF"
+EYES_SHUT = "FFFFFFFFFFFF"   # nothing: at two pixels an eye either is or isn't
+EYES_GLAD = "FFfFFFFFFfFF"   # the corners lift, in the shadow colour
+EYES_LEFT = "FEEFFFFEEFFF"   # both eyes together -- one eye moving is a squint
+EYES_RIGHT = "FFFEEFFFFEEF"
+EYES_SHUT_R = "FFRRFFFFRRFF"  # shut, and the wrong colour
 
 _EYE_NOTE = """Why a blink closes the eyes rather than dimming them.
 
@@ -122,9 +142,17 @@ cell's glyph identical and only the colour moved -- so on a terminal
 without truecolour, or to anyone reading shape before hue, the character
 never blinked at all."""
 
+_UP_NOTE = """Looking up is a row, not a shade.
+
+The eyes live on r4 and the brow above them on r3 is plain fur, so raising
+the gaze means drawing the eyes on r3 and leaving r4 blank. That is half a
+terminal row of movement, and it is the largest change this sprite can make
+to a face without moving the head -- which is why thinking is legible at a
+glance now, and used to need a mark beside the ear to be legible at all."""
+
 
 def _frame(**rows: str) -> list[str]:
-    """The base with some rows replaced. Keyword is r0..r9."""
+    """The base with some rows replaced. Keyword is r0..r11."""
     out = list(_BODY)
     for key, value in rows.items():
         index = int(key[1:])
@@ -133,134 +161,186 @@ def _frame(**rows: str) -> list[str]:
     return out
 
 
-def _eyes(pattern: str) -> str:
-    assert len(pattern) == 10, pattern
-    return ".." + pattern + ".."
+def _face(pattern: str) -> str:
+    """A head row: twelve pixels at columns 3..14."""
+    assert len(pattern) == 12, pattern
+    return "..." + pattern + "..."
 
 
-def _screen(pattern: str) -> str:
-    assert len(pattern) == 10, pattern
-    return ".." + pattern + ".."
+def _look(up: bool = False, eyes: str = EYES_OPEN) -> dict[str, str]:
+    """The two rows a gaze occupies, as _frame keywords."""
+    if up:
+        return {"r3": _face(eyes), "r4": _face(EYES_SHUT)}
+    return {"r4": _face(eyes)}
 
 
-# The laptop's two screen rows, as ten pixels each. K is the dark panel; S
-# is something lit on it. Only these change while the agent works, because
-# the screen is where the meaning is -- the character is watching it too.
-_DARK = "LKKKKKKKKL"
-
-
-def _lit(cells: str) -> str:
-    """A screen row with the given inner eight pixels."""
+def _lid(cells: str) -> str:
+    """The upper screen row: eight inner pixels, arms either side."""
     assert len(cells) == 8, cells
-    return _screen("L" + cells + "L")
+    return "..ffL" + cells + "Lff.."
+
+
+def _panel(cells: str) -> str:
+    """The lower screen row: the same, with the forearms drawn in."""
+    assert len(cells) == 8, cells
+    return "...fL" + cells + "Lf..."
+
+
+_DARK = _lid("KKKKKKKK")
+
+# The paws. Down is r11, resting in front of the deck against nothing; up
+# is r10, the same two columns one row higher and drawn over the deck. Both
+# positions are full contrast, which is what makes one pixel of movement
+# read as a hand working rather than as a rendering artefact.
+_DECK = "...LLLLLLLLLLLL..."
+_DECK_LEFT = "...LffLLLLLLLLL..."
+_DECK_RIGHT = "...LLLLLLLLLffL..."
+_REST = "....ff......ff...."
+_REST_LEFT = "....ff............"
+_REST_RIGHT = "............ff...."
+_REST_NONE = ".................."
+
+# The paw that comes up to the face when the character is thinking, and the
+# arm holding it there: elbow on the desk, forearm vertical, paw against
+# the jaw. Drawn outside the head's own columns so it has a silhouette of
+# its own rather than reading as a smudge on the chin.
+_CHIN_PAW = "....FFFFffFFFFff.."
+_CHIN_ARM = "......FFFFFF..ff.."
 
 
 FRAMES: dict[State, list[list[str]]] = {
     # Breathing, and a blink every fourth beat. Nothing else moves.
     State.IDLE: [
-        _frame(r4=_eyes(EYES_OPEN)),
-        _frame(r4=_eyes(EYES_OPEN)),
-        _frame(r4=_eyes(EYES_OPEN)),
-        _frame(r4=_eyes(EYES_SHUT)),
+        _frame(**_look()),
+        _frame(**_look()),
+        _frame(**_look()),
+        _frame(**_look(eyes=EYES_SHUT)),
     ],
-    # Eyes up and away from the screen, and a thought drifting off the
-    # ear. The eyes alone moved by one pixel row -- half a terminal row --
-    # which is the smallest change this sprite can make, and it left
-    # thinking and idle looking like the same picture at the size anyone
-    # actually sees them. The mark is the signal; the eyes are the detail
-    # you notice second.
+    # The pose everybody draws for thinking: eyes up and away from the
+    # screen, one paw off the keys and up against the jaw, and a thought
+    # coming off the ear. Three signals, because this is the state somebody
+    # glances at to answer "is it stuck?" -- and because at the old sprite
+    # size none of them could be drawn. Thinking was the eyes moved one
+    # pixel row, which at the size anyone actually sees this was the same
+    # picture as idle.
     State.THINKING: [
-        _frame(r1="...FF....FF.W.", r3=_eyes(EYES_OPEN), r4=_eyes(EYES_SHUT)),
-        _frame(r0="...F......F.W.", r3=_eyes(EYES_OPEN), r4=_eyes(EYES_SHUT)),
-        _frame(r0="...F......F.WW", r3=_eyes(EYES_LEFT), r4=_eyes(EYES_SHUT)),
-        _frame(r3=_eyes(EYES_OPEN), r4=_eyes(EYES_SHUT)),
+        _frame(**_look(up=True), r5=_CHIN_PAW, r6=_CHIN_ARM, r11=_REST_LEFT),
+        _frame(**_look(up=True), r5=_CHIN_PAW, r6=_CHIN_ARM, r11=_REST_LEFT,
+               r1="....FF......FF.W.."),
+        _frame(**_look(up=True, eyes=EYES_LEFT), r5=_CHIN_PAW, r6=_CHIN_ARM,
+               r11=_REST_LEFT, r0="....F........F.W..",
+               r1="....FF......FF..W."),
+        _frame(**_look(up=True), r5=_CHIN_PAW, r6=_CHIN_ARM, r11=_REST_LEFT,
+               r0="....F........F..W."),
     ],
-    # Looking left, then right. Searching is the one state where the eyes
-    # sweep rather than settle.
+    # Looking left, back through centre, right, back -- a sweep needs the
+    # middle position or it is a flick between two stares -- with a single
+    # lit pixel travelling across the screen under it.
+    #
+    # The marker is not decoration. There are three eye positions and one
+    # of them is the one idle uses, so a sweep that passes through centre
+    # spends half its frames drawn exactly as idle. A state has to be
+    # legible in every frame it is in; it is the motion that may vary. The
+    # marker is also the honest picture of what searching is: something
+    # running along, looking at each thing in turn.
     State.SEARCHING: [
-        _frame(r4=_eyes(EYES_LEFT)),
-        _frame(r4=_eyes(EYES_LEFT)),
-        _frame(r4=_eyes(EYES_RIGHT)),
-        _frame(r4=_eyes(EYES_RIGHT)),
+        _frame(**_look(eyes=EYES_LEFT), r9=_panel("SKKKKKKK")),
+        _frame(**_look(), r9=_panel("KKSKKKKK")),
+        _frame(**_look(eyes=EYES_RIGHT), r9=_panel("KKKKSKKK")),
+        _frame(**_look(), r9=_panel("KKKKKKSK")),
     ],
-    # Eyes down on a lit screen, and a blink. Nothing else moves: reading
-    # is the state where the character is still and the page is not.
+    # Eyes down on a screen filling with text, and a blink. The character
+    # is still and the page is not, which is what reading looks like. Both
+    # paws stay on the near edge: nothing is being written.
     State.READING: [
-        _frame(r7=_lit("SSSSSSKK")),
-        _frame(r7=_lit("SSSSSSKK"), r4=_eyes(EYES_SHUT)),
-        _frame(r7=_lit("SSSSSSKK")),
-        _frame(r7=_lit("SSSSSSKK")),
+        _frame(r8=_lid("SSKKKKKK")),
+        _frame(r8=_lid("SSSSSKKK"), r9=_panel("SSKKKKKK")),
+        _frame(r8=_lid("SSSSSSSS"), r9=_panel("SSSSSKKK"),
+               **_look(eyes=EYES_SHUT)),
+        _frame(r8=_lid("SSSSSSSS"), r9=_panel("SSSSSSSK")),
     ],
-    # Paws up at the keyboard and a caret running along the line. The
-    # flagship state, and the only one where two things move.
+    # The flagship state: the paws alternate onto the keys and a line of
+    # code grows on the screen under them, filling the first row and
+    # starting a second. The alternation is the whole thing -- a hand that
+    # only ever rests is a hand on a keyboard, and a hand that leaves it
+    # and comes back is a hand typing -- and six frames rather than four
+    # because a line that fills and wraps reads as writing, where a bar
+    # that fills and snaps back reads as a progress meter.
+    #
+    # A paw is up on the second frame because that is the one the gallery
+    # draws, and a gallery that shows the flagship state with both hands
+    # resting is showing the one frame where nothing is happening.
     State.CODING: [
-        _frame(r6="..fFFFFFFFFf..", r7=_lit("SSKKKKKK")),
-        _frame(r6=".ffFFFFFFFFff.", r7=_lit("SSSSKKKK")),
-        _frame(r6="..fFFFFFFFFf..", r7=_lit("SSSSSSKK")),
-        _frame(r6=".ffFFFFFFFFff.", r7=_lit("SSSSSSSS")),
+        _frame(r8=_lid("SKKKKKKK")),
+        _frame(r10=_DECK_LEFT, r11=_REST_RIGHT, r8=_lid("SSSKKKKK")),
+        _frame(r8=_lid("SSSSSKKK")),
+        _frame(r10=_DECK_RIGHT, r11=_REST_LEFT, r8=_lid("SSSSSSSS")),
+        _frame(r8=_lid("SSSSSSSS"), r9=_panel("SSKKKKKK")),
+        _frame(r10=_DECK_LEFT, r11=_REST_RIGHT, r8=_lid("SSSSSSSS"),
+               r9=_panel("SSSSSKKK")),
     ],
-    # Watching. Hands off the keyboard, a bar filling underneath.
+    # Watching it run. Both paws come up onto the deck and stay there --
+    # there is nothing to type while a test decides -- and a bar fills.
     State.TESTING: [
-        _frame(r8=_lit("SKKKKKKK")),
-        _frame(r8=_lit("SSSKKKKK")),
-        _frame(r8=_lit("SSSSSKKK")),
-        _frame(r8=_lit("SSSSSSSK")),
+        _frame(r10="...LffLLLLLLffL...", r11=_REST_NONE, r9=_panel("SKKKKKKK")),
+        _frame(r10="...LffLLLLLLffL...", r11=_REST_NONE, r9=_panel("SSSKKKKK")),
+        _frame(r10="...LffLLLLLLffL...", r11=_REST_NONE, r9=_panel("SSSSSKKK")),
+        _frame(r10="...LffLLLLLLffL...", r11=_REST_NONE, r9=_panel("SSSSSSSK")),
     ],
-    # Something failed and is being worked out: eyes up, and the damage
-    # still on the screen.
+    # Something failed and is being worked out: the thinking pose, with the
+    # damage still on the screen.
     State.RECOVERING: [
-        _frame(r3=_eyes(EYES_OPEN), r4=_eyes(EYES_SHUT), r7=_lit("RRKKKKKK")),
-        _frame(r3=_eyes(EYES_LEFT), r4=_eyes(EYES_SHUT), r7=_lit("RRKKKKKK")),
+        _frame(**_look(up=True), r5=_CHIN_PAW, r6=_CHIN_ARM, r11=_REST_LEFT,
+               r8=_lid("RRKKKKKK")),
+        _frame(**_look(up=True, eyes=EYES_LEFT), r5=_CHIN_PAW, r6=_CHIN_ARM,
+               r11=_REST_LEFT, r8=_lid("RRKKKKKK")),
     ],
     # Done, and it is the mug that says so. The one state with a prop --
     # and the screen goes green, because "it worked" is the one thing on
-    # this character worth spending the good colour on. That role was
-    # declared in the ink map and drawn nowhere, so success and a warning
-    # were sharing the amber of the mug.
+    # this character worth spending the good colour on.
     State.SUCCESS: [
-        _frame(r4=_eyes(EYES_GLAD), r6="...FFFFFFFF.W.",
-               r7="..LGGGGGGL.CC.", r8="..LKKKKKKL.CC.",
-               r9=".LLLLLLLLLL.CC"),
-        _frame(r4=_eyes(EYES_GLAD), r6="...FFFFFFFF...",
-               r7="..LGGGGGGL.CC.", r8="..LKKKKKKL.CC.",
-               r9=".LLLLLLLLLL.CC"),
-        _frame(r4=_eyes(EYES_SHUT), r6="...FFFFFFFF...",
-               r7="..LGGGGGGL.CC.", r8="..LKKKKKKL.CC.",
-               r9=".LLLLLLLLLL.CC"),
+        _frame(**_look(eyes=EYES_GLAD), r7="..fFFFFFFFFFFFFf.W",
+               r8=_lid("GGGGGGGG"), r9="...fLKKKKKKKKLf.CC",
+               r10="...LLLLLLLLLLLL.CC", r11="....ff......ff..CC"),
+        _frame(**_look(eyes=EYES_GLAD), r8="..ffLGGGGGGGGLff.W",
+               r9="...fLKKKKKKKKLf.CC",
+               r10="...LLLLLLLLLLLL.CC", r11="....ff......ff..CC"),
+        _frame(**_look(eyes=EYES_SHUT), r8=_lid("GGGGGGGG"),
+               r9="...fLKKKKKKKKLf.CC",
+               r10="...LLLLLLLLLLLL.CC", r11="....ff......ff..CC"),
     ],
     # The ears go down. Colour alone had error and success drawing the same
     # silhouette -- both are "eyes not plainly open" -- and those two are
     # the pair that must never be confused at a glance, since one of them
     # means stop reading and look. The ears are the biggest shape the
-    # character has, so they are what changes.
+    # character has, so they are what changes. The paws come off the deck
+    # as well: nothing is being written while this is true.
     State.ERROR: [
-        _frame(r0="..............", r1="..FF......FF..",
-               r4=_eyes(EYES_SHUT_R), r7=_lit("RRRRKKKK")),
+        _frame(r0="..................", r1="...FF......FF.....",
+               **_look(eyes=EYES_SHUT_R), r8=_lid("RRRRKKKK"),
+               r11=_REST_NONE),
     ],
     State.CANCELLED: [
-        _frame(r0="..............", r1="..FF......FF..",
-               r4=_eyes(EYES_SHUT), r7=_screen(_DARK)),
+        _frame(r0="..................", r1="...FF......FF.....",
+               **_look(eyes=EYES_SHUT), r8=_DARK, r11=_REST_NONE),
     ],
     # One ear up, and something arriving at it. The ear alone was one pixel
     # of difference from the base body -- technically distinct, and not
     # legible at the size anyone sees this. So listening borrows the device
     # that made thinking readable, mirrored: a mark, on the left, moving
-    # toward the ear rather than drifting away from it.
-    #
-    # The second frame also used to be the base body exactly, so for half
-    # of every cycle "listening" was pixel-for-pixel the idle picture. A
-    # state has to be legible in every frame it is in; it is the motion
-    # that may vary.
+    # toward the ear rather than drifting away from it. The paws come off
+    # the keys, because a character still typing is not listening.
     State.LISTENING: [
-        _frame(r0=".W.F.....FF...", r1="...FF....FF..."),
-        _frame(r0="W..F.....FF...", r1=".W.FF....FF..."),
+        _frame(r0="..W.F........F....", r11=_REST_NONE),
+        _frame(r0="W...F........F....", r1="..W.FF......FF....",
+               r11=_REST_NONE),
     ],
     # The mouth opens and closes, and neither frame is the closed mouth of
-    # the base body -- the same bug: the second frame was the base, so
-    # speaking spent half its time drawn as idle.
+    # the base body -- a state has to be legible in every frame it is in,
+    # and a frame that is pixel-for-pixel the idle picture is not.
     State.SPEAKING: [
-        _frame(r5="..FFFFWWFFFF.."),
-        _frame(r5="..FFFWWWWFFF.."),
+        _frame(r5="....FFFFWWFFFF....", r11=_REST_NONE),
+        _frame(r5="....FFFWWWWFFF....", r11=_REST_NONE),
     ],
 }
 
