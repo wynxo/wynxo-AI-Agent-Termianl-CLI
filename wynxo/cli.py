@@ -3958,6 +3958,26 @@ class Repl:
                         "works from the window list", style=MUTED)
         self.ui.console.print(line)
 
+        # The rest of the machine, which is most of what somebody asks a
+        # copilot for. Listed here rather than on a page of its own: "what
+        # can wynxo actually do on this computer" is one question.
+        from .system import Audio, Clipboard, Media, Notifier, Power
+
+        self.ui.console.print()
+        for label, present, fix in (
+                ("sound", Audio().available, Audio().missing()),
+                ("media playback", Media().available, Media().missing()),
+                ("clipboard", Clipboard().available, Clipboard().missing()),
+                ("notifications", Notifier().available, Notifier().missing()),
+                ("power (lock, sleep, restart)", bool(Power().actions()),
+                 "Needs systemctl, or loginctl for locking.")):
+            mark = self.ui.g.tick if present else self.ui.g.cross
+            line = Text(f"  {mark} ", style=GOOD if present else MUTED)
+            line.append(label, style="" if present else MUTED)
+            self.ui.console.print(line)
+            if not present:
+                self.ui.detail_line(fix, MUTED, indent=6)
+
         import shutil as _shutil
         if not _shutil.which("tesseract"):
             self.ui.detail_line(

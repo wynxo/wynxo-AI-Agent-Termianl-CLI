@@ -16,6 +16,7 @@ from .shell import BackgroundPoll, Shell
 from .todo import TodoWrite
 from .apps import LaunchApplication
 from .desktop_tool import ControlComputer, Look
+from .system_tool import SystemControl, SystemStatus
 from .appcatalog import ApplicationCatalog
 from .navigation_tool import NavigateSymbols
 from .references_tool import FindReferences
@@ -94,6 +95,8 @@ def build_registry(
         LaunchApplication(workspace, boundary, shield, catalog=app_catalog),
         Look(workspace, boundary, shield),
         ControlComputer(workspace, boundary, shield),
+        SystemStatus(workspace, boundary, shield),
+        SystemControl(workspace, boundary, shield),
         NavigateSymbols(workspace, boundary, shield),
         FindReferences(workspace, boundary, shield),
         GitHubRead(workspace, boundary, shield),

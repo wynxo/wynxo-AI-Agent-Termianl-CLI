@@ -45,6 +45,9 @@ class Machine:
     """Why nothing can be driven, and what to install."""
     tools: dict = field(default_factory=dict)
     """Command-line things worth knowing about, present or not."""
+    controls: frozenset = field(default_factory=frozenset)
+    """The parts of the machine beyond its windows that can be operated --
+    sound, media, clipboard, notifications, power."""
     sighted: bool = False
     """Whether the model in use accepts pictures. Not a fact about the
     computer, but it belongs beside them: what wynxo can do here is the
@@ -105,6 +108,13 @@ class Machine:
             lines.append(
                 "There is no desktop: nothing can be clicked, typed into or "
                 "focused. Do not offer to. Commands still run in the shell.")
+        if self.controls:
+            lines.append(
+                "You can also operate: " + ", ".join(sorted(self.controls))
+                + ". Use system_control for those and system_status to read "
+                "how the machine is doing -- memory, disk, battery, what is "
+                "slowing it down. Both beat composing shell commands: the "
+                "right command differs by machine and they pick it.")
         absent = [name for name, there in self.tools.items() if not there]
         if absent:
             lines.append("Not installed: " + ", ".join(absent)
@@ -135,9 +145,16 @@ turn, so it is the short list of things wynxo's own tools reach for."""
 def probe(backend=None, model_info=None) -> Machine:
     """Work out what this machine is. Cheap, and done once."""
     from .desktop import detect
+    from .system import Audio, Clipboard, Media, Notifier, Power
     from .vision import can_see
 
     backend = backend if backend is not None else detect()
+    controls = {name for name, there in (
+        ("sound", Audio().available), ("media playback", Media().available),
+        ("the clipboard", Clipboard().available),
+        ("notifications", Notifier().available),
+        ("power", bool(Power().actions())),
+    ) if there}
     session = backend.name if backend.name != "unavailable" else "headless"
     return Machine(
         os=_describe_os(),
@@ -147,6 +164,7 @@ def probe(backend=None, model_info=None) -> Machine:
         can=frozenset(backend.actions()),
         blocked=getattr(backend, "reason", ""),
         tools={name: bool(shutil.which(name)) for name in _WATCHED},
+        controls=frozenset(controls),
         sighted=can_see(model_info),
     )
 

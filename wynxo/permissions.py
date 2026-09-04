@@ -53,7 +53,7 @@ ALWAYS_CONFIRM = re.compile(
 )
 
 
-ALWAYS_ASKS = frozenset({"shell", "control_computer"})
+ALWAYS_ASKS = frozenset({"shell", "control_computer", "system_control"})
 """Tools that ask even in auto mode.
 
 Not because they are the dangerous ones -- writing a file is dangerous too
