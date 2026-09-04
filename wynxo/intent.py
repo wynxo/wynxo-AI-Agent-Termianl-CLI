@@ -45,6 +45,14 @@ CODING = "coding"
 
 KINDS = (CONVERSATION, SYSTEM_ACTION, CODING)
 
+OPEN, FOCUS, CLOSE, TYPE, PRESS = "open", "focus", "close", "type", "press"
+VERBS = (OPEN, FOCUS, CLOSE, TYPE, PRESS)
+"""What a system action can be.
+
+Deliberately short. Every one of these is a thing a desktop can be asked to
+do reliably and reported honestly afterwards -- there is no "arrange my
+windows" here, because there is no way to check it happened."""
+
 
 @dataclass(frozen=True)
 class Intent:
@@ -62,6 +70,14 @@ class Intent:
     an empty window and calls it done. It applies to the last target
     because that is where the sentence puts it -- "the calculator, then the
     browser, then a terminal running main.py"."""
+    verb: str = OPEN
+    """What to do to the target, for a system action.
+
+    "Open the calculator" and "close that window" are the same kind of
+    request -- something done to the machine rather than to the code -- and
+    routing them apart would mean two classifications where the user made
+    one. They part company here instead, at the point where the difference
+    is what actually happens."""
     then_coding: bool = False
     """A genuinely combined request ("open the editor and inspect this
     repo"): do the action, then carry on into the agent loop. Only ever set
@@ -73,6 +89,17 @@ class Intent:
     def __post_init__(self):
         if self.kind not in KINDS:
             raise ValueError(f"unknown intent {self.kind!r}")
+        if self.verb not in VERBS:
+            raise ValueError(f"unknown verb {self.verb!r}")
+
+    @property
+    def is_launch(self) -> bool:
+        return self.kind == SYSTEM_ACTION and self.verb == OPEN
+
+    @property
+    def is_desktop(self) -> bool:
+        """A system action that drives a window rather than starting one."""
+        return self.kind == SYSTEM_ACTION and self.verb != OPEN
 
     @property
     def is_conversation(self) -> bool:
@@ -91,6 +118,7 @@ PROMPT = """\
 Classify the user's message. Answer with one JSON object and nothing else.
 
 {"kind": "conversation" | "system_action" | "coding",
+ "verb": "open" | "focus" | "close" | "type" | "press",
  "targets": [],
  "command": "",
  "then_coding": false}
@@ -108,6 +136,20 @@ system_action  the user wants an application or program opened, launched,
                in "command": "open the terminal and run main.py" ->
                targets ["the terminal"], command "main.py". Leave
                "command" empty otherwise.
+
+               A system action also covers doing something to a window that
+               is already open. "verb" says which, and defaults to "open":
+                 open   start an application ("open the calculator")
+                 focus  bring an open window forward ("switch to the
+                        browser", "go back to the editor")
+                 close  close a window ("close that", "shut this window")
+                 type   type text where the user is ("type my email
+                        address", "write hello there")
+                 press  send a keystroke ("press escape", "hit ctrl+s")
+               For "type" and "press" put the text or the key in "command".
+               When the user says "that", "this" or "it" rather than naming
+               a window, leave "targets" empty -- it means whatever is in
+               front of them.
 coding         the user wants something done to code, files, tests or this
                project: read, find, explain, fix, add, refactor, run tests.
 
@@ -151,7 +193,15 @@ def parse(raw: str) -> Intent | None:
                 command = data.get("command")
                 command = (str(command).strip()
                            if isinstance(command, (str, int, float)) else "")
-                return Intent(kind=kind, targets=targets,
+                verb = str(data.get("verb", OPEN)).strip().lower() or OPEN
+                if verb not in VERBS or kind != SYSTEM_ACTION:
+                    # An invented verb becomes a launch, which is the one
+                    # the catalog can refuse safely: it resolves the name
+                    # against what is installed and says so when nothing
+                    # matches. A verb on a coding or conversation turn is
+                    # the model filling in a field it was shown.
+                    verb = OPEN
+                return Intent(kind=kind, targets=targets, verb=verb,
                               # Only where it can mean anything. A command
                               # on a conversation or a coding turn is the
                               # model filling in a field it was shown, and
@@ -196,11 +246,19 @@ async def classify(call, request: str, *, chatting: bool) -> Intent:
     decided = parse(raw)
     if decided is None:
         return fallback(request, chatting=chatting)
-    if decided.is_system_action and not decided.targets:
+    if decided.is_launch and not decided.targets:
         # A launch with nothing to launch is not actionable. The words are
         # the user's own; hand the whole message to the catalog and let it
         # decide whether anything matches.
+        #
+        # Only a launch. For every other verb an empty target is the
+        # answer, not a gap in one: "close that" means the window in front,
+        # and this rule -- written when every system action was a launch --
+        # turned it into a hunt for an installed application called "close
+        # that". Rebuilding the Intent here dropped the verb along with it,
+        # so the request arrived at the launcher having lost the one field
+        # that said it was not a launch.
         decided = Intent(kind=SYSTEM_ACTION, targets=(request,),
-                         command=decided.command,
+                         verb=decided.verb, command=decided.command,
                          then_coding=decided.then_coding)
     return decided

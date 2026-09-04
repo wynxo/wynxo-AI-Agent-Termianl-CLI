@@ -113,7 +113,17 @@ def _is_routing_prompt(messages: list[dict]) -> bool:
 def _routing_response(route: str):
     import httpx
 
-    payload = json.dumps({"kind": route}) if route else '{"kind": "coding"}'
+    # A bare word is the common case ("coding"), but the router answers
+    # with more than a kind now -- a verb, targets, a command -- so a test
+    # that needs to exercise those passes the whole object and it goes
+    # through as itself. Wrapping it as {"kind": "{...}"} made every such
+    # test look like a routing failure and fall back to coding, which is
+    # exactly the shape of a real bug and took a while to tell apart.
+    route = (route or "").strip()
+    if route.startswith("{"):
+        payload = route
+    else:
+        payload = json.dumps({"kind": route}) if route else '{"kind": "coding"}'
     return httpx.Response(200, text="\n".join([
         json.dumps({"message": {"role": "assistant", "content": payload},
                     "done": False}),

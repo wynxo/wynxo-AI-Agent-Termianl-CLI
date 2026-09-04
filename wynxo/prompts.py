@@ -477,6 +477,7 @@ def build_system_prompt(
     mode=None,
     voice: str = "mommy",
     project_map: str = "",
+    machine: str = "",
 ) -> str:
     from .platforms import default_shell, describe
 
@@ -492,6 +493,13 @@ def build_system_prompt(
             git=git_context(workspace),
         )
     )
+
+    if machine.strip():
+        # What this computer is and what it can be made to do, settled once
+        # before anything is attempted. Here rather than in front of each
+        # turn because none of it changes while wynxo is running, and this
+        # is the half the server keeps between turns.
+        parts.append("\n## This computer\n\n" + machine.strip() + "\n")
 
     if not native_tools and tools_description:
         parts.append(HERMES_TOOLS.format(tools=tools_description))

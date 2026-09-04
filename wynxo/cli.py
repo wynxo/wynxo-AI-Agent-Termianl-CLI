@@ -2106,6 +2106,11 @@ class Repl:
         return await self._loop()
 
     async def _loop(self) -> int:
+        # Start finding out where the machine is while the user is still
+        # typing their first message. Costs nothing that is waited on, and
+        # it is the difference between the first "close that" working and
+        # the first one being the request that primes the cache.
+        self.agent.awareness.refresh()
         try:
             return await self._prompt_loop()
         finally:

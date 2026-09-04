@@ -20,6 +20,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .awareness import Awareness
+from .machine import probe
 from .checkpoints import Checkpoints
 from ._agent_hardening import _stream_test_output
 from .config import Config
@@ -514,6 +516,15 @@ class Agent:
         # session so it can persist under the same id, and a restarted
         # session keeps its undo history.
         self.checkpoints = Checkpoints(session_id=self.session.session_id)
+        self.machine = probe()
+        """What this computer is, worked out once before anything is
+        attempted. An assistant that finds out what it can do by trying is
+        one that fails in front of you."""
+        self.awareness = Awareness(workspace)
+        """What is on this machine right now, put in front of turns that
+        act. Held here so its cache survives between them, and so a machine
+        with no desktop settles into knowing that rather than probing for
+        one every time somebody speaks."""
         self._streaming_shown: list[str] | None = None
         """What the current streaming call has put on screen, while one is
         running. Read by run() when a turn is cancelled."""
@@ -587,6 +598,7 @@ class Agent:
             mode=self.permissions.mode,
             voice=self.config.voice,
             project_map=self.project_map,
+            machine=self.machine.prompt_block(),
         )
 
     def set_effort(self, policy: EffortPolicy) -> None:
@@ -932,6 +944,8 @@ class Agent:
         tool. A system action has a terminal state, and reaching it ends the
         turn -- there is nothing for the agent loop to add.
         """
+        if decision.is_desktop:
+            return await self._desktop_action(request, decision, started)
         await self.cb.on_stage("launching")
         self.session.add_user(request)
         launcher = self.tools.get("launch_application")
@@ -987,6 +1001,83 @@ class Agent:
             follow.content = f"{content}\n\n{follow.content}".strip()
             return follow
         return result
+
+    async def _desktop_action(self, request: str, decision,
+                              started: float) -> TurnResult:
+        """Do the thing to the window, and stop.
+
+        "Close that", "switch to the browser", "press escape" are the
+        sentences that make an assistant feel like one, and they have to be
+        immediate. Going through the tool loop for them means a plan, a
+        model call to pick a tool it was already told to use, and twenty
+        seconds on a large local model to do something the machine could
+        have done the moment the router named it.
+
+        So the steps are built here, from the verb and the target, and the
+        tool runs once. The model is not consulted about *how*: it already
+        answered the only question that needed it, which was what the user
+        meant.
+        """
+        await self.cb.on_stage("on the desktop")
+        self.session.add_user(request)
+        control = self.tools.get("control_computer")
+        if control is None:
+            said = "I cannot drive the desktop in this session."
+            self.session.add_assistant(said)
+            return TurnResult(content=said, iterations=1,
+                              elapsed=time.monotonic() - started)
+
+        # Asked and answered before anything is attempted, and before the
+        # user is asked to approve it: there is no sense putting up a
+        # permission prompt for a keystroke this machine cannot send. The
+        # answer carries the fix rather than the symptom.
+        needed = {intent_mod.FOCUS: "focus", intent_mod.CLOSE: "press",
+                  intent_mod.TYPE: "type", intent_mod.PRESS: "press"}
+        if why := self.machine.why_not(needed.get(decision.verb, "press")):
+            self.session.add_assistant(why)
+            return TurnResult(content=why, iterations=1,
+                              elapsed=time.monotonic() - started,
+                              errors=[why])
+
+        target = _resolve_target(decision.targets)
+        steps, window = _desktop_steps(decision.verb, target, decision.command)
+        if not steps:
+            said = (f"I do not know how to {decision.verb} that.")
+            self.session.add_assistant(said)
+            return TurnResult(content=said, iterations=1,
+                              elapsed=time.monotonic() - started)
+
+        args = {"steps": steps, "window": window}
+        # The same question the tool loop would ask. This path skips the
+        # loop, not the permission: input going to somebody's desktop is
+        # asked about wherever it is decided.
+        if self.permissions.needs_prompt(control.name, control.mutating, args):
+            summary = _describe_desktop(decision.verb, target, decision.command)
+            preview = _preview_steps(args)
+            outcome = await self.cb.ask_permission(control.name, summary, preview)
+            if outcome is Decision.DENY:
+                said = "Left it alone."
+                self.session.add_assistant(said)
+                return TurnResult(content=said, iterations=1,
+                                  elapsed=time.monotonic() - started)
+            if outcome is Decision.ALLOW_ALWAYS:
+                self.permissions.remember(control.name, args)
+
+        result = await control.invoke(args)
+        await self.cb.on_tool_result(control.name, result.ok,
+                                     result.display or decision.verb,
+                                     result.output)
+        self.session.add_tool_result(control.name, result.output)
+        said = (_describe_desktop(decision.verb, target, decision.command,
+                                  past=True)
+                if result.ok else result.error or "That did not work.")
+        self.session.add_assistant(said)
+        self.session.save()
+        outcome = TurnResult(content=said, iterations=1,
+                             elapsed=time.monotonic() - started,
+                             errors=[] if result.ok else [result.error])
+        outcome.terminal_action = True
+        return outcome
 
     async def _may_launch(self, launcher, args: dict) -> bool:
         """Ask before a launch that carries a command. True to go ahead.
@@ -1913,6 +2004,22 @@ class Agent:
             # Both questions the router answers are already settled.
             decision = Intent(kind=intent_mod.CODING, source="fallback")
         self.last_intent = decision
+
+        # Where the machine is, in front of the request it has to make sense
+        # of. "Close that", "run it", "what's this error" are how people
+        # actually speak, and every one of them is unanswerable without it.
+        #
+        # Here rather than in the system prompt: that is the prefix the
+        # server keeps between turns, and rewriting it every turn throws the
+        # cache away -- on a large model mostly on the CPU, that is the
+        # difference between answering and appearing to hang. And not on a
+        # conversation turn, which gets a deliberately bare prompt: telling
+        # a model what windows are open before "how's it going" is what
+        # makes an assistant sound like a monitoring system.
+        if not (chatting or distress or decision.is_conversation):
+            if state := self.awareness.block():
+                self.session.add_user(state)
+
         # Application launching used to be left for the model to reach on its
         # own somewhere inside the tool loop. At medium effort and above
         # _plan() runs first, so "open the text editor" was handed to the
@@ -2174,3 +2281,78 @@ def _preview_steps(args: dict) -> str:
         elif action == "wait":
             lines.append(f"  wait   {step.get('amount', 250)}ms")
     return "\n".join(lines)
+
+
+_PRONOUNS = {"that", "this", "it", "that one", "this one", "the window",
+             "that window", "this window", "the current window", "here",
+             "there", "current", "active", "the active window"}
+"""What "close that" means: not a window called "that".
+
+A model handed "close that window" cheerfully puts "that window" in
+targets, and matching it against titles finds nothing. The user meant
+whatever is in front of them, and that is the one thing the machine always
+knows."""
+
+
+def _resolve_target(targets) -> str:
+    """The window a desktop action is about, or "" for whatever is focused."""
+    for target in targets or ():
+        clean = str(target).strip().lower().strip(".!?")
+        if clean and clean not in _PRONOUNS:
+            return str(target).strip()
+    return ""
+
+
+def _desktop_steps(verb: str, target: str, command: str):
+    """(steps, window) for control_computer, or ([], "") if it makes no sense.
+
+    ``window`` is the focus guard, and it is deliberately empty when the
+    action is about whatever is in front: naming the focused window as the
+    guard would be checking that the thing in front is the thing in front,
+    while making the batch fail if the user tabbed away in the meantime --
+    which is not the same request any more anyway.
+    """
+    if verb == intent_mod.FOCUS:
+        return ([{"action": "focus", "text": target}], "") if target else ([], "")
+    if verb == intent_mod.CLOSE:
+        # alt+f4 rather than a window-manager close: it is the one spelling
+        # every desktop honours, and it goes to the focused window -- so a
+        # named window is brought forward first, in the same batch, where
+        # the guard can still see the order.
+        steps = [{"action": "focus", "text": target}] if target else []
+        steps.append({"action": "press", "text": "alt+f4"})
+        return steps, target
+    if verb == intent_mod.TYPE:
+        if not command:
+            return [], ""
+        steps = [{"action": "focus", "text": target}] if target else []
+        steps.append({"action": "type", "text": command})
+        return steps, target
+    if verb == intent_mod.PRESS:
+        if not command:
+            return [], ""
+        steps = [{"action": "focus", "text": target}] if target else []
+        steps.append({"action": "press", "text": command})
+        return steps, target
+    return [], ""
+
+
+def _describe_desktop(verb: str, target: str, command: str,
+                      past: bool = False) -> str:
+    """What is about to happen, or what did -- in the user's terms.
+
+    The tool's own summary is a list of steps, which is the right thing for
+    a transcript and the wrong thing for an answer. "Closed Firefox" is
+    what somebody asked for; "did 2 step(s): focused 'Mozilla Firefox';
+    pressed alt+f4" is a description of the machinery.
+    """
+    where = target or "the window in front"
+    if verb == intent_mod.FOCUS:
+        return f"{'Switched' if past else 'Switch'} to {where}."
+    if verb == intent_mod.CLOSE:
+        return f"{'Closed' if past else 'Close'} {where}."
+    if verb == intent_mod.TYPE:
+        return (f"{'Typed' if past else 'Type'} {command!r} into {where}.")
+    if verb == intent_mod.PRESS:
+        return f"{'Pressed' if past else 'Press'} {command} in {where}."
+    return f"{verb} {where}"
