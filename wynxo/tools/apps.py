@@ -140,13 +140,12 @@ class LaunchApplication(Tool):
 # Terminal execution
 # ---------------------------------------------------------------------------
 
-# Konsole can reuse an already-running instance. --separate is important when
-# WYNXO itself is running inside Konsole: it guarantees that the invocation
-# which contains -e is a new Konsole process and therefore owns the command.
-# KDE documents --separate/--nofork as creating a separate instance and -e as
-# executing the following command; -e must be the final Konsole option.
+# Konsole can reuse an already-running instance. --separate guarantees a new
+# process, while --hold keeps the session visible after the requested command
+# exits. -e must be the final Konsole option; bash -lc then receives the exact
+# command as one shell invocation.
 TERMINALS: dict[str, tuple[str, ...]] = {
-    "konsole": ("--separate", "-e"),
+    "konsole": ("--separate", "--hold", "-e"),
     "gnome-terminal": ("--",),
     "kgx": ("--",),
     "ptyxis": ("--",),
@@ -168,11 +167,8 @@ TERMINALS: dict[str, tuple[str, ...]] = {
 }
 
 
-_KEEP_OPEN = "exec bash"
-
-
 def terminal_argv(entry: AppEntry, command: str) -> list[str] | None:
-    """Build a terminal argv that executes the command and leaves a shell open."""
+    """Build a terminal argv that executes the command and keeps the session visible."""
     for candidate in (entry.path.stem, entry.name):
         key = str(candidate).strip().lower()
         if key not in TERMINALS:
@@ -184,11 +180,9 @@ def terminal_argv(entry: AppEntry, command: str) -> list[str] | None:
         if not binary:
             return None
 
-        # Do not use `bash -c command; exec bash` as a single string after -e.
-        # Konsole treats every argument after -e as part of the command. The
-        # explicit bash -lc form makes the shell boundary unambiguous.
-        shell_script = f"{command}\n{_KEEP_OPEN}"
-        return [binary, *TERMINALS[key], "bash", "-lc", shell_script]
+        # The shell receives the command as one argument after -lc. This keeps
+        # pipes, quotes, &&, redirects and other normal shell syntax intact.
+        return [binary, *TERMINALS[key], "bash", "-lc", command]
 
     return None
 
