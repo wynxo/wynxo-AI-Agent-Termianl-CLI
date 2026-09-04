@@ -63,28 +63,12 @@ class Loaded:
     def context_that_fits(self, weights: int, num_ctx: int) -> int:
         """Roughly the largest context window that would stay on the GPU.
 
-        This is the number that answers "why is wynxo slower than `ollama
-        run`", and it can be worked out from what the server already
-        reports rather than guessed at.
-
         ``size`` is what the model needs in memory at the window it was
         loaded under, and the weights do not change with the window, so
         everything above them is the KV cache -- and the KV cache is linear
         in the number of tokens. Divide by the window and you have the cost
         per token; the room left on the card once the weights are there,
         divided by that, is how many tokens would fit.
-
-        ``size_vram`` stands in for how much VRAM there is. Ollama places as
-        many layers as it can, so what it managed to place is a fair
-        estimate of the card, and an underestimate rather than an over one:
-        being told a slightly smaller window than would truly fit costs
-        some context, where the other way round costs the speed this exists
-        to recover.
-
-        Zero when the answer is not worth acting on -- an unknown weight, a
-        window that is not really the KV cache's, or a card too small for
-        the weights alone, where no window is small enough and the fix is a
-        smaller model or a tighter quantisation instead.
         """
         if weights <= 0 or num_ctx <= 0 or self.size <= weights:
             return 0
@@ -94,22 +78,64 @@ class Loaded:
         room = self.size_vram - weights
         if room <= 0:
             return 0
-        # Down to a round number: this is an estimate, and a recommendation
-        # of "13,417" claims a precision it does not have.
         return int(room / per_token) // 1024 * 1024
+
+    def context_within(self, weights: int, num_ctx: int, budget: int) -> int:
+        """Estimate the largest context that fits within a memory budget."""
+        if weights <= 0 or num_ctx <= 0 or budget <= weights or self.size <= weights:
+            return 0
+        per_token = (self.size - weights) / num_ctx
+        if per_token <= 0:
+            return 0
+        room = budget - weights
+        if room <= 0:
+            return 0
+        return int(room / per_token) // 1024 * 1024
+
+    def share_at(self, weights: int, num_ctx: int, floor_ctx: int = 2048) -> float:
+        """Estimate GPU share if the model is loaded at a smaller context."""
+        if weights <= 0 or self.size <= 0 or num_ctx <= 0:
+            return 0.0
+        floor_ctx = max(1, min(floor_ctx, num_ctx))
+        if self.size <= weights:
+            return 0.0
+
+        # Preserve the same linear KV-cache model used by context_that_fits.
+        kv_at_ctx = self.size - weights
+        per_token = kv_at_ctx / num_ctx
+        needed = weights + per_token * floor_ctx
+        if needed <= 0:
+            return 0.0
+        return min(1.0, self.size_vram / needed)
 
 
 def same_model(a: str, b: str) -> bool:
-    """Whether two model names are the same model.
-
-    ``/api/ps`` answers with the tag the server loaded, which is not always
-    the string configured here: ``qwen3-coder:30b`` and ``qwen3-coder:latest``
-    are the same weights under two names, and a check that misses that
-    reports nothing at all rather than reporting the wrong thing -- which is
-    the failure mode nobody notices.
-    """
+    """Whether two model names are the same model."""
     a, b = a.strip().lower(), b.strip().lower()
     return bool(a) and (a == b or a.split(":")[0] == b.split(":")[0])
+
+
+def gpu_share(model_size: int, vram: int) -> float:
+    """Estimate the fraction of a model that can live on the GPU."""
+    if model_size <= 0 or vram <= 0:
+        return 0.0
+    return min(1.0, max(0.0, vram / model_size))
+
+
+def faster_on_gpu(models: list["ModelInfo"], vram: int, current_share: float = 0.0) -> list["ModelInfo"]:
+    """Return installed models ordered by the estimated GPU share.
+
+    The caller filters out the currently selected model. Keeping the helper
+    in the provider module avoids duplicating the simple memory heuristic in
+    both the terminal UI and the doctor.
+    """
+    if vram <= 0:
+        return list(models)
+    return sorted(
+        models,
+        key=lambda model: (gpu_share(model.size, vram), -(model.size or 0)),
+        reverse=True,
+    )
 
 
 @dataclass
@@ -194,19 +220,7 @@ class Chunk:
 
 
 def _payload(response, what: str, where: str) -> dict:
-    """The response body as a mapping, or a ProviderError worth reading.
-
-    Every one of these calls used to assume a 200 meant JSON. A wrong port,
-    a proxy's HTML error page, a captive-portal login redirect, or a server
-    that answers 200 with nothing at all all produced a bare
-    JSONDecodeError, uncaught, on the start-up path -- so pointing wynxo at
-    the wrong address crashed it with "Expecting value: line 1 column 1"
-    instead of telling anybody what was wrong.
-
-    A list is accepted and reported as such rather than silently coerced:
-    some shims answer /v1/models with a bare array, and treating that as an
-    empty mapping would report "no models" for a server that has plenty.
-    """
+    """The response body as a mapping, or a ProviderError worth reading."""
     try:
         data = response.json()
     except ValueError as exc:
@@ -240,21 +254,12 @@ _TRANSIENT = (
     httpx.ConnectTimeout,
     httpx.PoolTimeout,
 )
-"""Failures that are about the connection rather than the request, and so
-may well succeed on a second try."""
 
 CONNECT_ATTEMPTS = 3
 RETRY_BACKOFF = 0.75
 
 
 def _is_template_parse_error(low: str) -> bool:
-    """Whether the server failed parsing what the model wrote, not the request.
-
-    Ollama renders tool calls through the model's own chat template. Several
-    tool-tuned models emit XML-ish calls, and when the model closes a tag
-    wrongly the template's parser is what complains -- so the error names XML
-    or a template rather than anything the user did.
-    """
     if "syntax error" in low and ("xml" in low or "element" in low):
         return True
     return ("template" in low and "error" in low) or "closed by" in low
@@ -264,9 +269,6 @@ class OllamaClient:
     def __init__(self, config: Config):
         self.config = config
         self.think_levels_supported = True
-        """Ollama gained string think levels ("low"/"medium"/"high"/"max")
-        after the plain boolean. An older server rejects the string outright,
-        so the first rejection downgrades this for the rest of the session."""
         ep = config.endpoint()
         self.base_url = ep.url
         headers = {"Content-Type": "application/json"}
@@ -292,10 +294,7 @@ class OllamaClient:
     async def __aexit__(self, *exc) -> None:
         await self.aclose()
 
-    # -- discovery ---------------------------------------------------------
-
     async def ping(self) -> str:
-        """Return the server version, or raise with a message worth reading."""
         try:
             r = await self._client.get("/api/version", timeout=10.0)
             r.raise_for_status()
@@ -342,7 +341,6 @@ class OllamaClient:
         return out
 
     async def show(self, model: str) -> ModelInfo:
-        """Fetch capabilities and the model's real context length."""
         try:
             r = await self._client.post("/api/show", json={"model": model}, timeout=30.0)
             r.raise_for_status()
@@ -357,8 +355,6 @@ class OllamaClient:
             family=details.get("family", ""),
             capabilities=data.get("capabilities"),
         )
-        # The context length key is namespaced by architecture, e.g.
-        # "qwen3.context_length". Find whichever one is present.
         for key, value in (data.get("model_info") or {}).items():
             if key.endswith(".context_length") and isinstance(value, int):
                 info.context_length = value
@@ -366,13 +362,6 @@ class OllamaClient:
         return info
 
     async def running(self) -> list[Loaded]:
-        """What the server has in memory right now, from /api/ps.
-
-        Never raises: this only ever informs a diagnostic, and a server too
-        old to have the endpoint, or one that answers something unexpected,
-        must not be able to break a turn. An empty list means "nothing
-        loaded, or could not tell", and every caller treats those the same.
-        """
         try:
             r = await self._client.get("/api/ps", timeout=10.0)
             r.raise_for_status()
@@ -394,28 +383,6 @@ class OllamaClient:
         return out
 
     async def warm(self, model: str = "", num_ctx: int = 0) -> bool:
-        """Ask the server to load the model, without generating anything.
-
-        An empty message list is Ollama's documented way to say "load this
-        and hold it": the model is read from disk and the KV cache is
-        allocated, and nothing is generated.
-
-        This is most of why `ollama run` feels quicker. It loads the model
-        while you are still typing your first message; wynxo asked nothing
-        of the server until you pressed enter, so the first question of
-        every session paid for a cold load -- tens of seconds for a 30B --
-        behind a status line that said "thinking", which is not what was
-        happening.
-
-        The options must be the ones every later request will carry.
-        Loading under a different num_ctx would be worse than not loading at
-        all: Ollama would evict and reload the model on the first real
-        question, so the wait would be paid twice.
-
-        Never raises. A server too old for this, a model that is not there,
-        a machine with no room -- each is the first request's problem to
-        report properly, and none of them is a reason to fail a start-up.
-        """
         payload = {
             "model": model or self.config.model,
             "messages": [],
@@ -430,7 +397,6 @@ class OllamaClient:
             return False
 
     async def pull(self, model: str) -> AsyncIterator[str]:
-        """Stream human-readable progress while a model downloads."""
         payload = {"model": model, "stream": True}
         async with self._client.stream(
             "POST", "/api/pull", json=payload, timeout=None
@@ -453,8 +419,6 @@ class OllamaClient:
                 elif status:
                     yield status
 
-    # -- generation --------------------------------------------------------
-
     async def chat(
         self,
         messages: list[dict],
@@ -468,7 +432,6 @@ class OllamaClient:
         stream: bool = True,
         extra_options: dict[str, Any] | None = None,
     ) -> AsyncIterator[Chunk]:
-        """Stream one assistant turn."""
         options: dict[str, Any] = {
             "num_ctx": num_ctx or self.config.num_ctx,
             "temperature": temperature,
@@ -507,14 +470,6 @@ class OllamaClient:
                     "`request_timeout` in your config, or use a smaller model."
                 ) from exc
             except _TRANSIENT as exc:
-                # Ollama drops connections while it loads a model, and
-                # loading a 30B from cold takes long enough that the first
-                # request of a session is the one most likely to be hit.
-                #
-                # Retried only while nothing has been emitted. Once tokens
-                # have reached the user, a second attempt would replay the
-                # answer from the top and print it twice -- worse than the
-                # error it was trying to hide.
                 if emitted or attempt == CONNECT_ATTEMPTS - 1:
                     raise ProviderError(
                         self._explain_transient(exc, emitted)) from exc
@@ -524,12 +479,6 @@ class OllamaClient:
                     f"Request to {self.base_url} failed: {exc}") from exc
 
     async def _stream_chat(self, payload: dict) -> AsyncIterator[Chunk]:
-        """Issue the request, retrying once without a string think level.
-
-        The retry is safe because a rejected request fails on the status line,
-        before any chunk has been yielded -- nothing has been emitted that a
-        second attempt could duplicate.
-        """
         timeout = self.config.request_timeout
         async with self._client.stream(
             "POST", "/api/chat", json=payload, timeout=timeout
@@ -552,10 +501,6 @@ class OllamaClient:
                     if (data := json_object(line)) is None:
                         continue
                     if err := data.get("error"):
-                        # Mid-stream errors used to be re-raised verbatim,
-                        # so a template parse failure reached the user as
-                        # "XML syntax error on line 6" with no hint that it
-                        # was the model's output and not their machine.
                         raise ProviderError(
                             self._explain_error(200, str(err), payload))
                     chunk = self._to_chunk(data)
@@ -564,15 +509,9 @@ class OllamaClient:
                         chunk.content or chunk.thinking or chunk.tool_calls)
                     yield chunk
                 if produced and not finished:
-                    # The socket stopped without Ollama ever sending
-                    # `done: true`: the model was still generating. Reported
-                    # rather than raised, because half an answer is still
-                    # worth reading -- it just must not be mistaken for a
-                    # whole one.
                     yield Chunk(done=True, truncated=True)
                 return
 
-        # Only reached after a think-level downgrade.
         async with self._client.stream(
             "POST", "/api/chat", json=payload, timeout=timeout
         ) as response:
@@ -591,26 +530,17 @@ class OllamaClient:
 
     @staticmethod
     def _is_think_level_rejection(body: str, payload: dict) -> bool:
-        """Did this fail only because `think` was a string rather than a bool?"""
         if not isinstance(payload.get("think"), str):
             return False
         return "think" in body.lower()
 
     @staticmethod
     def _to_chunk(data: dict) -> Chunk:
-        # Everything below is coerced rather than trusted. Ollama itself is
-        # well behaved, but wynxo also talks to llama.cpp's server, LM Studio
-        # and assorted compat shims, and those disagree about shapes: some
-        # send `reasoning` as an object, some send counts as strings. A
-        # mistyped field used to travel inland and die as an AttributeError
-        # halfway through a turn, which reads to the user as wynxo crashing
-        # rather than as a peculiar server.
         message = data.get("message")
         if not isinstance(message, dict):
             message = {}
         return Chunk(
             content=as_text(message.get("content")),
-            # Ollama has used both keys across versions.
             thinking=as_text(message.get("thinking"))
                      or as_text(message.get("reasoning")),
             tool_calls=[c for c in as_list(message.get("tool_calls"))
@@ -624,7 +554,6 @@ class OllamaClient:
         )
 
     def _explain_transient(self, exc: Exception, emitted: bool) -> str:
-        """Why a connection failed, once retrying has stopped helping."""
         if emitted:
             return (
                 f"The connection to {self.base_url} dropped while the model "
@@ -645,11 +574,6 @@ class OllamaClient:
 
     def _explain_error(self, status: int, body: str, payload: dict) -> str:
         text = body.strip()
-        # A server is free to answer an error with a bare JSON string, a
-        # list, a number, or nothing that parses at all. Reaching straight
-        # for .get raised AttributeError out of the one function whose job
-        # is to explain a failure, replacing the server's own diagnosis
-        # with a traceback about explaining it.
         if reported := as_text((json_object(body) or {}).get("error")).strip():
             text = reported
         low = text.lower()
@@ -689,18 +613,11 @@ class OllamaClient:
 
 
 class OpenAIClient:
-    """An OpenAI-compatible ``/v1/chat/completions`` server.
-
-    Same surface as :class:`OllamaClient` -- ``ping``, ``list_models``,
-    ``show``, ``chat``, ``aclose`` -- so the agent does not care which it
-    is talking to. This is what lets wynxo work against any OpenAI style
-    endpoint: a real OpenAI account, a self-hosted gateway, or Ollama's
-    own OpenAI shim at ``localhost:11434/v1``.
-    """
+    """An OpenAI-compatible ``/v1/chat/completions`` server."""
 
     def __init__(self, config: Config):
         self.config = config
-        self.think_levels_supported = True   # attribute parity with Ollama
+        self.think_levels_supported = True
         ep = config.endpoint()
         self.base_url = ep.url
         headers = {"Content-Type": "application/json"}
@@ -725,21 +642,12 @@ class OpenAIClient:
         await self.aclose()
 
     async def running(self) -> list["Loaded"]:
-        """Nothing. The protocol has no notion of a resident model.
-
-        Present so callers do not have to ask which provider they are
-        holding: an empty list already means "could not tell", which is
-        exactly the truth here, and every caller treats it as "say
-        nothing".
-        """
         return []
 
     async def warm(self, model: str = "", num_ctx: int = 0) -> bool:
-        """Nothing to warm. Loading is the server's business, not ours."""
         return False
 
     async def ping(self) -> str:
-        """Return a label or raise something readable if unreachable."""
         try:
             r = await self._client.get(_OpenAI_MODELS_PATH, timeout=10.0)
             r.raise_for_status()
@@ -766,9 +674,6 @@ class OpenAIClient:
         return out
 
     async def show(self, model: str) -> ModelInfo:
-        """The OpenAI protocol exposes no capability metadata, so capabilities
-        are 'unknown' -- callers treat that as assume-it-works, which is the
-        right default for a server with no introspection endpoint."""
         return ModelInfo(name=model, capabilities=None)
 
     async def pull(self, model: str) -> AsyncIterator[str]:
@@ -790,13 +695,6 @@ class OpenAIClient:
         stream: bool = True,
         extra_options: dict[str, Any] | None = None,
     ) -> AsyncIterator[Chunk]:
-        """Stream one assistant turn over ``/chat/completions``.
-
-        Ollama-specific options (``think``, ``keep_alive``, ``num_ctx``
-        under ``options``) are accepted and ignored -- the OpenAI protocol
-        has no direct equivalents, and reasoning is often enabled on the
-        model's side already.
-        """
         payload: dict[str, Any] = {
             "model": model or self.config.model,
             "messages": _openai_messages(messages),
@@ -804,15 +702,13 @@ class OpenAIClient:
             "temperature": temperature,
         }
         if tools:
-            # The registry's tool schemas are already the OpenAI shape
-            # ({type, function:{name, description, parameters}}).
             payload["tools"] = tools
         if num_predict and num_predict > 0:
             payload["max_completion_tokens"] = num_predict
         if extra_options:
             for key, value in extra_options.items():
                 if key in ("keep_alive", "num_ctx"):
-                    continue      # Ollama-only
+                    continue
                 payload[key] = value
 
         async def body() -> AsyncIterator[Chunk]:
@@ -821,9 +717,6 @@ class OpenAIClient:
             completion_tokens = 0
             stop_reason = ""
             finished = False
-            """Whether the provider said it was done, rather than the socket
-            simply stopping. Either [DONE] or a finish_reason counts; shims
-            differ about which they send, and some send both."""
             produced = False
             async with self._client.stream(
                 "POST", _OpenAI_CHAT_PATH, json=payload,
@@ -857,8 +750,7 @@ class OpenAIClient:
                     if content := as_text(delta.get("content")):
                         produced = True
                         yield Chunk(content=content)
-                    if thinking := as_text(delta.get("reasoning")) \
-                          or as_text(delta.get("thinking")):
+                    if thinking := as_text(delta.get("reasoning")) or as_text(delta.get("thinking")):
                         yield Chunk(thinking=thinking)
                     for call in delta.get("tool_calls") or []:
                         index = call.get("index", 0)
@@ -872,13 +764,7 @@ class OpenAIClient:
                         if fn.get("arguments"):
                             produced = True
                             acc["arguments"].append(fn["arguments"])
-                            # Emitted as it arrives, as well as accumulated
-                            # for the finished call below.
                             yield Chunk(arguments_delta=fn["arguments"])
-                # Flush whatever accumulated before [DONE] / stream end.
-                # A plain turn never touches ``calls``, so emitting it
-            # unfiltered is safe either way -- only genuine delta tool_calls
-            # populate it, and they must survive the trailing [DONE].
             tool_calls: list[dict] = []
             for acc in calls.values():
                 if not acc["name"]:
@@ -895,16 +781,11 @@ class OpenAIClient:
                 tool_calls=tool_calls,
                 done=True,
                 stop_reason=stop_reason,
-                # Only when something was actually being generated. A stream
-                # that produced nothing at all is the empty-answer case, which
-                # already has its own handling and its own message.
                 truncated=produced and not finished,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
             )
 
-        # A single attempt: OpenAI is a network round trip without Ollama's
-        # model-loading drops, so the transient-retry loop is unnecessary.
         try:
             async for chunk in body():
                 yield chunk
@@ -920,11 +801,6 @@ class OpenAIClient:
 
     def _explain_error(self, status: int, body: str, payload: dict) -> str:
         text = body.strip()
-        # A server is free to answer an error with a bare JSON string, a
-        # list, a number, or nothing that parses at all. Reaching straight
-        # for .get raised AttributeError out of the one function whose job
-        # is to explain a failure, replacing the server's own diagnosis
-        # with a traceback about explaining it.
         if reported := as_text((json_object(body) or {}).get("error")).strip():
             text = reported
         if status == 404 or "model not found" in text.lower():
@@ -941,28 +817,8 @@ class OpenAIClient:
 
 
 def _openai_messages(messages: list[dict]) -> list[dict]:
-    """Translate wynxo's Ollama-shaped conversation into OpenAI wire format.
-
-    wynxo stores assistant tool calls and ``role: tool`` results; the OpenAI
-    protocol wants ``type: function`` on every call, ``function.arguments``
-    as a JSON string, and a matching ``tool_call_id`` on each tool result -
-    the call id is carried through so the pair lines up.
-
-    Ollama's wire shape carries no ids at all, so most conversations reach
-    here without them and both sides have to invent the same ones. The
-    announcing side numbered its calls by position within the message and
-    the answering side did not: every result with no stored id fell back to
-    a flat "call_0". A turn that called two tools therefore sent two answers
-    both claiming to answer the first, and left the second call unanswered
-    -- which a strict server rejects outright, and a lenient one acts on
-    with the results attributed to the wrong calls. Both sides count
-    positions now, which is the convention ``close_open_tool_calls`` was
-    already written against.
-    """
     out: list[dict] = []
     answered = 0
-    """How many results have followed the current assistant message. The
-    nth answers the nth call."""
     for message in messages:
         role = message.get("role", "user")
         if role == "assistant":
@@ -1005,16 +861,9 @@ def _openai_messages(messages: list[dict]) -> list[dict]:
 
 _OpenAI_CHAT_PATH = "/v1/chat/completions"
 _OpenAI_MODELS_PATH = "/v1/models"
-"""The OpenAI protocol paths. ``normalise_url`` strips a trailing /v1 as
-an Ollama artefact, so the client adds it back on to the bare host."""
 
 
 def make_client(config: Config) -> "OllamaClient | OpenAIClient":
-    """Pick the right client for the configured endpoint.
-
-    ``endpoint.kind`` decides: 'openai' for any OpenAI-compatible /v1 server,
-    'ollama' or the 'auto' default for native Ollama (the richer endpoint).
-    """
     if config.endpoint().kind == "openai":
         return OpenAIClient(config)
     return OllamaClient(config)
@@ -1022,14 +871,6 @@ def make_client(config: Config) -> "OllamaClient | OpenAIClient":
 
 async def inspect_all(client: "OllamaClient", models: list[ModelInfo],
                       timeout: float = 20.0) -> list[ModelInfo]:
-    """Fill in capabilities and context length for every model, concurrently.
-
-    A server with a dozen models would take a dozen round trips in sequence.
-    Failures are left as-is rather than raised: an unknown capability is a
-    blank column, not a reason to fail the whole picker.
-    """
-    import asyncio
-
     async def one(model: ModelInfo) -> ModelInfo:
         try:
             detail = await asyncio.wait_for(client.show(model.name), timeout=timeout)
@@ -1047,12 +888,6 @@ async def inspect_all(client: "OllamaClient", models: list[ModelInfo],
 
 
 async def check_context(client: OllamaClient, config: Config) -> str | None:
-    """Warn when the configured context is smaller than an agent needs.
-
-    Returns a warning string, or None when everything is fine. This exists
-    because the failure mode it catches is silent: the model simply forgets
-    the earlier half of the task and nobody is told why.
-    """
     if config.num_ctx < MIN_USABLE_CONTEXT:
         return (
             f"num_ctx is {config.num_ctx}, below the {MIN_USABLE_CONTEXT} an "
@@ -1070,8 +905,6 @@ async def check_context(client: OllamaClient, config: Config) -> str | None:
             "degrades past the native window."
         )
     if config.num_ctx > LARGE_CONTEXT:
-        # KV cache grows linearly with the window and is allocated up front,
-        # so this is where a model that used to fit stops fitting.
         return (
             f"num_ctx is {config.num_ctx}. The KV cache scales with it and is "
             "reserved up front, which on a 30B can be many gigabytes on top of "
