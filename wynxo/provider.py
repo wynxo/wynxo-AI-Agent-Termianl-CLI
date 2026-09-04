@@ -275,6 +275,14 @@ class Chunk:
     completion_tokens: int = 0
     total_duration_ns: int = 0
     load_duration_ns: int = 0
+    eval_duration_ns: int = 0
+    """Time spent generating, with the load and the prompt left out.
+
+    The one number that answers "how fast is this model". total_duration
+    covers reading the weights off disk and reading the prompt as well, and
+    on a machine where most of the model is on the CPU those dwarf the
+    generation -- so a speed computed from it is a speed nobody can use to
+    judge a change they just made."""
 
 
 def _payload(response, what: str, where: str) -> dict:
@@ -733,6 +741,7 @@ class OllamaClient:
             completion_tokens=as_int(data.get("eval_count")),
             total_duration_ns=as_int(data.get("total_duration")),
             load_duration_ns=as_int(data.get("load_duration")),
+            eval_duration_ns=as_int(data.get("eval_duration")),
         )
 
     def _explain_transient(self, exc: Exception, emitted: bool) -> str:

@@ -97,8 +97,28 @@ class TestActivityBar:
         bar = ActivityBar(UI(), "low")
         bar.tokens = 5
         assert bar.rate() == 0.0     # too early to divide by
-        bar.started -= 10
+        bar._first_token -= 10
         assert bar.rate() > 0
+
+    def test_rate_is_timed_from_the_first_token(self):
+        """Not from the start of the turn. The turn begins with the model
+        being read off disk and the prompt being read, and on a machine
+        where most of the model is on the CPU that is a minute before a
+        single token appears -- so the speed read as a fraction of the
+        truth in the one figure somebody uses to judge a change."""
+        import time
+
+        bar = ActivityBar(UI(), "low")
+        bar.started = time.monotonic() - 65.0    # a long wait first
+        bar.tokens = 1
+        bar._first_token = time.monotonic() - 5.0
+        bar.tokens = 200
+        assert 35 < bar.rate() < 45, bar.rate()
+
+    def test_no_rate_before_anything_arrived(self):
+        bar = ActivityBar(UI(), "low")
+        bar.started -= 60
+        assert bar.rate() == 0.0
 
     def test_start_stop_without_a_terminal_is_safe(self):
         bar = ActivityBar(UI(), "low")

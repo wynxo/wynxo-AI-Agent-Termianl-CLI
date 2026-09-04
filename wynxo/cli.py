@@ -5398,7 +5398,14 @@ class Repl:
                 ("tool calls", str(usage.tool_calls)),
                 ("prompt tokens", str(usage.prompt_tokens)),
                 ("output tokens", str(usage.completion_tokens)),
-                ("speed", f"{usage.tokens_per_second():.1f} tok/s"),
+                # Both, because on a slow machine the gap between them is
+                # the whole diagnosis: a model generating at forty tokens a
+                # second inside requests that take a minute each is a
+                # machine spending its time reading the prompt, not writing
+                # the answer, and one number alone cannot say that.
+                ("speed", f"{usage.tokens_per_second():.1f} tok/s generating",
+                 (f"{usage.wall_seconds:.0f}s of requests altogether"
+                  if usage.wall_seconds else "")),
                 ("context", f"~{used:,} of {limit:,} tokens "
                              f"({100 * used // limit}%)", f"set by {set_by}"),
                 ("compactions", str(self.agent.session.compactions)),

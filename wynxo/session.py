@@ -44,6 +44,9 @@ class Usage:
     requests: int = 0
     tool_calls: int = 0
     generation_seconds: float = 0.0
+    """Time the model spent generating, per the server's own measurement."""
+    wall_seconds: float = 0.0
+    """Time the requests took altogether: load, prompt and generation."""
 
     @property
     def total(self) -> int:
@@ -54,12 +57,20 @@ class Usage:
             return 0.0
         return self.completion_tokens / self.generation_seconds
 
-    def add_chunk(self, prompt: int, completion: int, duration_ns: int) -> None:
+    def add_chunk(self, prompt: int, completion: int, duration_ns: int,
+                  eval_ns: int = 0) -> None:
         # Ollama reports cumulative counts for the whole request in the final
         # chunk, so these are assignments per request, not running sums.
         self.prompt_tokens += prompt
         self.completion_tokens += completion
-        self.generation_seconds += duration_ns / 1e9
+        self.wall_seconds += duration_ns / 1e9
+        # Generation only where the server says so. total_duration includes
+        # reading the weights off disk and reading the prompt, and on a
+        # machine where most of the model is on the CPU those dwarf the
+        # generating -- so a speed computed from it reads as a fraction of
+        # the truth, which is worse than no speed at all when somebody is
+        # using it to judge a change they just made.
+        self.generation_seconds += (eval_ns or duration_ns) / 1e9
         self.requests += 1
 
 

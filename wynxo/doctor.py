@@ -448,6 +448,8 @@ class Doctor:
         chunks = 0
         text = []
         tokens = 0
+        generating = 0.0
+        loading = 0.0
         try:
             with self.ui.status("generating (this loads the model, so it may take a while)..."):
                 async for chunk in self.client.chat(
@@ -460,6 +462,8 @@ class Doctor:
                         text.append(chunk.content)
                     if chunk.done:
                         tokens = chunk.completion_tokens
+                        generating = chunk.eval_duration_ns / 1e9
+                        loading = chunk.load_duration_ns / 1e9
         except ProviderError as exc:
             self.checks.append(Check(
                 "generation", Status.FAIL, str(exc).splitlines()[0],
@@ -468,10 +472,20 @@ class Doctor:
             return
 
         elapsed = time.monotonic() - started
-        speed = tokens / elapsed if elapsed > 0 and tokens else 0
         facts = [f"{tokens} tokens in {elapsed:.1f}s"]
-        if speed:
-            facts.append(f"{speed:.1f} tok/s (includes model load)")
+        # Generating, not waiting. The server reports the three separately,
+        # and the one worth quoting is the generating -- a speed that
+        # includes reading the weights off disk and reading the prompt is a
+        # fraction of the truth on exactly the machines where somebody is
+        # trying to tell whether a change helped.
+        if generating > 0 and tokens:
+            facts.append(f"{tokens / generating:.1f} tok/s generating")
+            if loading > 0.5:
+                facts.append(f"{loading:.1f}s of that was loading the model")
+        elif elapsed > 0 and tokens:
+            facts.append(f"{tokens / elapsed:.1f} tok/s "
+                         f"(the server did not break the time down, so this "
+                         f"includes loading and reading the prompt)")
 
         body = "".join(text)
         # A short answer legitimately fits in one chunk; that is not evidence

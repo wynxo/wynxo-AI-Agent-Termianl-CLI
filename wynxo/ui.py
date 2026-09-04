@@ -2168,6 +2168,8 @@ class ActivityBar:
         time without fighting the bar for the same cells."""
         self.started = time.monotonic()
         self.step_started = self.started
+        self._first_token = 0.0
+        """When the first token of this turn arrived, for the speed."""
         self._seen = self.started
         """When an event last arrived. Only ever used to stop claiming
         activity, never to invent it."""
@@ -2196,9 +2198,40 @@ class ActivityBar:
     def elapsed(self) -> float:
         return time.monotonic() - self.started
 
+    @property
+    def tokens(self) -> int:
+        return self._tokens
+
+    @tokens.setter
+    def tokens(self, value: int) -> None:
+        # The clock for the speed starts at the first token, not at the
+        # start of the turn. A property rather than a line in one method
+        # because the count is set from three places, and a rate that
+        # depends on which of them ran first is not a rate.
+        if value and not self._first_token:
+            self._first_token = time.monotonic()
+        self._tokens = value
+
     def rate(self) -> float:
-        seconds = self.elapsed()
-        return self.tokens / seconds if seconds > 0.4 and self.tokens else 0.0
+        """Tokens a second, timed from the first one.
+
+        Timed from the start of the turn it was a different number
+        entirely: the turn begins with the model being read off disk and
+        the prompt being read, and on a machine where most of the model is
+        on the CPU that is a minute before a single token appears. Sixty
+        seconds of waiting and five of generating two hundred tokens
+        showed 3 tok/s where the model was doing 40 -- eight per cent of
+        the truth, in the one figure somebody uses to tell whether a change
+        they just made helped.
+
+        Still not perfect across a turn that runs tools: their time falls
+        inside this window too. It is the generating that is being measured
+        here, not the waiting before it.
+        """
+        if not self._first_token or not self.tokens:
+            return 0.0
+        seconds = time.monotonic() - self._first_token
+        return self.tokens / seconds if seconds > 0.4 else 0.0
 
     def _activity_text(self) -> Text:
         """The activity word. Held still, and read rather than watched.

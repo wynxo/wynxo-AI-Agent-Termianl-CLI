@@ -770,7 +770,8 @@ class Agent:
                 evidence.completion_tokens = (chunk.completion_tokens
                                               or evidence.completion_tokens)
                 self.session.usage.add_chunk(
-                    chunk.prompt_tokens, chunk.completion_tokens, chunk.total_duration_ns
+                    chunk.prompt_tokens, chunk.completion_tokens,
+                    chunk.total_duration_ns, chunk.eval_duration_ns
                 )
 
         # The stream ended on its own, so there is nothing half-said to
