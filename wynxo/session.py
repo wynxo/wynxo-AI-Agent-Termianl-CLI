@@ -145,9 +145,42 @@ class Session:
         if self.autosave:
             self.save()
 
-    def add_user(self, content: str) -> None:
-        self.messages.append({"role": "user", "content": content})
+    def add_user(self, content: str, images: list[str] | None = None) -> None:
+        """One user message, optionally carrying pictures.
+
+        ``images`` are base64 strings, which is what Ollama's chat API takes
+        directly; the OpenAI translation turns them into content parts. They
+        ride on a user message rather than on the tool result that produced
+        them because that is the shape every vision model is trained on, and
+        the one both protocols agree about.
+        """
+        message: dict[str, Any] = {"role": "user", "content": content}
+        if images:
+            message["images"] = list(images)
+        self.messages.append(message)
         self._recorded()
+
+    def drop_images(self, keep_last: int = 1) -> int:
+        """Forget all but the most recent pictures. Returns how many went.
+
+        A screenshot is worth about a thousand tokens for as long as it
+        stays in the conversation, and two screenshots of the same desktop
+        taken a minute apart cannot both be current -- the newer one is
+        what the screen looks like, and the older is a description of what
+        it looked like. Same rule as two reads of one file, and for the
+        same reason: on a small window it is the difference between
+        finishing and compacting halfway.
+        """
+        carrying = [m for m in self.messages if m.get("images")]
+        dropped = 0
+        for message in carrying[:max(0, len(carrying) - keep_last)]:
+            message.pop("images", None)
+            message["content"] = (
+                (message.get("content") or "")
+                + "\n(The screenshot that was here has been dropped; it is "
+                  "no longer current. Look again if you need to see.)")
+            dropped += 1
+        return dropped
 
     def add_assistant(self, content: str, tool_calls: list[dict] | None = None) -> None:
         message: dict[str, Any] = {"role": "assistant", "content": content}

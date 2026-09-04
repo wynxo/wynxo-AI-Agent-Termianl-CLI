@@ -3941,6 +3941,23 @@ class Repl:
             self.ui.detail_line(backend.missing(
                 self._DESKTOP_PHRASE.get(missing[0], missing[0])), MUTED)
 
+        # Whether the model can see, which is half of what wynxo can do
+        # here: a desktop it can drive and a model that can look at it are
+        # two separate things, and somebody debugging "why won't it click
+        # the button" needs to know which half is missing.
+        machine = getattr(self.agent, "machine", None)
+        self.ui.console.print()
+        if machine is not None and machine.sighted:
+            line = Text(f"  {self.ui.g.tick} ", style=GOOD)
+            line.append(f"{self.ui.shorten_model(self.config.model, 34)} can see "
+                        "— `look` puts the screen in front of it")
+        else:
+            line = Text(f"  {self.ui.g.cross} ", style=MUTED)
+            line.append(f"{self.ui.shorten_model(self.config.model, 34)} cannot "
+                        "see images — screenshots are saved for you, and it "
+                        "works from the window list", style=MUTED)
+        self.ui.console.print(line)
+
         import shutil as _shutil
         if not _shutil.which("tesseract"):
             self.ui.detail_line(

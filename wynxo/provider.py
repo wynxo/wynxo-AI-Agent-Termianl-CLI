@@ -1129,7 +1129,20 @@ def _openai_messages(messages: list[dict]) -> list[dict]:
             answered += 1
         else:
             answered = 0
-            out.append({"role": role, "content": message.get("content") or ""})
+            item = {"role": role, "content": message.get("content") or ""}
+            if images := message.get("images"):
+                # OpenAI carries pictures as content parts rather than as a
+                # field beside the text, so a message with one stops being
+                # a string and becomes a list. Ollama's own shape is the
+                # field, which is why wynxo stores it that way and converts
+                # here rather than the other way round.
+                item["content"] = [
+                    {"type": "text", "text": message.get("content") or ""},
+                    *({"type": "image_url",
+                       "image_url": {"url": f"data:image/png;base64,{one}"}}
+                      for one in images),
+                ]
+            out.append(item)
     return out
 
 

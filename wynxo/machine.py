@@ -45,6 +45,10 @@ class Machine:
     """Why nothing can be driven, and what to install."""
     tools: dict = field(default_factory=dict)
     """Command-line things worth knowing about, present or not."""
+    sighted: bool = False
+    """Whether the model in use accepts pictures. Not a fact about the
+    computer, but it belongs beside them: what wynxo can do here is the
+    intersection of what the desktop allows and what the model can take."""
 
     @property
     def has_desktop(self) -> bool:
@@ -77,10 +81,21 @@ class Machine:
         lines = [f"This machine: {self.os}."]
         if self.has_desktop:
             env = f" ({self.desktop_env})" if self.desktop_env else ""
+            doable = sorted(_ALL & set(self.can))
             lines.append(
                 f"It has a {self.session} desktop{env}, and you can drive it: "
-                + ", ".join(sorted(self.can)) + ". Use control_computer for "
-                "those and `look` to see what is open.")
+                + ", ".join(doable) + ". Use control_computer for those and "
+                "`look` to see what is open.")
+            if self.sighted and "screenshot" in self.can:
+                lines.append(
+                    "You can see: call `look` and the screen is put in front "
+                    "of you. Do that before clicking anywhere -- a "
+                    "coordinate you have not looked at is a guess.")
+            elif "screenshot" in self.can:
+                lines.append(
+                    "You cannot see images, so `look` saves a screenshot for "
+                    "the user rather than for you. Work from the window list "
+                    "and keyboard shortcuts; do not guess at coordinates.")
             missing = sorted(_ALL - set(self.can))
             if missing:
                 lines.append(
@@ -99,6 +114,11 @@ class Machine:
 
 _ALL = {"type", "press", "move", "click", "scroll", "windows", "focus",
         "screenshot"}
+"""The things worth telling the model about.
+
+Deliberately not everything a backend reports. "pointer", "focused" and
+"screen" are questions it can answer, not things it can do, and listing
+them under "you can drive it" reads as capability the model then offers."""
 
 _PHRASE = {
     "type": "type text", "press": "press keys", "move": "move the pointer",
@@ -112,9 +132,10 @@ them. Not a survey of the machine -- every name here costs prompt on every
 turn, so it is the short list of things wynxo's own tools reach for."""
 
 
-def probe(backend=None) -> Machine:
+def probe(backend=None, model_info=None) -> Machine:
     """Work out what this machine is. Cheap, and done once."""
     from .desktop import detect
+    from .vision import can_see
 
     backend = backend if backend is not None else detect()
     session = backend.name if backend.name != "unavailable" else "headless"
@@ -126,6 +147,7 @@ def probe(backend=None) -> Machine:
         can=frozenset(backend.actions()),
         blocked=getattr(backend, "reason", ""),
         tools={name: bool(shutil.which(name)) for name in _WATCHED},
+        sighted=can_see(model_info),
     )
 
 
