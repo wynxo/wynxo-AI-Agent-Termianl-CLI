@@ -4,13 +4,13 @@ from __future__ import annotations
 
 
 def main():
-    """Start the CLI.
+    """Start the CLI with the optional visual dashboard installed first."""
+    # Install the visual shell before cli imports UI. The dashboard only
+    # replaces UI.banner; all existing streaming, tools, prompt handling,
+    # scrolling, and tests keep using the original UI implementation.
+    from .dashboard import install
+    install()
 
-    wynxo always runs the scrolling prompt: output goes to the terminal's
-    own scrollback and the mouse is never captured, so scrolling, selecting
-    and copying behave exactly like any other command-line program. The
-    layout decision lives entirely in cli; bootstrap only delegates.
-    """
     from .cli import main as cli_main
     return cli_main()
 
