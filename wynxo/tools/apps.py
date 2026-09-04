@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -98,7 +99,7 @@ class LaunchApplication(Tool):
                       command: str = "") -> ToolResult:
         try:
             if command:
-                argv = terminal_argv(entry, command)
+                argv = terminal_argv(entry, command, self.workspace)
                 if argv is None:
                     return ToolResult.failure(
                         f"'{entry.name}' is not a supported terminal emulator, "
@@ -140,11 +141,10 @@ class LaunchApplication(Tool):
 # Terminal execution
 # ---------------------------------------------------------------------------
 
-# Konsole can reuse an already-running instance. --separate guarantees a new
-# process, while --hold keeps the session visible after the requested command
-# exits. -e must be the final Konsole option; bash -lc then receives the exact
-# command as one shell invocation.
 TERMINALS: dict[str, tuple[str, ...]] = {
+    # --separate prevents Konsole from handing the request to an existing
+    # process. --hold keeps the session visible after the command exits.
+    # -e is deliberately last because Konsole consumes every following arg.
     "konsole": ("--separate", "--hold", "-e"),
     "gnome-terminal": ("--",),
     "kgx": ("--",),
@@ -167,8 +167,9 @@ TERMINALS: dict[str, tuple[str, ...]] = {
 }
 
 
-def terminal_argv(entry: AppEntry, command: str) -> list[str] | None:
-    """Build a terminal argv that executes the command and keeps the session visible."""
+def terminal_argv(entry: AppEntry, command: str,
+                  workspace: str = "") -> list[str] | None:
+    """Build a terminal argv that executes command in WYNXO's workspace."""
     for candidate in (entry.path.stem, entry.name):
         key = str(candidate).strip().lower()
         if key not in TERMINALS:
@@ -180,9 +181,18 @@ def terminal_argv(entry: AppEntry, command: str) -> list[str] | None:
         if not binary:
             return None
 
+        shell_command = command
+        if workspace:
+            try:
+                workdir = str(Path(workspace).expanduser().resolve())
+                if Path(workdir).is_dir():
+                    shell_command = f"cd -- {shlex.quote(workdir)} && {command}"
+            except (OSError, ValueError):
+                pass
+
         # The shell receives the command as one argument after -lc. This keeps
         # pipes, quotes, &&, redirects and other normal shell syntax intact.
-        return [binary, *TERMINALS[key], "bash", "-lc", command]
+        return [binary, *TERMINALS[key], "bash", "-lc", shell_command]
 
     return None
 
