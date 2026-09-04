@@ -2056,11 +2056,18 @@ class Repl:
         if not found:
             self.ui.warn("nothing answering on this machine or the network.")
             return None
-        self.ui.console.print(f"  [{ACCENT}]Found Ollama on:[/]")
+        self.ui.console.print(Text("  Found Ollama on:", style=ACCENT))
         for i, hit in enumerate(found, 1):
-            self.ui.console.print(
-                f"    [bold]{i}[/]  {hit.url}  "
-                f"[{MUTED}]v{hit.version} {self.ui.g.dot} {hit.where}[/]")
+            # Built as Text rather than markup: the url, the version and
+            # the location all come off the wire from whatever answered on
+            # the network, and a str with a bracket in it is markup to
+            # rich -- a version string holding `[/x]` would end discovery
+            # with a MarkupError instead of listing the server.
+            row = Text(f"    {i}  ", style="bold")
+            row.append(hit.url)
+            row.append(f"  v{hit.version} {self.ui.g.dot} {hit.where}",
+                       style=MUTED)
+            self.ui.console.print(row)
         self.ui.console.print()
         answers = {str(i): hit.url for i, hit in enumerate(found, 1)}
         answers["m"] = "type a different address"
@@ -4249,14 +4256,24 @@ class Repl:
             if action == "ls":
                 prefix = args[1] if len(args) > 1 else ""
                 lines = self._gh_ls(ws, prefix)
-                self.ui.console.print("\n".join(lines) if lines else "nothing here.")
+                # Text, not a bare string: rich parses square brackets in a
+                # str as markup, and these are somebody else's file names.
+                self.ui.console.print(
+                    Text("\n".join(lines) if lines else "nothing here."))
                 return True
             if action == "cat":
                 if len(args) < 2:
                     self.ui.error("usage: /gh cat <path>")
                     return True
                 lines = self.gh.read(owner, repo, args[1], branch).text.splitlines()
-                self.ui.console.print("\n".join(lines[:500]))
+                # Text, not a bare string. rich parses square brackets in a
+                # str as markup, and this is a source file: `x: list[int]`
+                # was drawn as `x: list`, a markdown `[ref]` vanished, and
+                # anything holding `[/...]` -- a prompt template, a closing
+                # tag in a doc -- raised MarkupError and took the command
+                # out. A viewer that silently edits what it shows you is
+                # worse than no viewer.
+                self.ui.console.print(Text("\n".join(lines[:500])))
                 if len(lines) > 500:
                     self.ui.info(f"... ({len(lines) - 500} more lines)")
                 return True

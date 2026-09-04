@@ -755,7 +755,13 @@ class UI:
         return self.g.ellipsis + tail[-(budget - cell_len(self.g.ellipsis)):]
 
     def rule(self, label: str = "") -> None:
-        self.console.print(Rule(label, style=MUTED, characters=self.g.hbar))
+        # Text, not a bare string: every other helper here can be handed
+        # somebody else's words, and a str with a bracket in it is markup
+        # to rich. Nothing calls this with untrusted text today; it is on
+        # the same list as the ones that do, and being the exception is
+        # how it stops being true.
+        self.console.print(Rule(Text(label), style=MUTED,
+                                characters=self.g.hbar))
 
     # -- messages ----------------------------------------------------------
 
