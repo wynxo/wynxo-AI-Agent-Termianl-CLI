@@ -71,6 +71,22 @@ MAX_FILE_BYTES = 1_000_000
 DEFAULT_TIMEOUT = 30.0
 
 
+@dataclass
+class Change:
+    """One file's part in a commit.
+
+    ``content`` of None means delete the path. Everything else is a create
+    or an update -- the API does not distinguish, and neither does git.
+    """
+
+    path: str
+    content: str | None = None
+
+    @property
+    def deletes(self) -> bool:
+        return self.content is None
+
+
 class GitHubError(Exception):
     """A gh call failed; the message says what to do about it.
 
@@ -438,6 +454,140 @@ class GitHubClient:
                 "commit, so the write cannot be confirmed. Read the file "
                 "again before assuming anything changed.", MALFORMED)
         return commit
+
+    def commit(self, owner: str, repo: str, branch: str,
+               changes: list["Change"], message: str, parent: str) -> str:
+        """One commit carrying several files. Returns the new commit sha.
+
+        The contents API that ``write`` uses can only touch one file per
+        commit, so a change spanning four files landed as four commits --
+        three of which are states nobody wrote, where half the change
+        exists. Anyone reading the history, bisecting it, or reviewing the
+        pull request sees them. This builds the commit the way git does
+        instead: a blob per file, one tree on top of the parent's, one
+        commit, one ref update. Every file lands together or none does.
+
+        ``parent`` is the branch head this change was written against, and
+        it is the whole safety story. The ref is updated without force, so
+        GitHub accepts it only as a fast-forward -- and a commit whose
+        parent is a head that has since moved is not one. Somebody else's
+        push in the meantime is refused rather than erased. It is the same
+        protection ``write``'s base_sha gives one file, at the scope this
+        works at, and the same rule applies: hand in the head the change was
+        based on, not one fetched a moment ago, or the check passes by
+        construction and protects nothing.
+        """
+        if not changes:
+            raise GitHubError("nothing to commit: no files were given.",
+                              MALFORMED)
+        if not message.strip():
+            raise GitHubError("a commit needs a message.", MALFORMED)
+
+        # Modes come from the tree that is already there, so a file keeps
+        # its permissions: rebuilding an entry as a plain 100644 silently
+        # drops the executable bit, and a script that no longer runs is a
+        # long way from an obvious symptom.
+        modes = self._modes(owner, repo, parent)
+        entries: list[dict] = []
+        for change in changes:
+            mode = modes.get(change.path, "100644")
+            if mode in ("120000", "160000"):
+                what = "symlink" if mode == "120000" else "submodule"
+                raise GitHubError(
+                    f"{change.path} is a {what}, not a file. Writing text "
+                    f"over it would replace the {what} with a file of that "
+                    "name.", MALFORMED)
+            if change.deletes:
+                # A null sha in a tree entry is how git says "remove this".
+                entries.append({"path": change.path, "mode": mode,
+                                "type": "blob", "sha": None})
+                continue
+            entries.append({"path": change.path, "mode": mode, "type": "blob",
+                            "sha": self._blob(owner, repo, change.content or "")})
+
+        base_tree = self._api(
+            f"repos/{owner}/{repo}/git/commits/{quote(parent, safe='')}",
+            jq=".tree.sha").strip()
+        if not base_tree:
+            raise GitHubError(
+                f"{parent[:12]} is not a commit on {owner}/{repo}, so there "
+                "is nothing to build this commit on top of.", NOT_FOUND)
+
+        tree = self._api(f"repos/{owner}/{repo}/git/trees", method="POST",
+                         fields={"base_tree": base_tree, "tree": entries},
+                         jq=".sha").strip()
+        if not tree:
+            raise GitHubError(
+                "GitHub did not return a tree for this commit, so nothing "
+                "was written.", MALFORMED)
+
+        sha = self._api(f"repos/{owner}/{repo}/git/commits", method="POST",
+                        fields={"message": message, "tree": tree,
+                                "parents": [parent]},
+                        jq=".sha").strip()
+        if not sha:
+            raise GitHubError(
+                "GitHub did not return a commit, so nothing was written. "
+                "The branch is untouched.", MALFORMED)
+
+        # Only now does the branch move. Up to here nothing is reachable
+        # from any ref, so a failure above leaves the repository exactly as
+        # it was rather than half-changed.
+        try:
+            self._api(
+                f"repos/{owner}/{repo}/git/refs/heads/{quote(branch, safe='')}",
+                method="PATCH", fields={"sha": sha, "force": False},
+                jq=".object.sha")
+        except GitHubError as exc:
+            # GitHub says "Update is not a fast forward" with a 422, which
+            # _classify can only read as a malformed request. Here it means
+            # something specific and worth saying: somebody pushed. The text
+            # is checked rather than the status, so a genuinely bad request
+            # still reports as itself instead of as a phantom race.
+            moved = ("fast forward" in str(exc).lower()
+                     or "fast-forward" in str(exc).lower()
+                     or exc.kind == CONFLICT)
+            if moved:
+                raise GitHubError(
+                    f"{branch} moved on GitHub since this change was started "
+                    f"-- it is no longer at {parent[:12]}. Nothing was "
+                    "committed. Read the files again and rebuild the change "
+                    "on the new head, or committing this one would erase "
+                    "whatever landed in between.", CONFLICT) from None
+            raise
+        self.forget(owner, repo)
+        return sha
+
+    def _blob(self, owner: str, repo: str, content: str) -> str:
+        """Upload one file's content and return its blob sha.
+
+        base64 rather than the utf-8 encoding the API also accepts: a file
+        holding a lone surrogate, a BOM or CRLF survives a round trip
+        through base64 unchanged, and JSON has nowhere to put the first of
+        those at all.
+        """
+        sha = self._api(f"repos/{owner}/{repo}/git/blobs", method="POST",
+                        fields={"content": _b64(content), "encoding": "base64"},
+                        jq=".sha").strip()
+        if not sha:
+            raise GitHubError(
+                "GitHub accepted a file's content but returned no blob, so "
+                "the commit cannot be built. Nothing was written.", MALFORMED)
+        return sha
+
+    def _modes(self, owner: str, repo: str, commit: str) -> dict[str, str]:
+        """path -> git mode, for the tree at a commit.
+
+        Best-effort: a repository too large for one tree response answers
+        truncated, and a path missing from a partial listing is treated as a
+        new file at the default mode -- which is what it would get anyway.
+        """
+        try:
+            tree = self.tree(owner, repo, commit)
+        except GitHubError:
+            return {}
+        return {str(e.get("path")): str(e.get("mode") or "100644")
+                for e in tree.entries if e.get("type") == "blob"}
 
     def ref_sha(self, owner: str, repo: str, branch: str) -> str:
         out = self._api(f"repos/{owner}/{repo}/git/ref/heads/{quote(branch, safe='')}",

@@ -17,7 +17,7 @@ whole repository in context to happen.
 
 from __future__ import annotations
 
-from ..gh import GitHubClient, GitHubError
+from ..gh import Change, GitHubClient, GitHubError
 from ..schema import Field, Schema
 from .base import Tool, ToolResult
 
@@ -29,6 +29,47 @@ reading a phone book, and the paths it needs are better found by search."""
 def _split_repo(value: str) -> tuple[str, str]:
     owner, _, repo = (value or "").strip().strip("/").partition("/")
     return owner, repo
+
+
+def _refuse_write(path: str) -> str:
+    """Why this remote path may not be committed to, or "" if it may.
+
+    The reader's refusal says the file was not read, which on this side
+    would be describing something that did not happen -- and the advice
+    that follows it (look at .env.example instead) is advice for somebody
+    trying to read a value, not for somebody about to publish one.
+    """
+    if not _refuse_secret(path):
+        return ""
+    return (
+        f"{path} holds credentials, so wynxo did not commit it. Pushing a "
+        "secret to GitHub publishes it: treat anything already in that file "
+        "as compromised rather than deleting the commit, since the history "
+        "keeps it. Commit an .env.example with the variable names instead.\n\n"
+        "If this file is not actually secret, the user can allow it with "
+        "/secrets allow <path>."
+    )
+
+
+def _refuse_secret(path: str) -> str:
+    """Why this remote path may not be touched, or "" if it may.
+
+    Asked of the path alone. There is no local file to consult, and the
+    name is what the local shield keys on anyway -- .env is .env wherever
+    it lives.
+
+    Shared by both tools rather than living on the reader. Reading a
+    committed secret is the smaller half of the problem: committing one is
+    how it gets into a repository in the first place, and this is a tool
+    whose whole purpose is committing to repositories from somewhere with
+    no checkout to notice.
+    """
+    from pathlib import PurePosixPath
+
+    from ..secrets import is_secret_file, refusal
+
+    clean = (path or "").strip().lstrip("/")
+    return refusal(clean) if is_secret_file(PurePosixPath(clean)) else ""
 
 
 class GitHubReadInput(Schema):
@@ -106,20 +147,6 @@ class GitHubRead(Tool):
             return ToolResult.failure(str(exc), kind=exc.kind,
                                       repo=args.repo, operation=args.operation)
 
-    def _refuse_secret(self, path: str) -> str:
-        """Why this remote path may not be read, or "" if it may.
-
-        Asked of the path alone. There is no local file to consult, and the
-        name is what the local shield keys on anyway -- .env is .env
-        wherever it lives.
-        """
-        from pathlib import PurePosixPath
-
-        from ..secrets import is_secret_file, refusal
-
-        clean = (path or "").strip().lstrip("/")
-        return refusal(clean) if is_secret_file(PurePosixPath(clean)) else ""
-
     # -- the operations ----------------------------------------------------
 
     def _search(self, owner, repo, branch, args) -> ToolResult:
@@ -175,13 +202,25 @@ class GitHubRead(Tool):
             notes.append(
                 f"Showing {MAX_TREE_LINES} of {len(listing)} paths. Use "
                 "'search', or 'tree' with a path, to narrow this.")
+        # The branch head, because it is what a multi-file commit is based
+        # on and this is where the model learns the shape of the repository
+        # anyway. Without it the first 'commit' always costs a rejection to
+        # find out. Best-effort: a listing is still useful without it.
+        try:
+            head = self._client.ref_sha(owner, repo, branch)
+        except GitHubError:
+            head = ""
         body = [f"{header} ({len(files)} files)"]
+        if head:
+            body.append(f"head of {branch}: {head}  "
+                        "(pass as `parent` to commit several files at once)")
         if notes:
             body += ["", *notes, ""]
         body += shown
         return ToolResult.success(
             "\n".join(body), truncated=tree.truncated, complete=not tree.truncated,
-            files=len(files), shown=len(shown), malformed=tree.malformed)
+            files=len(files), shown=len(shown), malformed=tree.malformed,
+            head=head)
 
     def _stat(self, owner, repo, branch, args) -> ToolResult:
         if not args.path:
@@ -206,7 +245,7 @@ class GitHubRead(Tool):
         # .env whether it is on this disk or on GitHub, and refusing one
         # while handing over the other put the credential in the model's
         # context and in the transcript by the longer route.
-        if refused := self._refuse_secret(args.path):
+        if refused := _refuse_secret(args.path):
             return ToolResult.failure(refused, kind="secret")
         blob = self._client.read(owner, repo, args.path, branch,
                                  start=max(0, args.start_line),
@@ -228,12 +267,45 @@ class GitHubRead(Tool):
             lines=blob.total_lines, ranged=blob.ranged, masked=masked)
 
 
+class FileChange(Schema):
+    path = Field(str, "File path, relative to the repository root.")
+    content = Field(
+        str,
+        "The complete new content for this file. Leave empty and set "
+        "delete=true to remove it instead.",
+        default="")
+    delete = Field(
+        bool, "Remove this path in the commit instead of writing it.",
+        default=False)
+
+
 class GitHubWriteInput(Schema):
     operation = Field(
         str,
-        "What to do: 'write' creates or updates one file; 'branch' creates a "
-        "branch; 'pr' opens a pull request from a branch to a base.",
-        choices=("write", "branch", "pr"), default="write")
+        "What to do. 'commit' writes several files as one commit -- prefer "
+        "it for any change touching more than one file. 'edit' replaces "
+        "exact text inside one file without resending the whole thing. "
+        "'write' creates or updates one file from complete content. "
+        "'branch' creates a branch; 'pr' opens a pull request.",
+        choices=("commit", "edit", "write", "branch", "pr"), default="write")
+    files = Field(
+        list,
+        "The files this commit touches, for 'commit'. Every one of them "
+        "lands together or none does.",
+        item_type=FileChange, default_factory=list)
+    parent = Field(
+        str,
+        "The commit sha the branch was at when these changes were written "
+        "against it, for 'commit'. github_read reports it as the branch "
+        "head. GitHub refuses the commit if the branch has moved since, "
+        "which is what stops this change from erasing somebody else's.",
+        default="")
+    old_text = Field(
+        str,
+        "For 'edit': the exact text to replace, including indentation. It "
+        "must appear exactly once in the file.",
+        default="")
+    new_text = Field(str, "For 'edit': what to put in its place.", default="")
     repo = Field(
         str,
         "The repository as owner/name, e.g. 'wynxo/wynxo-AI-Agent-Termianl-CLI'.")
@@ -270,13 +342,26 @@ class GitHubWrite(Tool):
     name = "github_write"
     description = (
         "Change a GitHub repository in the cloud, committing through the API "
-        "with the account that ran `gh auth login`. Nothing is cloned. "
-        "Workflow: github_read the file first (it reports a blob sha), edit "
-        "the content, then 'write' passing that same base_sha -- GitHub "
-        "refuses the commit if the file moved underneath you, which is what "
-        "stops one change from erasing another. 'branch' creates a branch "
-        "and 'pr' opens a pull request. Writes prompt for approval like any "
-        "other file change."
+        "with the account that ran `gh auth login`. Nothing is cloned, so "
+        "this works from any machine -- including a phone -- with no "
+        "checkout, no working tree and no push.\n\n"
+        "Pick the operation by the shape of the change:\n"
+        "- 'edit' changes part of one file. Give path, old_text and "
+        "new_text; the file is fetched, the replacement is made here and the "
+        "result is committed. Prefer it over 'write' whenever the file "
+        "already exists: it does not need the whole file resent, so it "
+        "cannot drop the parts you did not mean to touch.\n"
+        "- 'commit' changes several files at once. Give files=[{path, "
+        "content}] and the parent sha, and they land as one commit. Use it "
+        "for any change spanning more than one file: four separate writes "
+        "are four commits, three of which are half-finished states that "
+        "nobody wrote and everybody reviewing the branch has to read.\n"
+        "- 'write' replaces one whole file from complete content. Read it "
+        "first and pass the base_sha github_read reported.\n"
+        "- 'branch' creates a branch, 'pr' opens a pull request.\n\n"
+        "Every one of them refuses rather than overwriting if the file or "
+        "the branch moved on GitHub since it was read. Writes prompt for "
+        "approval like any other file change."
     )
     Input = GitHubWriteInput
     mutating = True
@@ -304,6 +389,10 @@ class GitHubWrite(Tool):
                 return self._branch(owner, repo, default, args)
             if args.operation == "pr":
                 return self._pr(owner, repo, default, args)
+            if args.operation == "commit":
+                return self._commit(owner, repo, default, args)
+            if args.operation == "edit":
+                return self._edit(owner, repo, default, args)
             return self._write(owner, repo, args)
         except GitHubError as exc:
             return ToolResult.failure(str(exc), kind=exc.kind,
@@ -338,6 +427,151 @@ class GitHubWrite(Tool):
         return ToolResult.success(f"opened {url}", display=f"PR: {url}",
                                   url=url.strip(), head=args.branch, base=base)
 
+    def _commit(self, owner, repo, default, args) -> ToolResult:
+        """Several files, one commit."""
+        branch = args.branch or default
+        if not args.files:
+            return ToolResult.failure(
+                "operation 'commit' needs files=[{path, content}]. To change "
+                "one file, 'edit' is cheaper and safer.")
+
+        seen: set[str] = set()
+        changes: list[Change] = []
+        for i, entry in enumerate(args.files, 1):
+            path = (entry.path or "").strip()
+            if not path:
+                return ToolResult.failure(f"file {i} has no path.")
+            if path in seen:
+                # Two entries for one path is a tree with two answers for
+                # the same question. GitHub takes the last one silently,
+                # which is not a thing to guess at on the model's behalf.
+                return ToolResult.failure(
+                    f"{path} appears twice in this commit. Give one entry "
+                    "per path with the final content.")
+            seen.add(path)
+            if entry.delete:
+                changes.append(Change(path=path, content=None))
+                continue
+            if not entry.content.strip():
+                return ToolResult.failure(
+                    f"{path} has no content. To remove it, set delete=true; "
+                    "writing an empty file is refused because it is almost "
+                    "always a content field that went missing.")
+            if refusal := _refuse_write(path):
+                return ToolResult.failure(refusal, kind="secret", path=path)
+            changes.append(Change(path=path, content=entry.content))
+
+        if not args.parent:
+            head = self._client.ref_sha(owner, repo, branch)
+            return ToolResult.failure(
+                f"operation 'commit' needs parent: the commit {branch} was "
+                "at when these changes were written against it. It is "
+                f"{head} right now -- but if that is not the head the files "
+                "were read at, read them again rather than passing it "
+                "blind, or this commit is based on content it never saw.",
+                kind="needs_parent", sha=head)
+
+        sha = self._client.commit(owner, repo, branch, changes,
+                                  args.message or self._message(changes),
+                                  args.parent)
+        written = [c.path for c in changes if not c.deletes]
+        removed = [c.path for c in changes if c.deletes]
+        parts = []
+        if written:
+            parts.append(f"{len(written)} written")
+        if removed:
+            parts.append(f"{len(removed)} deleted")
+        return ToolResult.success(
+            f"committed {len(changes)} file(s) to {args.repo} on {branch} "
+            f"as one commit ({sha[:10]}): {', '.join(sorted(seen))}.",
+            display=f"{args.repo}@{branch}  {' + '.join(parts)}  {sha[:8]}",
+            commit=sha, branch=branch, files=sorted(seen),
+            written=written, deleted=removed)
+
+    @staticmethod
+    def _message(changes: list[Change]) -> str:
+        """A commit message when none was given.
+
+        One that says what changed rather than that something did. A commit
+        called "wynxo: update" is a commit nobody can find again.
+        """
+        names = sorted(c.path for c in changes)
+        if len(names) == 1:
+            return f"wynxo: update {names[0]}"
+        return (f"wynxo: update {len(names)} files\n\n"
+                + "\n".join(f"- {n}" for n in names))
+
+    def _edit(self, owner, repo, default, args) -> ToolResult:
+        """Replace exact text inside one cloud file, and commit the result.
+
+        Where 'write' insists on a base_sha the caller read earlier, this
+        fetches the file itself -- and that is not the same hole, because
+        the anchor here is the *content*. old_text has to appear exactly
+        once in whatever is on the branch right now; if somebody's commit
+        landed in between and moved or removed that text, the match fails
+        and nothing is written. A stale sha waved through says nothing
+        about the file, but a match on old_text is a statement about the
+        version being edited.
+        """
+        branch = args.branch or default
+        if not args.path:
+            return ToolResult.failure("operation 'edit' needs a path.")
+        if not args.old_text:
+            return ToolResult.failure(
+                "operation 'edit' needs old_text: the exact text to replace. "
+                "To create a file or replace all of one, use 'write'.")
+        if args.old_text == args.new_text:
+            return ToolResult.failure(
+                "old_text and new_text are identical; nothing to do.")
+        if refusal := _refuse_write(args.path):
+            return ToolResult.failure(refusal, kind="secret", path=args.path)
+
+        try:
+            current = self._client.read(owner, repo, args.path, branch)
+        except GitHubError as exc:
+            if exc.kind == "not_found":
+                return ToolResult.failure(
+                    f"{args.path} does not exist on {branch}. Use 'write' to "
+                    "create it.", kind="not_found")
+            raise
+        if current.ranged:
+            # A partial read cannot anchor an edit: old_text might match in
+            # the window and again outside it.
+            return ToolResult.failure(
+                f"{args.path} was returned as a range rather than whole, so "
+                "an exact-match edit cannot be trusted against it.")
+
+        # The same near-miss hint the local editor gives, from the same
+        # place: two implementations of "why didn't that match" drift, and
+        # the one the model sees least is the one that goes stale.
+        from .files import EditFile
+
+        before = current.text
+        count = before.count(args.old_text)
+        if count == 0:
+            return ToolResult.failure(
+                f"old_text not found in {args.path} on {branch}. "
+                f"{EditFile._near_miss(before, args.old_text)}",
+                kind="no_match", path=args.path)
+        if count > 1:
+            return ToolResult.failure(
+                f"old_text appears {count} times in {args.path}. Include "
+                "enough surrounding text to pick out the one you mean; "
+                "replacing the wrong one is not something this can guess.",
+                kind="ambiguous", path=args.path, occurrences=count)
+
+        after = before.replace(args.old_text, args.new_text, 1)
+        message = args.message or f"wynxo: edit {args.path}"
+        commit = self._client.write(owner, repo, args.path, after, message,
+                                    branch, sha=current.sha)
+        added, removed = _line_delta(before, after)
+        return ToolResult.success(
+            f"committed {message!r} to {args.repo}:{args.path} on {branch} "
+            f"({commit[:10]}) +{added} -{removed}",
+            display=f"{args.repo}:{args.path} +{added} -{removed}",
+            commit=commit, path=args.path, branch=branch,
+            added=added, removed=removed)
+
     def _write(self, owner, repo, args) -> ToolResult:
         if not args.path or not args.branch:
             return ToolResult.failure(
@@ -345,6 +579,11 @@ class GitHubWrite(Tool):
                 "commit message and a branch.")
         if not args.content.strip():
             return ToolResult.failure("refusing to write an empty file.")
+        # The reader has refused to open a committed .env since it existed;
+        # this side had no such check at all, so the one tool that could put
+        # a secret *into* a repository was the one that did not look.
+        if refusal := _refuse_write(args.path):
+            return ToolResult.failure(refusal, kind="secret", path=args.path)
 
         # What is on the branch right now, and whether this change was
         # written against it.

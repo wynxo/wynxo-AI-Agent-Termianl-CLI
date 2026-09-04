@@ -325,6 +325,52 @@ class TestGhCommand:
         _gh(repl, ["cat", "README.md"])
         assert "hello" in ui.printed[0]
 
+    def test_log_shows_one_line_per_commit(self):
+        """Subjects only. A phone screen is not the place for twelve commit
+        bodies, and the subject is what tells you where you are."""
+        client = StubClient()
+        client.commits = lambda o, r, b, limit=15: [
+            "feat: retry upload\n\nA long body nobody asked for.",
+            "fix: timeout"]
+        repl, ui = _repl(client)
+        _gh(repl, ["open", "o/r"])
+        _gh(repl, ["log"])
+        printed = " ".join(ui.printed)
+        assert "feat: retry upload" in printed
+        assert "fix: timeout" in printed
+        assert "long body" not in printed
+
+    def test_rm_asks_before_deleting(self):
+        deleted = []
+        client = StubClient()
+        client.ref_sha = lambda o, r, b: "head777"
+        client.commit = lambda o, r, br, changes, m, parent: (
+            deleted.append([(c.path, c.deletes) for c in changes]) or "c1")
+        repl, ui = _repl(client)
+        _gh(repl, ["open", "o/r"])
+        _gh(repl, ["rm", "old.txt"], reply="n")
+        assert deleted == [], "it deleted without an answer"
+        assert any("nothing deleted" in m for _, m in ui.msgs)
+
+    def test_rm_deletes_when_confirmed(self):
+        deleted = []
+        client = StubClient()
+        client.ref_sha = lambda o, r, b: "head777"
+        client.commit = lambda o, r, br, changes, m, parent: (
+            deleted.append(([(c.path, c.deletes) for c in changes], parent))
+            or "c1")
+        repl, ui = _repl(client)
+        _gh(repl, ["open", "o/r"])
+        _gh(repl, ["rm", "old.txt", "drop the stale notes"], reply="y")
+        assert deleted == [([("old.txt", True)], "head777")]
+        assert any("deleted old.txt" in m for _, m in ui.msgs)
+
+    def test_rm_needs_a_path(self):
+        repl, ui = _repl(StubClient())
+        _gh(repl, ["open", "o/r"])
+        _gh(repl, ["rm"])
+        assert any("usage: /gh rm" in m for _, m in ui.msgs)
+
     def test_commands_need_an_open_workspace(self):
         repl, ui = _repl(StubClient())
         _gh(repl, ["ls"])

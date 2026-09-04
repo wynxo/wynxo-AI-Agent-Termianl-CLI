@@ -4196,17 +4196,17 @@ class Repl:
         github_write tools the agent gets. Edits commit to the workspace
         branch; /gh branch creates one to work on, /gh pr ships it.
         """
-        from .gh import GitHubClient, GitHubError
+        from .gh import Change, GitHubClient, GitHubError
 
         if self.gh is None:
             self.gh = GitHubClient()
         action = args[0].lower() if args else "status"
-        known = {"status", "login", "open", "ls", "cat", "edit",
-                 "branch", "pr", "close"}
+        known = {"status", "login", "open", "ls", "cat", "edit", "rm",
+                 "log", "branch", "pr", "close"}
         if action not in known:
             self.ui.warn(f"unknown /gh action {action}. "
-                         "status | login | open | ls | cat | edit | "
-                         "branch | pr | close")
+                         "status | login | open | ls | cat | edit | rm | "
+                         "log | branch | pr | close")
             return True
         ws = self.gh_ws
 
@@ -4303,6 +4303,40 @@ class Repl:
                     title or f"wynxo: changes on {branch}", body)
                 self.ui.success(url)
                 return True
+            if action == "log":
+                messages = self.gh.commits(owner, repo, branch, limit=12)
+                if not messages:
+                    self.ui.info(f"no commits on {branch}.")
+                    return True
+                self.ui.console.print()
+                for message in messages:
+                    first = message.splitlines()[0] if message else ""
+                    self.ui.console.print(Text("  " + first))
+                self.ui.console.print()
+                return True
+            if action == "rm":
+                if len(args) < 2:
+                    self.ui.error("usage: /gh rm <path> [commit message]")
+                    return True
+                path = args[1]
+                answer = await self._question(
+                    f"delete {path} from {owner}/{repo}@{branch}?  "
+                    "[y] yes  [n] no:", {"y": "yes", "n": "no"}, default="n")
+                if answer != "y":
+                    self.ui.info("nothing deleted.")
+                    return True
+                # Through commit() rather than a contents DELETE: one path
+                # that builds a commit, one place the fast-forward check
+                # lives. The head is read now on purpose -- unlike an edit
+                # there is no earlier read for this to be stale against,
+                # which is exactly what `git rm && git push` does too.
+                head = self.gh.ref_sha(owner, repo, branch)
+                message = " ".join(args[2:]) or f"wynxo: remove {path}"
+                sha = self.gh.commit(owner, repo, branch,
+                                     [Change(path=path, content=None)],
+                                     message, head)
+                self.ui.success(f"deleted {path} on {branch} ({sha[:10]})")
+                return True
             if action == "close":
                 self.gh_ws = None
                 self.ui.info("closed the cloud workspace.")
@@ -4353,7 +4387,15 @@ class Repl:
         except GitHubError as exc:
             self.ui.error(str(exc))
             return True
-        suffix = ".md" if path.endswith((".md", ".markdown")) else ".txt"
+        # The file's own extension, so vim or nano opens it as the language
+        # it is. Everything that was not markdown used to arrive as .txt --
+        # editing Python on a phone with no syntax colouring, because of a
+        # detail nobody would think to look at.
+        from pathlib import PurePosixPath
+
+        suffix = PurePosixPath(path).suffix or ".txt"
+        if len(suffix) > 12 or "/" in suffix:
+            suffix = ".txt"
         fd, tmp = tempfile.mkstemp(prefix="wynxo-gh-", suffix=suffix)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
