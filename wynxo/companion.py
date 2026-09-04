@@ -45,6 +45,16 @@ _BY_TOOL = {
     "web_search": State.SEARCHING, "search": State.SEARCHING,
     "run_tests": State.TESTING,
     "shell": State.THINKING,
+    # Driving the machine. control_computer is literally typing, so it
+    # gets the typing animation -- the hands on the deck are not a
+    # metaphor there, they are what is happening. `look` is a scan, which
+    # is what SEARCHING already draws; the system tools are reading a
+    # dial and turning one.
+    "control_computer": State.CODING,
+    "look": State.SEARCHING,
+    "system_status": State.READING,
+    "system_control": State.CODING,
+    "launch_application": State.CODING,
 }
 """The running tool, where it says more than the task state does.
 

@@ -43,6 +43,45 @@ BAD = PALETTE.bad
 BAR_STYLE = f"on {PALETTE.bar_bg}"
 BAR_ACCENT = PALETTE.bar_accent
 BAR_DIM = PALETTE.bar_dim
+def _rgb(colour: str) -> tuple[int, int, int]:
+    """A palette colour as numbers, for blending between two of them."""
+    from rich.color import Color
+
+    triplet = Color.parse(colour).get_truecolor()
+    return triplet.red, triplet.green, triplet.blue
+
+
+def blend(start: str, end: str, position: float) -> str:
+    """A colour ``position`` of the way from ``start`` to ``end``.
+
+    Linear in sRGB, which is not how light works and is exactly right here:
+    the two ends of every gradient this draws are already close in hue, so
+    the perceptually-correct interpolation and the naive one differ by less
+    than a terminal can show -- and the naive one has no dependency and
+    cannot fail.
+    """
+    position = max(0.0, min(1.0, position))
+    a, b = _rgb(start), _rgb(end)
+    return "#%02x%02x%02x" % tuple(
+        round(one + (two - one) * position)
+        for one, two in zip(a, b, strict=True))
+
+
+def gradient(text: str, start: str, end: str, bold: bool = False) -> Text:
+    """One string, swept from one colour to the other.
+
+    Per character rather than per word: a five-letter wordmark has nowhere
+    to put a gradient otherwise, and this is the one place in the interface
+    where a little decoration is the point rather than a distraction.
+    """
+    out = Text()
+    span = max(1, len(text) - 1)
+    for index, char in enumerate(text):
+        style = blend(start, end, index / span)
+        out.append(char, style=f"bold {style}" if bold else style)
+    return out
+
+
 def _ansi_of(style: str) -> str:
     """One rich style as the escape that turns it on."""
     from rich.style import Style
@@ -634,7 +673,8 @@ class UI:
     # -- chrome ------------------------------------------------------------
 
     def banner(self, model: str, endpoint: str, effort: str, workspace: str,
-               pet=None, greeting: str = "") -> None:
+               pet=None, greeting: str = "",
+               capabilities: list[str] | None = None) -> None:
         """One line: who this is, what it is running, and where.
 
         Start-up should cost the screen a single row. It used to cost nine
@@ -682,12 +722,91 @@ class UI:
             detail.append(part, style="" if index == 0 else MUTED)
 
         line = Text()
-        line.append("wynxo", style=f"bold {ACCENT}")
+        # The one place a little decoration is the point rather than a
+        # distraction: five letters, swept from the accent to the bar's
+        # lighter one. Both come from the palette, so it is the theme's
+        # gradient rather than a hardcoded pair -- and the themes that set
+        # them to the same colour get a flat wordmark, which is what a
+        # deliberately plain theme should get without special-casing.
+        line.append_text(gradient("wynxo", ACCENT, BAR_ACCENT, bold=True))
         line.append(separator, style=FAINT)
         line.append_text(detail)
         self.console.print()
-        self.console.print(line, overflow="ellipsis", no_wrap=True)
+        self._reveal(line)
+        if row := self._capabilities(capabilities):
+            self.console.print(row, overflow="ellipsis", no_wrap=True)
         self.console.print()
+
+    REVEAL = 0.22
+    """How long the identity line takes to draw itself in, in seconds.
+
+    Short enough that it reads as the line appearing rather than as
+    something to wait through -- past about a third of a second a startup
+    animation stops being a flourish and becomes a splash screen, which is
+    the thing this header was cut down from in the first place."""
+
+    def _reveal(self, line: Text) -> None:
+        """Draw the identity line in, one cell at a time.
+
+        Only on a real terminal, and only when it costs nothing that
+        matters: a redirected banner, a test, a pipe into `head` all get
+        the finished line in one write. The animation is carried by
+        rewriting a single row in place, so it leaves exactly what the
+        static version would leave behind -- nothing to scroll past, and
+        nothing different in a transcript.
+        """
+        if not self.console.is_terminal or self.width < 30:
+            self.console.print(line, overflow="ellipsis", no_wrap=True)
+            return
+        import time
+
+        from rich.live import Live
+
+        steps = min(len(line.plain), 18)
+        try:
+            # Through Live, which is the one place in this interface that
+            # may redraw. Two earlier attempts did it by hand and both were
+            # wrong: `end="\r"` never reached the terminal at all, because
+            # SafeConsole scrubs control characters out of text and a
+            # carriage return is one -- so every frame landed *after* the
+            # last instead of over it and the reveal drew
+            # "wwywynwynxwynxo" across the screen. Emitting a Control
+            # segment instead worked, and broke the rule that keeps the
+            # transcript trustworthy: what is written to the terminal is
+            # the record, and the live region is the only thing allowed to
+            # take a row back.
+            with Live(line[:1], console=self.console, transient=False,
+                      auto_refresh=False) as live:
+                for step in range(2, steps + 1):
+                    time.sleep(self.REVEAL / steps)
+                    shown = round(len(line.plain) * step / steps)
+                    live.update(line[:shown], refresh=True)
+                live.update(line, refresh=True)
+        except Exception:
+            # A console that will not animate still gets the line, once.
+            self.console.print(line, overflow="ellipsis", no_wrap=True)
+
+    def _capabilities(self, capabilities) -> "Text | None":
+        """What this wynxo can do on this machine, in one muted row.
+
+        The line above says who and where, which is read once. This says
+        what, which is also read once -- and it is the answer to the
+        question somebody actually has on the first run, which is not
+        "which model" but "can this thing really touch my computer".
+
+        Nothing when there is nothing to say. On a server with no desktop
+        the honest row is no row: a line of crosses at startup is a list of
+        things wynxo is not, which is not what a header is for.
+        """
+        if not capabilities:
+            return None
+        row = Text("  ")
+        row.append(self.g.tool + " ", style=ACCENT)
+        for index, item in enumerate(capabilities):
+            if index:
+                row.append(f" {self.g.dot} ", style=FAINT)
+            row.append(item, style=MUTED)
+        return row
 
     def clear(self) -> None:
         """Clear the screen and scrollback, so a session starts on a clean page.
@@ -982,7 +1101,16 @@ class UI:
         # own. One rule, applied by the thing that knows it is starting.
         self.console.print()
         line = Text()
-        line.append(f"{self.g.arrow} ", style=ACCENT if ok else BAD)
+        # Two marks, not one, and the difference is what the call touched.
+        # Reading a file and typing into somebody's browser are not the
+        # same event, and a transcript where they look identical is one
+        # you have to read word by word to find out what wynxo did to your
+        # machine. The arrow stays the default; anything that reaches
+        # outside this project gets the other mark, in the bar's accent.
+        reaches_out = name in TOUCHES_THE_MACHINE
+        mark = self.g.spark if reaches_out else self.g.arrow
+        colour = BAD if not ok else (BAR_ACCENT if reaches_out else ACCENT)
+        line.append(f"{mark} ", style=colour)
         line.append(verb(name), style="bold" if ok else f"bold {BAD}")
         if target:
             line.append(f" {sanitise(target)[:120]}", style=MUTED)
@@ -1337,6 +1465,18 @@ class UI:
                              FAINT, indent=0)
 
 
+TOUCHES_THE_MACHINE = frozenset({
+    "control_computer", "look", "system_control", "system_status",
+    "launch_application", "shell",
+})
+"""Calls that reach outside the project.
+
+Marked differently on the transcript because they *are* different: a file
+edit leaves a diff to review and an undo to press, and a keystroke sent
+into somebody's browser leaves neither. Scanning a session for what wynxo
+did to the machine should not mean reading every line of it."""
+
+
 VERBS = {
     "read_file": "read", "write_file": "write", "edit_file": "edit",
     "multi_edit": "edit", "list_dir": "ls", "glob": "find",
@@ -1345,6 +1485,13 @@ VERBS = {
     "github_read": "github", "github_write": "github",
     "projectmap": "map", "launch_application": "launch",
     "remember": "remember", "recall": "recall",
+    # The machine, as verbs rather than as the names of dispatch entries.
+    # "control_computer" on a line somebody reads while waiting is three
+    # syllables that say nothing about what just happened to their desktop.
+    "control_computer": "desktop", "look": "look",
+    "system_control": "system", "system_status": "check",
+    "find_symbols": "symbols", "find_references": "uses",
+    "background_poll": "poll", "git": "git",
 }
 """What a tool is called on screen, where that is not what it is called in
 the registry.

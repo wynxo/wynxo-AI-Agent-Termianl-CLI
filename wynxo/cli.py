@@ -129,6 +129,10 @@ _ACTIVITY = {
     "list_dir": "listing", "glob": "finding", "grep": "searching",
     "shell": "running", "todo_write": "planning", "launch_application": "launching",
     "run_tests": "testing",
+    "control_computer": "on the desktop", "look": "looking at the screen",
+    "system_control": "on the system", "system_status": "checking the machine",
+    "find_symbols": "finding", "find_references": "tracing",
+    "github_read": "reading github", "github_write": "committing",
 }
 _LANGUAGE = {"read_file": "python", "shell": "text"}
 """How to highlight a tool's output, where it is known.
@@ -1825,6 +1829,7 @@ class Repl:
             f"{self.client.base_url} (ollama {version})",
             self.policy.name,
             str(self.workspace),
+            capabilities=self._capability_chips(),
         )
         self._start_warming()
         return True
@@ -3559,7 +3564,8 @@ class Repl:
 
         self.ui.clear()
         self.ui.banner(self.config.model, self.client.base_url,
-                       self.policy.name, str(self.workspace))
+                       self.policy.name, str(self.workspace),
+                       capabilities=self._capability_chips())
         self.ui.console.print()
         self.ui.info("new chat -- memory kept, history and undo reset")
         return True
@@ -3894,6 +3900,32 @@ class Repl:
         "focus a window": "change which window has focus",
         "screenshot": "take a screenshot",
     }
+
+    def _capability_chips(self) -> list[str]:
+        """What to put under the identity line: what this can do, here.
+
+        The answer to the question somebody actually has on a first run,
+        which is not "which model" but "can this thing really touch my
+        computer". Drawn from the same probe the model is told about, so
+        the header cannot claim something the agent would then refuse.
+
+        Ordered by how surprising it is, not alphabetically: driving the
+        desktop is the headline, and "reads files" is not news about an
+        assistant that lives in a terminal.
+        """
+        machine = getattr(getattr(self, "agent", None), "machine", None)
+        if machine is None:
+            return []
+        chips: list[str] = []
+        if machine.has_desktop:
+            chips.append("drives your desktop")
+        if machine.sighted and "screenshot" in machine.can:
+            chips.append("sees the screen")
+        for name, label in (("sound", "sound"), ("media playback", "media"),
+                            ("the clipboard", "clipboard")):
+            if name in machine.controls:
+                chips.append(label)
+        return chips[:5]
 
     def cmd_desktop(self, args: list[str]) -> bool:
         """What can actually be driven here, and what is missing.
