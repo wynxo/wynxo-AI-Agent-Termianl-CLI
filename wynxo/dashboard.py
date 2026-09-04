@@ -1,11 +1,12 @@
 """Polished terminal dashboard chrome for WYNXO.
 
-The dashboard is deliberately terminal-native: no fake GUI, no giant ASCII
-mascot, and no extra runtime dependency. It uses Rich panels and a compact
-half-block pixel illustration so the startup screen feels like an application
-rather than a collection of debug boxes.
+The dashboard is terminal-native and intentionally keeps the real REPL intact.
+It adds a compact app shell, navigation rail, session cards, and a procedural
+half-block pixel illustration of a human catboy sitting behind a laptop.
 """
 from __future__ import annotations
+
+import math
 
 from rich.console import Group
 from rich.panel import Panel
@@ -13,113 +14,138 @@ from rich.table import Table
 from rich.text import Text
 
 
-# 40x20 pixel-art canvas.  A human silhouette comes first; the ears are small
-# accents and the laptop is clearly in front of the character.
-# Two source rows become one terminal row via upper/lower half blocks.
-_ART = [
-    "0000000000000000000011111111000000000000",
-    "0000000000000000011111111111110000000000",
-    "0000000000000000111111111111111000000000",
-    "0000000000000011111111111111111100000000",
-    "0000000000000111111111111111111110000000",
-    "0000000000001111111111111111111111000000",
-    "0000000000011111111111111111111111100000",
-    "0000000000111111111111111111111111110000",
-    "0000000001111111111111111111111111111000",
-    "0000000011111111111111111111111111111100",
-    "0000000111111111111111111111111111111110",
-    "0000000111111111111111111111111111111110",
-    "0000000111111111111111111111111111111110",
-    "0000000011111111111111111111111111111100",
-    "0000000011111111111111111111111111111100",
-    "0000000001111111111111111111111111111000",
-    "0000000000111111111111111111111111110000",
-    "0000000000111111111111111111111111110000",
-    "0000000000111111111111111111111111110000",
-    "0000000000011111111111111111111111100000",
-    "0000000000011111111111111111111111100000",
-    "0000000000111111111111111111111111110000",
-    "0000000001111111111111111111111111111000",
-    "0000000011111111111111111111111111111100",
-    "0000000111111111111111111111111111111110",
-    "0000001111111111111111111111111111111111",
-    "0000011111111111111111111111111111111111",
-    "0000111111111111111111111111111111111111",
-    "0001111111111111111111111111111111111111",
-    "0011111111111111111111111111111111111111",
-    "0011111111111111111111111111111111111111",
-    "0111111111111111111111111111111111111111",
-    "0111111111111111111111111111111111111111",
-    "1111111111111111111111111111111111111111",
-    "1111111111111111111111111111111111111111",
-    "1111111111111111111111111111111111111111",
-    "1111111111111111111111111111111111111111",
-    "1111111111111111111111111111111111111111",
-    "1111111111111111111111111111111111111111",
-    "1111111111111111111111111111111111111111",
-]
-
-# Overlay a face, hair/ears, hoodie, arms and laptop onto the silhouette.
-# Each overlay is sparse so the silhouette remains recognizable at a glance.
-_OVERLAY = {
-    (2, 16): "2", (2, 23): "2", (3, 15): "2", (3, 24): "2",
-    (4, 14): "2", (4, 25): "2", (5, 15): "2", (5, 24): "2",
-    (6, 16): "1", (6, 23): "1",
-    (8, 17): "3", (8, 22): "3",
-    (9, 16): "3", (9, 18): "4", (9, 21): "4", (9, 23): "3",
-    (10, 17): "5", (10, 22): "5",
-    (11, 18): "3", (11, 21): "3",
-    (12, 19): "6", (12, 20): "6",
-    (14, 12): "2", (14, 27): "2",
-    (16, 11): "2", (16, 28): "2",
-    (18, 10): "2", (18, 29): "2",
-    (21, 10): "7", (21, 29): "7",
-    (22, 9): "7", (22, 30): "7",
-    (23, 8): "7", (23, 31): "7",
-    (24, 7): "7", (24, 32): "7",
-    (25, 6): "7", (25, 33): "7",
-    (26, 5): "7", (26, 34): "7",
-    (27, 5): "7", (27, 34): "7",
-    (28, 6): "7", (28, 33): "7",
-    (29, 7): "7", (29, 32): "7",
-    (30, 8): "7", (30, 31): "7",
-    (31, 9): "7", (31, 30): "7",
-    (32, 10): "7", (32, 29): "7",
-    (33, 11): "7", (33, 28): "7",
-    (34, 12): "8", (34, 27): "8",
-    (35, 13): "8", (35, 26): "8",
-    (36, 14): "8", (36, 25): "8",
-    (37, 15): "8", (37, 24): "8",
+# Pixel labels.  The renderer packs two vertical pixels into one terminal cell
+# using ▀/▄/█.  This gives much more detail than ASCII line art while staying
+# completely dependency-free and working over SSH.
+_PIXEL_STYLES = {
+    "H": "accent_dim",   # hair / ears
+    "h": "accent",       # hair highlights
+    "S": "text",         # skin
+    "E": "bar_accent",   # eyes
+    "M": "muted",        # mouth
+    "O": "accent_dim",   # hoodie
+    "o": "muted",        # hoodie shadow
+    "L": "bar_bg",       # laptop bezel
+    "l": "faint",        # laptop body
+    "C": "bar_accent",   # screen content
+    "D": "faint",        # desk
+    "T": "warn",         # mug / small desk accent
 }
 
-_STYLES = {
-    "1": "accent_dim",
-    "2": "accent",
-    "3": "text",
-    "4": "bar_accent",
-    "5": "muted",
-    "6": "text",
-    "7": "bar_bg",
-    "8": "faint",
-}
+
+def _make_catboy(width: int = 40, height: int = 40) -> list[list[str]]:
+    """Create a recognizable seated catboy silhouette in a small pixel canvas."""
+    px = [["0"] * width for _ in range(height)]
+
+    def put(x: int, y: int, value: str) -> None:
+        if 0 <= x < width and 0 <= y < height:
+            px[y][x] = value
+
+    def ellipse(cx: float, cy: float, rx: float, ry: float, value: str) -> None:
+        for y in range(max(0, int(cy - ry)), min(height, int(cy + ry + 1))):
+            for x in range(max(0, int(cx - rx)), min(width, int(cx + rx + 1))):
+                if ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1:
+                    put(x, y, value)
+
+    def rect(x0: int, y0: int, x1: int, y1: int, value: str) -> None:
+        for y in range(max(0, y0), min(height, y1 + 1)):
+            for x in range(max(0, x0), min(width, x1 + 1)):
+                put(x, y, value)
+
+    # Hoodie / seated torso.
+    ellipse(19, 29, 14, 10, "O")
+    ellipse(10, 30, 6, 7, "o")
+    ellipse(29, 30, 6, 7, "o")
+
+    # Small neck behind the face.
+    rect(17, 19, 22, 24, "S")
+
+    # Human head and hair mass.
+    ellipse(19, 12, 10, 9, "S")
+    ellipse(19, 10, 11, 9, "H")
+    ellipse(12, 12, 5, 7, "H")
+    ellipse(26, 12, 5, 7, "H")
+
+    # Cat ears: small triangles, not a giant cat head.
+    for i in range(6):
+        for x in range(14 - i, 14 + i + 1):
+            put(x, 3 + i, "H")
+        for x in range(24 - i, 24 + i + 1):
+            put(x, 3 + i, "H")
+    for i in range(4):
+        for x in range(15 - i // 2, 15 + i // 2 + 1):
+            put(x, 5 + i, "h")
+        for x in range(23 - i // 2, 23 + i // 2 + 1):
+            put(x, 5 + i, "h")
+
+    # Fringe / hair falling over the forehead.
+    for x, depth in ((13, 5), (15, 4), (17, 3), (19, 4), (21, 3), (23, 4), (25, 5)):
+        for y in range(7, 7 + depth):
+            put(x, y, "H")
+    for x in (16, 20, 24):
+        put(x, 9, "h")
+
+    # Eyes, nose, mouth: restrained so it reads as a face rather than a mask.
+    put(16, 13, "E")
+    put(17, 13, "E")
+    put(22, 13, "E")
+    put(23, 13, "E")
+    put(19, 15, "M")
+    put(20, 15, "M")
+
+    # Hoodie strings.
+    for y in range(20, 26):
+        put(17, y, "h")
+        put(22, y, "h")
+    put(17, 26, "h")
+    put(22, 26, "h")
+
+    # Forearms reaching around the laptop.
+    for y in range(27, 34):
+        for x in range(7 + (y - 27) // 2, 16):
+            put(x, y, "o")
+        for x in range(23, 32 - (y - 27) // 2):
+            put(x, y, "o")
+
+    # Hands on the keyboard.
+    ellipse(14, 31, 5, 2, "S")
+    ellipse(25, 31, 5, 2, "S")
+
+    # Laptop screen in front of the body.
+    rect(10, 25, 29, 31, "L")
+    rect(12, 26, 27, 29, "C")
+    # Screen lines / cursor.
+    for x in range(14, 25, 3):
+        put(x, 27, "h")
+    for x in range(14, 22, 4):
+        put(x, 28, "H")
+    put(23, 28, "E")
+
+    # Laptop base.
+    for y in range(32, 35):
+        for x in range(7, 33):
+            put(x, y, "l" if y != 34 else "L")
+    for x in range(12, 28, 2):
+        put(x, 33, "h")
+
+    # Desk edge and tiny mug for environmental context.
+    rect(4, 35, 35, 36, "D")
+    rect(31, 31, 34, 35, "D")
+    rect(32, 29, 34, 31, "T")
+
+    return px
 
 
 def _pixel_art(palette) -> Text:
-    pixels = [list(row) for row in _ART]
-    for (y, x), value in _OVERLAY.items():
-        if 0 <= y < len(pixels) and 0 <= x < len(pixels[y]):
-            pixels[y][x] = value
+    pixels = _make_catboy()
 
     def style(value: str) -> str:
-        return palette.role(_STYLES.get(value, "accent_dim"))
+        role = _PIXEL_STYLES.get(value, "accent_dim")
+        return palette.role(role)
 
     out = Text()
     for y in range(0, len(pixels), 2):
-        top = pixels[y]
-        bottom = pixels[y + 1]
-        for a, b in zip(top, bottom):
-            # Treat the base silhouette as transparent and only render the
-            # character/laptop overlays. This avoids a solid purple rectangle.
+        for a, b in zip(pixels[y], pixels[y + 1]):
             if a == "0" and b == "0":
                 out.append(" ")
             elif a == "0":
@@ -135,7 +161,7 @@ def _pixel_art(palette) -> Text:
 
 
 def _nav(palette) -> Panel:
-    rows = [
+    items = [
         ("◈", "chat", True),
         ("◇", "tools", False),
         ("□", "files", False),
@@ -146,25 +172,35 @@ def _nav(palette) -> Panel:
     table = Table.grid(padding=(0, 1))
     table.add_column(width=2)
     table.add_column(width=11)
-    for icon, label, active in rows:
+    for icon, label, active in items:
         table.add_row(
             Text("▌" if active else " ", style=f"bold {palette.accent}"),
-            Text(f"{icon}  {label}", style=f"bold {palette.accent}" if active else palette.muted),
+            Text(
+                f"{icon}  {label}",
+                style=f"bold {palette.accent}" if active else palette.muted,
+            ),
         )
     return Panel(
         table,
         title=Text(" WYNXO ", style=f"bold {palette.accent}"),
         border_style=palette.faint,
-        box=ROUNDED,
+        box=self_box(palette),
         padding=(1, 0),
     )
 
 
+def self_box(palette):
+    # Keep one box style for the whole dashboard.  Rich's rounded box is
+    # supported on the terminals WYNXO targets; ASCII fallback is handled by
+    # the existing UI for restricted terminals.
+    from rich.box import ROUNDED
+    return ROUNDED
+
+
 def _banner(self, model: str, endpoint: str, effort: str, workspace: str,
             pet=None, greeting: str = "") -> None:
-    """Render the startup shell; normal prompt/streaming remains untouched."""
+    """Render the startup dashboard; the actual REPL remains unchanged."""
     del endpoint, pet, greeting
-
     p = self.palette
     width = max(70, self.width)
     model_short = self.shorten_model(model, max(20, width // 3))
@@ -183,33 +219,32 @@ def _banner(self, model: str, endpoint: str, effort: str, workspace: str,
         Text("● LOCAL", style=f"bold {p.good}"),
     )
 
-    hero_art = _pixel_art(p)
-    caption = Text()
-    caption.append("  ◈ ", style=f"bold {p.accent}")
-    caption.append("companion", style=f"bold {p.accent}")
-    caption.append("  ·  ready", style=p.muted)
+    hero_caption = Text()
+    hero_caption.append("◈ companion", style=f"bold {p.accent}")
+    hero_caption.append("  ·  sitting at the desk", style=p.muted)
     hero = Panel(
-        Group(hero_art, caption),
+        Group(_pixel_art(p), hero_caption),
         title=Text(" companion ", style=p.muted),
         border_style=p.accent,
-        box=ROUNDED,
+        box=self_box(p),
         padding=(0, 1),
     )
 
-    welcome = Text()
-    welcome.append("welcome back\n", style=f"bold {p.accent}")
-    welcome.append("Your local AI workspace is ready.\n\n", style=p.text)
-    welcome.append("model    ", style=p.muted)
-    welcome.append(model_short + "\n", style=p.text)
-    welcome.append("workspace", style=p.muted)
-    welcome.append("  " + path_short + "\n", style=p.text)
-    welcome.append("effort   ", style=p.muted)
-    welcome.append(effort + "\n", style=p.accent)
-    welcome_panel = Panel(
-        welcome,
+    session = Text()
+    session.append("welcome back\n", style=f"bold {p.accent}")
+    session.append("Your local AI workspace is ready.\n\n", style=p.text)
+    session.append("model      ", style=p.muted)
+    session.append(model_short + "\n", style=p.text)
+    session.append("workspace  ", style=p.muted)
+    session.append(path_short + "\n", style=p.text)
+    session.append("effort     ", style=p.muted)
+    session.append(effort, style=p.accent)
+
+    session_panel = Panel(
+        session,
         title=Text(" session ", style=p.muted),
         border_style=p.faint,
-        box=ROUNDED,
+        box=self_box(p),
         padding=(1, 1),
     )
 
@@ -228,15 +263,15 @@ def _banner(self, model: str, endpoint: str, effort: str, workspace: str,
         commands,
         title=Text(" shortcuts ", style=p.muted),
         border_style=p.faint,
-        box=ROUNDED,
+        box=self_box(p),
         padding=(1, 1),
     )
 
-    right = Group(welcome_panel, command_panel)
+    right = Group(session_panel, command_panel)
     body = Table.grid(expand=True, padding=(0, 1))
     body.add_column(width=28)
     body.add_column(ratio=1)
-    body.add_row(_nav(p), right)
+    body.add_row(_nav(p), Group(hero, right))
 
     footer = Text()
     footer.append(" model ", style=p.muted)
@@ -248,16 +283,16 @@ def _banner(self, model: str, endpoint: str, effort: str, workspace: str,
     footer.append("companion ", style=p.muted)
     footer.append("idle", style=p.accent)
     footer.append("   │   ", style=p.faint)
-    footer.append("↑↓ move   Enter select   Ctrl+C stop", style=p.muted)
+    footer.append("Ctrl+C stop", style=p.muted)
 
     self.console.print()
-    self.console.print(Panel(header, border_style=p.faint, box=ROUNDED, padding=(0, 1)))
+    self.console.print(Panel(header, border_style=p.faint, box=self_box(p), padding=(0, 1)))
     self.console.print(body)
-    self.console.print(Panel(footer, border_style=p.faint, box=ROUNDED, padding=(0, 1)))
+    self.console.print(Panel(footer, border_style=p.faint, box=self_box(p), padding=(0, 1)))
     self.console.print()
 
 
 def install() -> None:
-    """Install the dashboard banner without replacing the main UI renderer."""
+    """Install dashboard startup chrome without replacing the main renderer."""
     from .ui import UI
     UI.banner = _banner
