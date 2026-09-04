@@ -37,3 +37,17 @@ def test_warm_accepts_messages_and_tools():
     assert fake.payload["model"] == "test-model"
     assert fake.payload["messages"] == [{"role": "system", "content": "hello"}]
     assert fake.payload["tools"] == [{"type": "function"}]
+    assert fake.payload["options"]["num_predict"] == 1
+
+
+def test_warm_without_prompt_keeps_legacy_load_only_behavior():
+    config = Config()
+    client = OllamaClient(config)
+    fake = _Client()
+    client._client = fake
+
+    ok = asyncio.run(client.warm("test-model"))
+
+    assert ok is True
+    assert fake.payload["messages"] == []
+    assert "num_predict" not in fake.payload["options"]
