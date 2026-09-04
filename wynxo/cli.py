@@ -2498,8 +2498,9 @@ class Repl:
 
         Reverting a single file cannot go through the checkpoint stack --
         that is ordered, and taking one out of the middle would put the
-        others back too. The snapshot holds the original, so it is written
-        straight back.
+        others back too. So it goes through the store's restore() instead,
+        which holds the file handling and the one check that matters
+        without touching the stack.
         """
         kept = reverted = 0
         for snapshot in changes:
@@ -2508,17 +2509,17 @@ class Repl:
                 f"{name}  [k] keep  [r] revert:",
                 {"k": "keep", "r": "revert", "n": "no"}, default="k")
             if answer in ("r", "n"):
-                try:
-                    if snapshot.existed:
-                        snapshot.path.parent.mkdir(parents=True, exist_ok=True)
-                        snapshot.path.write_text(snapshot.content or "",
-                                                 encoding="utf-8", newline="",
-                                                 errors="surrogateescape")
-                    elif snapshot.path.exists():
-                        snapshot.path.unlink()
+                # Through the checkpoint store, which owns the one check
+                # that matters: this used to write the snapshot straight
+                # back, so answering "revert" to a file the user had saved
+                # in their editor since destroyed that save and reported
+                # success. Only the *ordering* is the reason not to go
+                # through undo() here; the file handling is the same.
+                ok, message = self.agent.checkpoints.restore(snapshot)
+                if ok:
                     reverted += 1
-                except OSError as exc:
-                    self.ui.warn(f"could not revert {name}: {exc}")
+                else:
+                    self.ui.warn(message)
             else:
                 kept += 1
         self.ui.success(f"kept {kept}, reverted {reverted}")

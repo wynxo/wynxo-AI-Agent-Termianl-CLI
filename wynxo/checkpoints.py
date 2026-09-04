@@ -202,6 +202,46 @@ class Checkpoints:
                 self._save()
                 return
 
+    def restore(self, snapshot: "Snapshot") -> tuple[bool, str]:
+        """Put one file back, refusing if it drifted since the agent left it.
+
+        The check and the write live together here because they were apart
+        once and drifted apart with them: undo() had the check, and the
+        review flow's step-through wrote the snapshot straight back with no
+        check at all, so answering "revert" to a file the user had saved in
+        their editor since destroyed that save and reported success.
+
+        Callers own the stack; this owns the file.
+        """
+        name = snapshot.label or snapshot.path.name
+        try:
+            # The snapshot knows what the agent left behind. Anything else
+            # now on disk means someone changed the file afterwards --
+            # almost always the user -- and putting the old one back over
+            # it would destroy that work silently.
+            if snapshot.expected is not None and snapshot.path.exists():
+                if _read(snapshot.path) != snapshot.expected:
+                    return False, (
+                        f"{name} changed after it was edited -- not undoing "
+                        "over the newer change."
+                    )
+        except OSError as exc:
+            return False, f"Could not undo {name}: {exc}"
+
+        try:
+            if snapshot.existed:
+                snapshot.path.parent.mkdir(parents=True, exist_ok=True)
+                with snapshot.path.open("w", encoding="utf-8", newline="",
+                                        errors="surrogateescape") as fh:
+                    fh.write(snapshot.content or "")
+                return True, f"Reverted {name} to its state before {snapshot.tool}."
+            if snapshot.path.exists():
+                snapshot.path.unlink()
+                return True, f"Deleted {name}, which {snapshot.tool} had created."
+            return True, f"{name} was already gone."
+        except OSError as exc:
+            return False, f"Could not undo {name}: {exc}"
+
     def undo(self) -> tuple[bool, str]:
         """Revert the most recent change, refusing if the file drifted since it.
 
@@ -218,48 +258,24 @@ class Checkpoints:
         name = snapshot.label or snapshot.path.name
 
         try:
-            # The snapshot knows what the agent left behind. Anything else
-            # now on disk means someone changed the file after the agent
-            # finished -- almost always the user -- and undoing over it
-            # would destroy that work silently. Refuse.
-            if snapshot.expected is not None and snapshot.path.exists():
-                if _read(snapshot.path) != snapshot.expected:
-                    return False, (
-                        f"{name} changed after it was edited -- not undoing "
-                        "over the newer change."
-                    )
             # A checkpoint is safe only if the current file still represents
-            # the agent's last edit. If the user changed it afterwards, never
-            # overwrite that work silently.
+            # the agent's last edit. Nothing to do if it is already there.
             if snapshot.existed and snapshot.path.exists():
-                current = _read(snapshot.path)
-                if current == snapshot.content:
+                if _read(snapshot.path) == snapshot.content:
                     return False, f"{name} is already at its checkpoint state."
         except OSError as exc:
             return False, f"Could not undo {name}: {exc}"
 
-        # Validated: now it is actually being undone, and only now does the
-        # record leave the stack.
+        ok, message = self.restore(snapshot)
+        if not ok:
+            # A refusal must not consume the snapshot: the undo has to
+            # still be possible once the conflict is resolved.
+            return ok, message
+
+        # Only now does the record leave the stack.
         self._stack.pop()
         self._save()
-
-        try:
-            if snapshot.existed:
-                snapshot.path.parent.mkdir(parents=True, exist_ok=True)
-                with snapshot.path.open("w", encoding="utf-8", newline="",
-                                        errors="surrogateescape") as fh:
-                    fh.write(snapshot.content or "")
-                return True, f"Reverted {name} to its state before {snapshot.tool}."
-            if snapshot.path.exists():
-                snapshot.path.unlink()
-                return True, f"Deleted {name}, which {snapshot.tool} had created."
-            return True, f"{name} was already gone."
-        except OSError as exc:
-            # The write failed; put the record back so the user can retry
-            # rather than silently losing the ability to undo.
-            self._stack.append(snapshot)
-            self._save()
-            return False, f"Could not undo {name}: {exc}"
+        return ok, message
 
     def mark(self) -> int:
         """A position to measure a turn's changes from."""
