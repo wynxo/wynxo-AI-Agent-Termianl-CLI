@@ -35,10 +35,6 @@ INK: dict[str, str] = {
     ".": "",
 }
 
-# 28x18 pixels = 28 terminal columns by 9 terminal rows after half-block
-# packing. The silhouette is a human seated behind a laptop: triangular cat
-# ears sit on hair, the face has a jaw and neck, shoulders lead into arms,
-# and the laptop is low enough that the torso remains visible.
 _BODY = [
     "........FFF......FFF.........",
     ".......FFFFF....FFFFF........",
@@ -64,43 +60,47 @@ EYES_OPEN = "FFEEFFFFFFFFEEFF"
 EYES_SHUT = "FFFFFFFFFFFFFFFF"
 EYES_LEFT = "FEEFFFFFFFFFEEFF"
 EYES_RIGHT = "FFEFFFFFFFFFEEEF"
-EYES_GLAD = "FFfFFFFFFFfFFF"
-
-
-def _check_rows(rows: list[str]) -> list[str]:
-    assert len(rows) == 18
-    assert all(len(row) == WIDTH for row in rows)
-    return rows
+EYES_GLAD = "FFfFFFFFFFfFFFFF"
 
 
 def _frame(**changes: str) -> list[str]:
+    """Build a frame and safely normalize hand/prop overlays to the canvas.
+
+    A few animation overlays are intentionally shorter than the canvas so
+    they can be authored as compact shapes. They are padded on the right
+    rather than rejected, while the base character remains exactly WIDTH
+    cells wide.
+    """
     out = list(_BODY)
     for key, value in changes.items():
         index = int(key[1:])
+        if len(value) < WIDTH:
+            value = value.ljust(WIDTH, ".")
+        elif len(value) > WIDTH:
+            value = value[:WIDTH]
         out[index] = value
-    return _check_rows(out)
+    assert len(out) == HEIGHT * 2
+    assert all(len(row) == WIDTH for row in out)
+    return out
 
 
 def _face(eyes: str) -> str:
-    # 16-pixel face centered in the 28-pixel canvas.
+    """A 16-pixel human face centered in the 28-pixel canvas."""
     assert len(eyes) == 16
     return "....." + eyes + "......."
 
 
 def _screen(cells: str) -> tuple[str, str]:
+    """Two laptop rows, with the bezel and keyboard framing the display."""
     assert len(cells) == 8
     return ".....ffffL" + cells + "Lffff.....", "....fffffL" + cells + "Lfffff...."
 
 
 def _with_screen(top: str, bottom: str, **changes: str) -> list[str]:
     a, b = _screen(top)
-    out = _frame(r10=a, r11=b, **changes)
-    return out
+    return _frame(r10=a, r11=b, **changes)
 
 
-# The animation is intentionally pose-based. Each state keeps the same
-# person and changes only the things a human would actually change: gaze,
-# hands, laptop screen, and posture.
 FRAMES: dict[State, list[list[str]]] = {
     State.IDLE: [
         _frame(r4=_face(EYES_OPEN)),
@@ -132,17 +132,20 @@ FRAMES: dict[State, list[list[str]]] = {
         _with_screen("SSSSSSSS", "SSSSSSSK", r4=_face(EYES_SHUT)),
     ],
     State.CODING: [
-        # Left hand down, right hand resting.
-        _with_screen("SKKKKKKK", "KKKKKKKK", r14="......LLfffLLLLfffLL......",
+        _with_screen("SKKKKKKK", "KKKKKKKK",
+                     r14="......LLfffLLLLfffLL......",
                      r15=".......LLfffffffLL......."),
-        # Right hand moves while the left returns to the keyboard.
-        _with_screen("SSSKKKKK", "KKSSKKKK", r14="......LLfffLLLLLLffLL.....",
+        _with_screen("SSSKKKKK", "KKSSKKKK",
+                     r14="......LLfffLLLLLLffLL.....",
                      r15=".......LLffffffffffLL....."),
-        _with_screen("SSSSSKKK", "SSKKKKKK", r14="......LLffffLLLLfffLL......",
+        _with_screen("SSSSSKKK", "SSKKKKKK",
+                     r14="......LLffffLLLLfffLL......",
                      r15=".......LLfffffffLL........"),
-        _with_screen("SSSSSSSS", "SSSSSKKK", r14="......LLfffLLLLLLffLL.....",
+        _with_screen("SSSSSSSS", "SSSSSKKK",
+                     r14="......LLfffLLLLLLffLL.....",
                      r15=".......LLffffffffffLL....."),
-        _with_screen("SSSSSSSS", "SSSSSSSK", r14="......LLffffLLLLfffLL......",
+        _with_screen("SSSSSSSS", "SSSSSSSK",
+                     r14="......LLffffLLLLfffLL......",
                      r15=".......LLfffffffLL........"),
     ],
     State.TESTING: [
