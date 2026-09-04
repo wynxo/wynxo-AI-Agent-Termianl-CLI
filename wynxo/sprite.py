@@ -36,8 +36,8 @@ INK: dict[str, str] = {
 }
 
 _BODY = [
-    "........FFF......FFF.........",
-    ".......FFFFF....FFFFF........",
+    "........FFF......FFF........",
+    ".......FFFFF....FFFFF.......",
     "......FFFFFFFFFFFFFFFF......",
     ".....FFFFFFFFFFFFFFFFFF.....",
     ".....FFFEEFFFFFFFFEEFFF.....",
@@ -63,22 +63,17 @@ EYES_RIGHT = "FFEFFFFFFFFFEEEF"
 EYES_GLAD = "FFfFFFFFFFfFFFFF"
 
 
-def _frame(**changes: str) -> list[str]:
-    """Build a frame and safely normalize hand/prop overlays to the canvas.
+def _normalize(row: str) -> str:
+    """Keep every sprite row exactly WIDTH cells wide."""
+    return row[:WIDTH].ljust(WIDTH, ".")
 
-    A few animation overlays are intentionally shorter than the canvas so
-    they can be authored as compact shapes. They are padded on the right
-    rather than rejected, while the base character remains exactly WIDTH
-    cells wide.
-    """
-    out = list(_BODY)
+
+def _frame(**changes: str) -> list[str]:
+    """Build a frame with every row normalized to the fixed canvas width."""
+    out = [_normalize(row) for row in _BODY]
     for key, value in changes.items():
         index = int(key[1:])
-        if len(value) < WIDTH:
-            value = value.ljust(WIDTH, ".")
-        elif len(value) > WIDTH:
-            value = value[:WIDTH]
-        out[index] = value
+        out[index] = _normalize(value)
     assert len(out) == HEIGHT * 2
     assert all(len(row) == WIDTH for row in out)
     return out
@@ -87,13 +82,13 @@ def _frame(**changes: str) -> list[str]:
 def _face(eyes: str) -> str:
     """A 16-pixel human face centered in the 28-pixel canvas."""
     assert len(eyes) == 16
-    return "....." + eyes + "......."
+    return _normalize("....." + eyes + ".......")
 
 
 def _screen(cells: str) -> tuple[str, str]:
     """Two laptop rows, with the bezel and keyboard framing the display."""
     assert len(cells) == 8
-    return ".....ffffL" + cells + "Lffff.....", "....fffffL" + cells + "Lfffff...."
+    return _normalize(".....ffffL" + cells + "Lffff....."), _normalize("....fffffL" + cells + "Lfffff....")
 
 
 def _with_screen(top: str, bottom: str, **changes: str) -> list[str]:
@@ -134,7 +129,7 @@ FRAMES: dict[State, list[list[str]]] = {
     State.CODING: [
         _with_screen("SKKKKKKK", "KKKKKKKK",
                      r14="......LLfffLLLLfffLL......",
-                     r15=".......LLfffffffLL......."),
+                     r15=".......LLfffffffLL........"),
         _with_screen("SSSKKKKK", "KKSSKKKK",
                      r14="......LLfffLLLLLLffLL.....",
                      r15=".......LLffffffffffLL....."),
