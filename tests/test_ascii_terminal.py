@@ -18,6 +18,13 @@ from wynxo.select import HINT, HINT_ASCII
 from wynxo.ui import UI, Glyphs, to_ascii
 
 
+def _plain(markup: str) -> str:
+    """An HTML prompt fragment as the characters it will draw."""
+    import re
+
+    return re.sub(r"<[^>]+>", "", markup)
+
+
 def ascii_ui() -> UI:
     ui = UI()
     ui.g = Glyphs(False)
@@ -63,6 +70,7 @@ class TestInputBox:
         repl._echo_prompt = cli.Repl._echo_prompt.__get__(repl, type(repl))
         repl._bottom_toolbar = cli.Repl._bottom_toolbar.__get__(repl, type(repl))
         repl._prompt_message = cli.Repl._prompt_message.__get__(repl, type(repl))
+        repl._prompt_rail = cli.Repl._prompt_rail.__get__(repl, type(repl))
         repl._border_plain = cli.Repl._border_plain.__get__(repl, type(repl))
         return repl
 
@@ -203,20 +211,46 @@ class TestInputBox:
         ui.width = 30
         assert "^C stop" not in repl._border_plain()
 
-    def test_the_bottom_edge_is_a_rule_with_no_corners(self):
-        """There is no box left for it to be the bottom of.
+    def test_the_bottom_edge_closes_a_box(self):
+        """It corners at both ends, because there is a box to close now.
 
-        It closed a left edge coming down the composer once. That edge went
-        -- a single │ beside the caret with nothing above it reads as a
-        stray mark -- so the corner had nothing to turn from. What is left
-        is a rule: the seam between the transcript and what you are
-        typing, with the status set into it."""
+        It was a bare rule for a while, and correctly so: the composer had
+        no top edge, so a ╰ turned a corner off nothing and read as a stray
+        mark. The composer draws its opening edge again -- inside
+        prompt_toolkit's own region, where it is erased with the input
+        rather than stranded in the scrollback -- so the two of them are one
+        box with the status set into its base."""
         ui = UI()
         ui.g = Glyphs(True)
         ui.width = 60
         border = self._repl(ui)._border_plain()
-        assert border.startswith("─") and border.endswith("─")
-        assert not set(border) & set("╰╯╭╮│")
+        assert border.startswith("╰") and border.endswith("╯")
+        assert "╭" not in border and "╮" not in border
+
+    def test_the_composer_opens_the_box_it_closes(self, monkeypatch):
+        """Top edge, left rail and right rail, all inside the region
+        prompt_toolkit erases when the line is accepted."""
+        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
+        ui = UI()
+        ui.g = Glyphs(True)
+        ui.width = 60
+        repl = self._repl(ui)
+        top, caret = repl._prompt_message().value.split("\n")
+        assert cell_len(_plain(top)) == 60
+        assert _plain(top).startswith("╭") and _plain(top).endswith("╮")
+        assert _plain(caret).startswith("│")
+        assert _plain(repl._prompt_rail().value) == "│"
+
+    def test_a_terminal_without_the_glyphs_gets_no_box(self, monkeypatch):
+        """`+-----+` around a live buffer is noise, not a frame -- and the
+        bottom edge on those terminals is a rule of dashes, so there would
+        be nothing for the corners to agree with."""
+        monkeypatch.setattr(cli, "is_dumb_terminal", lambda: False)
+        ui = ascii_ui()
+        ui.width = 60
+        repl = self._repl(ui)
+        assert "\n" not in repl._prompt_message().value
+        assert repl._prompt_rail().value == ""
 
 
 class TestPanelsAndRules:

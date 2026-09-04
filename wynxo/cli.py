@@ -56,6 +56,7 @@ from .scope import Mode, Scope, resolve as resolve_scope
 from .status import Status, WARN
 from .tools import build_registry
 from .tools.appcatalog import ApplicationCatalog
+from rich.cells import cell_len
 from rich.text import Text
 
 from .ui import (ACCENT, BAR_ACCENT, FAINT, MUTED, ActivityBar,
@@ -1746,7 +1747,13 @@ class Repl:
             problems.append((state, message, detail))
 
         try:
-            version = await self.client.ping()
+            # The reachability check, not a fact worth keeping. The server's
+            # version went into the header once, where the header dropped it
+            # unread -- and the endpoint is nearly always the same loopback
+            # address, which makes it the definition of something that earns
+            # nothing by being on screen. /endpoint still reports it, on the
+            # occasions somebody is actually choosing one.
+            await self.client.ping()
         except ProviderError as exc:
             status.fail("ollama", self.client.base_url)
             status.close()
@@ -1760,7 +1767,7 @@ class Repl:
                 return False
             self._adopt_endpoint(picked)
             try:
-                version = await self.client.ping()
+                await self.client.ping()
             except ProviderError as exc2:
                 self.ui.error(str(exc2))
                 self.ui.help_block(server_help())
@@ -1802,15 +1809,14 @@ class Repl:
                 status.line(state, message, detail)
         status.close()
 
-        # No wake-up animation and no greeting line. Start-up is one row,
-        # and then the prompt: the companion belongs to the work, and a
-        # character waving before the first question is a splash screen.
-        self.ui.banner(
-            self.config.model,
-            f"{self.client.base_url} (ollama {version})",
-            self.policy.name,
-            str(self.workspace),
-        )
+        # The opening screen: header, rail, the companion at his desk, and
+        # the outline of the box about to open under it. Drawn once and
+        # then scrolled past like any other output -- it is not a layout
+        # the session lives inside, which is what keeps streaming, tool
+        # calls, resizing and the prompt exactly as they were.
+        self.ui.home(self.config.model, str(self.workspace),
+                     mode=self._agent_mode(),
+                     companion=self._companion_state())
         self._start_warming()
         return True
 
@@ -2134,7 +2140,7 @@ class Repl:
                 self._dictation_draft = ""
                 text = await self.prompt_session.prompt_async(
                     self._prompt_message, bottom_toolbar=self._bottom_toolbar,
-                    default=draft)
+                    rprompt=self._prompt_rail, default=draft)
                 # The composer wrote straight to the tty and erased itself,
                 # leaving one newline behind that the console did not see.
                 self.ui.console.wrote_elsewhere(1)
@@ -2564,83 +2570,77 @@ class Repl:
         await self.speaker.say_async(line)
 
     def _prompt_message(self) -> HTML:
-        """Just the caret, in the transcript's own column.
+        """The opening edge of the input box, and the caret inside it.
 
-        This was a full box once: a top border, a left edge, and a bottom
-        edge with the status set into it. The top went first -- a full
-        width of ─ above every prompt, chrome answering chrome. The left
-        edge outlived it, and on screen a single ─ hanging beside the caret
-        with nothing above it reads as a stray mark rather than as the side
-        of anything.
+        Two lines, and both of them live inside prompt_toolkit's own region
+        -- which is the whole reason this can be a box at all. A border
+        *printed* above the prompt would still be there after the composer
+        erased itself on accept, and the scrollback would fill with stranded
+        top edges; this one is redrawn and erased with the input it belongs
+        to, so the transcript never sees it.
 
-        What is left is the caret alone, at column zero, which is exactly
-        where the echoed line puts it. So what you are typing sits in the
-        same column as what it becomes, and the status edge below is the
-        only rule on the screen.
+        The bottom edge is ``_bottom_toolbar``, with the status set into it,
+        and ``_prompt_rail`` closes the right-hand side. Dumb terminals get
+        the caret alone: prompt_toolkit draws no toolbar there, so an
+        opening edge would have nothing to close it.
 
         Re-evaluated on every redraw, so a mid-prompt Ctrl-E shows up at
         once.
         """
-        return HTML('<b><style fg="%s">%s</style></b> '
-                    % (ACCENT, escape(self.ui.g.caret)))
+        caret = '<b><style fg="%s">%s</style></b> ' % (
+            ACCENT, escape(self.ui.g.caret))
+        if is_dumb_terminal() or not self.ui.g.unicode:
+            return HTML(caret)
+        g = self.ui.g
+        edge = escape(g.tl + g.hbar * max(2, self.ui.width - 2) + g.tr)
+        return HTML('<style fg="%s">%s</style>\n<style fg="%s">%s</style> %s'
+                    % (ACCENT, edge, ACCENT, escape(g.vbar), caret))
+
+    def _prompt_rail(self) -> HTML:
+        """The box's right-hand edge, drawn at the end of the input line.
+
+        prompt_toolkit right-aligns this on the row the caret is on, which
+        is the only way to close a box whose middle is a live buffer.
+        """
+        if is_dumb_terminal() or not self.ui.g.unicode:
+            return HTML("")
+        return HTML('<style fg="%s">%s</style>'
+                    % (ACCENT, escape(self.ui.g.vbar)))
 
     def _echo_prompt(self, text: str, note: str = "") -> None:
-        """Put what was asked into the transcript, compactly.
+        """Put what was asked into the transcript.
 
         The composer erases itself when it closes, which is what keeps a
         stranded frame from piling up in the scrollback on every turn. The
         cost is that the question would vanish with it, so it is reprinted
-        here as a single line -- the shape a transcript wants anyway.
+        here -- in the outline the design gives a user message, so the
+        transcript is built from the pieces the opening screen introduced.
         """
         if is_dumb_terminal():
             return
-        body = Text()
-        # The same caret the composer draws, so the line you typed and the
-        # line it becomes are the same shape. It used to be a bare ">",
-        # which is the least distinctive glyph a prompt can have -- and the
-        # queue drain drew its own line with "›", so one concept had two
-        # carets and two renderers.
-        body.append(f"{self.ui.g.caret} ", style=f"bold {ACCENT}")
-        first, *rest = text.splitlines() or [""]
-        body.append(first, style="bold")
-        for line in rest:
-            body.append("\n  " + line, style="bold")
-        if note:
-            body.append(f"   {note}", style=MUTED)
-        # boundary(), not gap(): a typed line already has one blank row
-        # above it from the composer erasing itself, and a queued one has
-        # none, so asking for a single separation made the seam one row on
-        # one path and two on the other. Asking for the seam itself makes
-        # both two, which is also the one place in the transcript worth
-        # spending a second row on -- it is where one exchange ends.
-        # No trailing blank. Every block that follows opens with its own
-        # gap, so adding one here made two: the question and the answer had
-        # two rows between them where every other pair of blocks has one.
-        self.ui.console.boundary()
-        self.ui.console.print(body, overflow="ellipsis", no_wrap=True)
+        self.ui.user_line(text, note)
 
     def _bottom_toolbar(self):
-        """The closing edge of the input box, with the status set into it.
+        """The status bar, and the closing edge of the box you type into.
 
         One line rather than two: a multi-line toolbar does not render on
-        terminals that cannot answer a cursor-position request, and the border
-        is the natural place for the status anyway.
+        terminals that cannot answer a cursor-position request, and the
+        border is the natural place for the status anyway. It corners at
+        both ends, because prompt_toolkit draws this immediately under the
+        input and the composer draws the matching top edge -- so the two of
+        them are one box rather than a rule with a caret above it.
 
-        Frame, status and hint are all palette colours, so the whole box
-        changes with /theme -- the top edge was already accent; making the
-        bottom and the caret the same hue turned a two-tone frame (violet
-        top, cyan bottom) into one object.
+        Frame, status, hints and marks are all palette colours, so the whole
+        thing changes with /theme.
         """
-        from rich.cells import cell_len
-
         g = self.ui.g
         width = max(30, self.ui.width)
         left = self._status_line()
 
-        # "<bl><hbar> " + status + " " + fill + " " + hint + " <hbar><br>"
+        # "<bl><hbar> " + status + " " + fill + " " + hint + " <hbar><hbar><br>"
         def total(status: str, tail: str, fill: int) -> int:
             head = 3 + cell_len(status) + 1 + fill
-            return head + (1 + cell_len(tail) + 3 if tail else 1)
+            return head + (1 + cell_len(tail) + 4 if tail else 2)
 
         # A transient note (Ctrl-E effort changes) replaces the hints for a
         # moment; the hints return once it expires.
@@ -2674,20 +2674,11 @@ class Repl:
         status_style = _ansi_of(MUTED)
         hint_style = _ansi_of(FAINT)
         reset = "\x1b[0m"
-        # A rule, not a corner. ╰ turned a corner off the composer's left
-        # edge, and that edge is gone -- so the corner had nothing above it
-        # to turn from and read as a stray mark. Both ends run out flush
-        # now, and the line is simply the seam between the transcript and
-        # what you are typing.
-        line = f"{frame}{g.hbar}{g.hbar}{reset} {status_style}{left}{reset} " \
+        line = f"{frame}{g.bl}{g.hbar}{reset} {status_style}{left}{reset} " \
             f"{frame}" + g.hbar * fill
         if hint:
             line += f"{reset} {hint_style}{hint}{reset} {frame}{g.hbar}"
-        # Runs out flush rather than turning a corner. With no top edge
-        # there is nothing above the right-hand end for a corner to meet,
-        # and a ╯ with nothing over it is the half-drawn box this design
-        # is trying not to be.
-        line += f"{g.hbar}{reset}"
+        line += f"{g.hbar}{g.br}{reset}"
         return ANSI(line)
 
     def _border_plain(self) -> str:
@@ -2697,11 +2688,17 @@ class Repl:
         return re.sub(r"\x1b\[[0-9;]*m", "", self._bottom_toolbar().value)
 
     def _status_line(self) -> str:
-        """The idle half of the pinned bar.
+        """The idle half of the status bar.
 
         prompt_toolkit renders this immediately below the input, in the same
         place the activity bar occupies while a turn runs -- so the strip is
         there the whole time and only its contents change.
+
+        Three labelled facts, and then the numbers. Which model is
+        answering, what mode it is in and what the companion is doing are
+        true of the session rather than of one message, which is what a
+        status bar is for; the effort level and the context figure are the
+        two that move, so they are the last to be given up.
         """
         used = self.agent.session.token_estimate()
         limit, _ = self._context_limit()
@@ -2718,31 +2715,90 @@ class Repl:
         # was invisible at the prompt and fired on the next thing typed.
         if waiting := len(self.pending):
             pieces.append(f"\u203a {waiting} queued")
-        # Model, effort, context. Three facts, because this line sits under
-        # the prompt for the whole session and anything on it is something
-        # you look past every time you type.
-        #
-        # The block gauge went with the rest of the decoration: "███ high"
-        # spent four cells of solid block on a word that was already next
-        # to it. So did the rate, the token count and the turn duration --
-        # they are the live numbers of a turn that has finished, and the
-        # strip shows them while it runs, which is when they mean anything.
         # The model gets a share of the line, not all of it. A namespaced
         # tag from the hub runs to thirty-odd characters, and at anything
         # under a hundred columns that pushed the effort level, the context
         # figure and every key hint off the border -- so the longest string
-        # on the line, and the only one that never changes, was the one
-        # that survived.
-        pieces += [self.ui.shorten_model(self.config.model,
-                                         max(12, self.ui.width // 3)),
-                   self.policy.name,
-                   f"ctx {100 * used / max(1, limit):.0f}%"]
-        if self.agent.permissions.mode is not Mode.MANUAL:
-            # Not a statistic: a mode where wynxo stops asking before it
-            # writes is worth saying every time you look down.
-            pieces.append(self.agent.permissions.mode.value)
+        # on the line, and the only one that never changes, was the one that
+        # survived.
+        room = max(12, self.ui.width // 3)
+        model = self.ui.shorten_model(self.config.model, room)
+        mode = self._agent_mode()
+        tail = [self.policy.name, f"ctx {100 * used / max(1, limit):.0f}%"]
 
-        return f" {self.ui.g.dot} ".join(pieces)
+        separator = f" {self.ui.g.dot} "
+
+        def joined(labelled: bool) -> str:
+            parts = pieces + [f"model: {model}" if labelled else model] + tail
+            if mode != "agent":
+                # Not a statistic: a mode where wynxo stops asking before
+                # it writes is worth saying every time you look down, at
+                # every width. It goes in the core, not in the optional
+                # half of the line.
+                parts.append(f"mode: {mode}" if labelled else mode)
+            return separator.join(p for p in parts if p)
+
+        # The label goes before the value does. "model:" is seven cells of
+        # saying what everyone can already see, and at forty columns those
+        # seven were the difference between the line ending in "ctx 11%"
+        # and ending in "ctx " -- which is the one thing on it that has to
+        # survive, because it is the number that moves.
+        core = joined(True)
+        if cell_len(core) > self.ui.width - self.LABEL_RESERVE:
+            core = joined(False)
+
+        # What is left is decoration: the word "agent", which is only ever
+        # said when nothing has been changed, and what the companion is
+        # doing. Both are the shape the design asks for and both are the
+        # least urgent things on the line, so they are added last and only
+        # where there is room left for the hints beside them.
+        extra = ([f"mode: {mode}"] if mode == "agent" else []) + \
+            [f"companion: {self._companion_state()}"]
+        budget = self.ui.width - self.STATUS_RESERVE
+        for piece in extra:
+            if cell_len(core) + cell_len(separator) + cell_len(piece) > budget:
+                break
+            core += separator + piece
+        return core
+
+    STATUS_RESERVE = 22
+    """Cells the status line leaves for the closing edge and the stop hint.
+
+    The bar has to hold "^C stop" at any width it is ever drawn at, and the
+    two optional facts are the only things on the line that can be dropped
+    to make that true."""
+
+    LABEL_RESERVE = 10
+    """Where the status line stops being able to afford its labels.
+
+    The same margin ``_bottom_toolbar`` trims at, so the choice is made
+    here, by dropping a word nobody needs, rather than there, by cutting
+    the line in the middle of a number."""
+
+    def _agent_mode(self) -> str:
+        """The mode, for the status bar. "agent" unless it is something
+        the user has changed and would want reminding of."""
+        mode = getattr(getattr(self.agent, "permissions", None), "mode", None)
+        if mode is not None and mode is not Mode.MANUAL:
+            return mode.value
+        return "agent"
+
+    def _companion_state(self) -> str:
+        """What the companion is doing, read from the callbacks that know.
+
+        A view, not a second copy. TerminalCallbacks derives it from the
+        agent's task state and the running tool; asking it rather than
+        keeping our own is what stops the status bar from cheerfully saying
+        "coding" a minute after the turn failed.
+        """
+        callbacks = getattr(self, "callbacks", None)
+        if callbacks is None:
+            return "ready"
+        try:
+            state = callbacks._companion_state()
+        except Exception:                              # noqa: BLE001
+            return "ready"
+        return "ready" if state == companion.State.IDLE.value else state
 
     async def _drain_queue(self) -> bool:
         """Run whatever was typed during the turn, oldest first.
@@ -3530,9 +3586,9 @@ class Repl:
         self.callbacks.journal = self.journal
 
         self.ui.clear()
-        self.ui.banner(self.config.model, self.client.base_url,
-                       self.policy.name, str(self.workspace))
-        self.ui.console.print()
+        self.ui.home(self.config.model, str(self.workspace),
+                     mode=self._agent_mode(),
+                     companion=self._companion_state())
         self.ui.info("new chat -- memory kept, history and undo reset")
         return True
 

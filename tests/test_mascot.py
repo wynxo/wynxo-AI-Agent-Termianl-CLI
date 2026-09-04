@@ -99,22 +99,48 @@ class TestEveryCellIsSafeInALineOfText:
 class TestItIsOneCharacter:
     def test_every_frame_keeps_the_ears_and_the_laptop(self):
         """The silhouette is the character. Written as one base with rows
-        edited, so a state cannot quietly become a different animal."""
+        edited, so a state cannot quietly become a different animal.
+
+        Searched, not indexed. These used to name the row the laptop was
+        on, and when the drawing grew a row every state failed at once --
+        which said the sprite had changed size, not that it had stopped
+        being the same character, and that is the only thing worth failing
+        over here.
+        """
         for state, index, pixels in _frames():
             where = f"{state.value}[{index}]"
-            assert set(pixels[10]) <= set(".LfC"), f"{where}: the deck"
-            assert "L" in pixels[8], f"{where}: no laptop"
-            assert "F" in pixels[3], f"{where}: no head"
+            body = "".join(pixels)
             assert "F" in pixels[0] + pixels[1], f"{where}: no ears"
+            assert "F" in pixels[3], f"{where}: no head"
+            assert "L" in body, f"{where}: no laptop"
+            assert "P" in body, f"{where}: nothing of him showing"
+
+    def test_the_screen_is_always_inside_the_laptop(self):
+        """A lit pixel loose on the desk is a bug you only see in motion:
+        the screen contents animate per state, and a row edited a column
+        wide leaves them glowing beside the machine rather than in it."""
+        for state, index, pixels in _frames():
+            for row, line in enumerate(pixels):
+                if set(line) & set("SGR"):
+                    assert set(line) <= set(".fLKSGRC"), \
+                        f"{state.value}[{index}] row {row}: {line}"
 
     def test_every_frame_has_both_arms(self):
         """The arms are what the sprite grew four columns and a row for. A
-        state that drops one has the character reaching for something, which
-        is a thing none of them mean."""
+        state that drops one has the character reaching for something,
+        which is a thing none of them mean.
+
+        Looked for anywhere below the head rather than on one named row.
+        The arms move between states -- a hand goes up to the face while
+        he thinks -- so the row they cross is not a constant and never was.
+        """
+        half = sprite.WIDTH // 2
         for state, index, pixels in _frames():
-            shoulders = pixels[7]
-            assert shoulders[:9].count("f") and shoulders[9:].count("f"), \
-                f"{state.value}[{index}]: {shoulders}"
+            below = pixels[8:]
+            assert any("f" in row[:half] for row in below), \
+                f"{state.value}[{index}]: no left arm"
+            assert any("f" in row[half:] for row in below), \
+                f"{state.value}[{index}]: no right arm"
 
     def test_the_paws_are_somewhere_in_every_frame(self):
         """On the near edge, up on the deck, or at the face while thinking

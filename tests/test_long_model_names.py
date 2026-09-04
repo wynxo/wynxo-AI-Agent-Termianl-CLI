@@ -99,7 +99,7 @@ class TestTheStatusLineItselfShortens:
     """The shortener is only worth having if the line that competes for the
     space actually calls it."""
 
-    def _status(self, width, model):
+    def _status(self, width, model, mode=None):
         from wynxo.effort import resolve
         from wynxo.scope import Mode
 
@@ -113,15 +113,49 @@ class TestTheStatusLineItselfShortens:
         repl.callbacks = None
         repl.agent = types.SimpleNamespace(
             session=types.SimpleNamespace(token_estimate=lambda: 3600),
-            permissions=types.SimpleNamespace(mode=Mode.MANUAL))
+            permissions=types.SimpleNamespace(mode=mode or Mode.MANUAL))
         repl._context_limit = lambda: (32768, "num_ctx")
-        repl._status_line = cli.Repl._status_line.__get__(repl, cli.Repl)
+        for margin in ("STATUS_RESERVE", "LABEL_RESERVE"):
+            setattr(repl, margin, getattr(cli.Repl, margin))
+        for name in ("_status_line", "_agent_mode", "_companion_state"):
+            setattr(repl, name, getattr(cli.Repl, name).__get__(repl, cli.Repl))
         return repl._status_line()
 
     def test_a_narrow_terminal_gets_a_shortened_name(self):
         line = self._status(60, LONG)
         assert "huihui_ai/" not in line, line
         assert "27b" in line and "high" in line and "ctx 11%" in line
+
+    def test_the_label_goes_before_the_context_figure_does(self):
+        """"model:" is seven cells of saying what everyone can already see.
+        At forty columns those seven were the difference between the line
+        ending in "ctx 11%" and ending in "ctx " -- and the percentage is
+        the number that moves, which is the whole reason it is there."""
+        for width in (36, 40, 44):
+            line = self._status(width, LONG)
+            assert "ctx 11%" in line, (width, line)
+            assert "model:" not in line, (width, line)
+        assert "model:" in self._status(80, LONG)
+
+    def test_a_mode_that_stops_asking_is_never_dropped(self):
+        """A mode where wynxo writes without asking first is not a
+        statistic. It is worth saying every time you look down, at every
+        width -- so it sits with the numbers and not with the decoration."""
+        from wynxo.scope import Mode
+
+        for width in (36, 40, 60, 120):
+            line = self._status(width, LONG, mode=Mode.AUTO)
+            assert Mode.AUTO.value in line, (width, line)
+
+    def test_the_labelled_extras_give_way_before_the_numbers_do(self):
+        """`mode` and `companion` are true of the session and the effort
+        level and the context figure are the two things that move, so on a
+        line too short for all five it is the labels that go."""
+        narrow = self._status(50, LONG)
+        assert "high" in narrow and "ctx 11%" in narrow
+        assert "companion:" not in narrow
+        wide = self._status(200, LONG)
+        assert "mode: agent" in wide and "companion: ready" in wide
 
     def test_a_wide_terminal_keeps_the_whole_name(self):
         assert LONG in self._status(120, LONG)

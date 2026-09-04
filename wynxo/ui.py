@@ -567,6 +567,12 @@ def _lexer(language: str):
         return None
 
 
+def _version() -> str:
+    from . import __version__
+
+    return f"v{__version__}"
+
+
 class UI:
     def __init__(self, theme: str = "purple", show_thinking: bool = False):
         self.console = SafeConsole(
@@ -689,6 +695,49 @@ class UI:
         self.console.print(line, overflow="ellipsis", no_wrap=True)
         self.console.print()
 
+    def home(self, model: str, workspace: str, *, mode: str = "agent",
+             companion: str = "ready", version: str = "") -> None:
+        """The application's opening screen, drawn once.
+
+        The header, the navigation rail, the companion at his desk, the
+        greeting, the commands worth knowing and the outline of the box you
+        are about to type into -- one composition, measured to the terminal
+        it landed in.
+
+        It gives way rather than degrading. A terminal too narrow for the
+        illustration gets the conversation column at full width, one too
+        narrow for the rail loses that too, and a pipe or a TERM=dumb
+        console gets ``banner()`` -- one line, the same facts, no chrome
+        that cannot be drawn where it is going.
+        """
+        from . import shell
+
+        if not self.can_draw_shell():
+            self.banner(model, "", "", workspace)
+            return
+        self.refresh_size()
+        self.console.width = self.width
+        self.console.print()
+        self.console.print(shell.home(
+            self, model=model, version=version or _version(),
+            mode=mode, companion=companion))
+        self.console.print()
+
+    def can_draw_shell(self) -> bool:
+        """Whether the composed screen can be drawn honestly here.
+
+        Three ways it cannot. A dumb terminal has no colour and no redraw;
+        a redirected stream is a file, and a screenful of box characters in
+        a log is worse than useless; and a phone-width terminal has no room
+        for two columns, so the composition would be a stack of boxes
+        rather than a layout. Each of those gets ``banner()`` -- the same
+        facts on one line.
+        """
+        from .platforms import is_dumb_terminal
+
+        return not (is_dumb_terminal() or not self.console.is_terminal
+                    or self.narrow)
+
     def clear(self) -> None:
         """Clear the screen and scrollback, so a session starts on a clean page.
 
@@ -784,6 +833,35 @@ class UI:
                 out.append(pad + piece, style=style)
         if out.plain.strip():
             self.console.print(out)
+
+    def user_line(self, text: str, note: str = "") -> None:
+        """What was asked, in the outline the design gives a user message.
+
+        The composer erases itself when it closes, which is what keeps a
+        stranded frame out of the scrollback on every turn. The cost is that
+        the question would vanish with it, so it is reprinted here -- and
+        reprinted as the same shape the home screen draws, so a transcript
+        is made of the pieces the opening composition introduced rather than
+        of a different set that happen to share its colours.
+        """
+        from . import shell
+
+        self.console.boundary()
+        if self.narrow or not self.g.unicode:
+            # An outline costs two rows and four columns. On a phone-width
+            # terminal that is the difference between the question fitting
+            # on one line and not, so it goes.
+            body = Text()
+            body.append(f"{self.g.caret} ", style=f"bold {ACCENT}")
+            first, *rest = text.splitlines() or [""]
+            body.append(first, style="bold")
+            for line in rest:
+                body.append("\n  " + line, style="bold")
+            if note:
+                body.append(f"   {note}", style=MUTED)
+            self.console.print(body, overflow="ellipsis", no_wrap=True)
+            return
+        self.console.print(shell.user_message(self, text, note))
 
     def _marked(self, marker: str, message: str, style: str) -> None:
         """One message, wrapped so it stays in its own column.
