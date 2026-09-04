@@ -1274,15 +1274,26 @@ class Agent:
         return True
 
     def _checkpoint(self, tool, call) -> None:
-        """Snapshot a file before a tool changes it, so /undo can put it back."""
+        """Snapshot a file before a tool changes it, so /undo can put it back.
+
+        Nothing here may end a turn. This runs before the tool does, on
+        arguments the tool has not validated yet, and the worst it can
+        honestly cost is the undo for one call -- the tool's own check is
+        what tells the model its path was wrong. It did end turns: a model
+        that put whitespace in `path` -- a padded field, a template that
+        rendered to nothing -- raised ValueError out of resolve_path, past
+        a handler that only expected PermissionError and OSError, and the
+        whole turn died on a mistake the tool would have reported in a
+        sentence.
+        """
         if call.name not in ("write_file", "edit_file", "multi_edit"):
             return
         raw = str(call.arguments.get("path", ""))
-        if not raw:
+        if not raw.strip():
             return
         try:
             path = tool.resolve_path(raw)
-        except (PermissionError, OSError):
+        except (PermissionError, OSError, ValueError):
             return
         self.checkpoints.capture(path, call.name, label=tool.relative(path))
 
@@ -1293,7 +1304,11 @@ class Agent:
 
             try:
                 path = self.tools.get(name).resolve_path(str(args.get("path", "")))
-            except (PermissionError, AttributeError):
+            except (PermissionError, AttributeError, OSError, ValueError):
+                # Same rule as _checkpoint: this is a courtesy shown before
+                # the tool runs, so a bad path costs the preview and
+                # nothing else. The user is still asked, and the tool still
+                # says what was wrong with it.
                 return ""
             content = str(args.get("content", ""))
             if path.exists():
