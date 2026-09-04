@@ -89,6 +89,28 @@ class PermissionStore:
             )
         return None
 
+    @staticmethod
+    def _as_asked(tool_name: str, args: dict) -> tuple[str, dict]:
+        """What the user is really being asked about.
+
+        A launch that carries a command is a command, whatever the tool is
+        called. It runs outside every guard the shell tool has -- no output
+        ceiling, no workspace, no read-only test -- in a window wynxo does
+        not own, so it is asked about on the same terms and never waved
+        through as "just opening an application".
+
+        Both the asking and the remembering go through here. They did not
+        once: needs_prompt() did the rewrite and remember() did not, so
+        "always allow" on `konsole running python3 main.py` remembered the
+        *tool* -- it asked again for that same command every time, and in
+        exchange granted silent launching of every other application on the
+        machine, which is not what anyone approved.
+        """
+        if tool_name == "launch_application" and str(
+                args.get("command", "")).strip():
+            return "shell", {"command": args["command"]}
+        return tool_name, args
+
     def needs_prompt(self, tool_name: str, mutating: bool, args: dict,
                      internal: bool = False) -> bool:
         if self.mode is Mode.YOLO:
@@ -96,15 +118,7 @@ class PermissionStore:
         if not mutating or internal:
             return False
 
-        # A launch that carries a command is a command, whatever the tool
-        # is called. It runs outside every guard the shell tool has -- no
-        # output ceiling, no workspace, no read-only test -- in a window
-        # wynxo does not own, so it is asked about on the same terms and
-        # never waved through as "just opening an application".
-        launching_a_command = (tool_name == "launch_application"
-                               and str(args.get("command", "")).strip())
-        if launching_a_command:
-            tool_name, args = "shell", {"command": args["command"]}
+        tool_name, args = self._as_asked(tool_name, args)
 
         if self.mode in (Mode.AUTO, Mode.REVIEW):
             # Edits in scope go through; anything that runs a command or
@@ -129,6 +143,7 @@ class PermissionStore:
         return tool_name not in self.always_allowed_tools
 
     def remember(self, tool_name: str, args: dict) -> None:
+        tool_name, args = self._as_asked(tool_name, args)
         if tool_name == "shell":
             command = str(args.get("command", "")).strip()
             # Remember the exact command, not "all shell commands" -- approving

