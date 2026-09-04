@@ -1325,6 +1325,12 @@ class Agent:
                 [*(f"-{line}" for line in old.splitlines()[:20]),
                  *(f"+{line}" for line in new.splitlines()[:20])]
             )
+        if name == "control_computer":
+            # The keystrokes themselves, spelled out. Approving desktop
+            # input on the strength of the word "control_computer" is not
+            # approving anything: what matters is the text that is about to
+            # be typed and where it is going.
+            return _preview_steps(args)
         return ""
 
     async def _repair_tool_calls(self, turn: ParsedTurn) -> ParsedTurn | None:
@@ -2136,3 +2142,35 @@ def _wire_calls(turn: ParsedTurn) -> list[dict]:
         {"function": {"name": c.name, "arguments": c.arguments}}
         for c in turn.tool_calls
     ] or []
+
+
+def _preview_steps(args: dict) -> str:
+    """What control_computer is about to do, in the order it will do it."""
+    window = str(args.get("window", "")).strip()
+    lines = [f"into: {window}" if window
+             else "into: whatever has focus (no window named)"]
+    steps = args.get("steps")
+    if not isinstance(steps, list):
+        return "\n".join(lines)
+    for step in steps[:24]:
+        if not isinstance(step, dict):
+            continue
+        action = str(step.get("action", "?"))
+        text = str(step.get("text", ""))
+        if action == "type":
+            lines.append(f"  type   {text!r}")
+        elif action == "press":
+            lines.append(f"  press  {text}")
+        elif action == "focus":
+            lines.append(f"  focus  {text!r}")
+        elif action == "click":
+            where = (f" at {step.get('x')},{step.get('y')}"
+                     if step.get("x", -1) >= 0 else "")
+            lines.append(f"  click  {step.get('button', 'left')}{where}")
+        elif action == "move":
+            lines.append(f"  move   {step.get('x')},{step.get('y')}")
+        elif action == "scroll":
+            lines.append(f"  scroll {step.get('amount', 0):+d}")
+        elif action == "wait":
+            lines.append(f"  wait   {step.get('amount', 250)}ms")
+    return "\n".join(lines)

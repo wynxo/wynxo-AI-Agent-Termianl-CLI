@@ -15,6 +15,7 @@ from .search import Glob, Grep
 from .shell import BackgroundPoll, Shell
 from .todo import TodoWrite
 from .apps import LaunchApplication
+from .desktop_tool import ControlComputer, Look
 from .appcatalog import ApplicationCatalog
 from .navigation_tool import NavigateSymbols
 from .references_tool import FindReferences
@@ -91,6 +92,8 @@ def build_registry(
         Grep(workspace, boundary, shield),
         TodoWrite(workspace, boundary, shield),
         LaunchApplication(workspace, boundary, shield, catalog=app_catalog),
+        Look(workspace, boundary, shield),
+        ControlComputer(workspace, boundary, shield),
         NavigateSymbols(workspace, boundary, shield),
         FindReferences(workspace, boundary, shield),
         GitHubRead(workspace, boundary, shield),

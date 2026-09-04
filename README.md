@@ -1136,7 +1136,7 @@ effort-level setting.
 /scope [folder|repo|machine]    what it may touch
 /scope <path>  ·  /cd <path>    work in another directory
 /repo owner/name                clone a GitHub repo and work in it
-/gh ...                  work on a GitHub repo in the cloud (status | open | ls | cat | edit | branch | pr | close)
+/gh ...                  work on a GitHub repo in the cloud (status | open | ls | cat | edit | rm | log | branch | pr | close)
 /undo [n|list]           revert the last file change
 /memory ...              show | add <note> | forget <text> | edit | reload
 /pet ...                 on | off | still | name <x> | voice <x>
@@ -1144,6 +1144,7 @@ effort-level setting.
 /log [tail|list|off]     where this session is being recorded
 /tools                   what the agent can call
 /apps [refresh]          applications this machine has, for "open ..."
+/desktop                 what wynxo can drive on this desktop, and what to install
 /map [rebuild]           the project layout the model is given
 /thinking                show or hide the model's reasoning
 /stream [on|off]         watch tool calls being written

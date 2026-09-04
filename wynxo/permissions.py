@@ -53,6 +53,17 @@ ALWAYS_CONFIRM = re.compile(
 )
 
 
+ALWAYS_ASKS = frozenset({"shell", "control_computer"})
+"""Tools that ask even in auto mode.
+
+Not because they are the dangerous ones -- writing a file is dangerous too
+-- but because they are the ones whose effect leaves no record to look at
+afterwards. Auto mode's bargain is that edits go through *because* the diff
+is right there at the end of the turn. A command that has already run, and
+a keystroke that has already landed in another application, are outside
+that bargain."""
+
+
 @dataclass
 class PermissionStore:
     """Remembers what the user has already said yes to, for this session."""
@@ -125,7 +136,14 @@ class PermissionStore:
             # reaches off the machine still asks. Review mode defers the
             # question rather than skipping it -- the whole diff is put up
             # once the turn finishes.
-            if tool_name != "shell":
+            #
+            # Desktop input is on the asking side for the same reason as a
+            # shell command, and a stronger one: it lands in whatever
+            # application has focus, and there is no diff at the end of the
+            # turn to review. A file edit in auto mode can be read
+            # afterwards and undone. A keystroke sent into somebody's
+            # browser cannot be either.
+            if tool_name not in ALWAYS_ASKS:
                 return False
 
         if tool_name == "shell":

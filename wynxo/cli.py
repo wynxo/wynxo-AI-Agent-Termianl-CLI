@@ -58,7 +58,7 @@ from .tools import build_registry
 from .tools.appcatalog import ApplicationCatalog
 from rich.text import Text
 
-from .ui import (ACCENT, BAR_ACCENT, FAINT, MUTED, ActivityBar,
+from .ui import (ACCENT, BAR_ACCENT, FAINT, GOOD, MUTED, ActivityBar,
                  CodeStreamer, ThoughtStreamer, UI, _ansi_of, plan_steps, sanitise)
 
 def _first_sentence(text: str) -> str:
@@ -465,6 +465,9 @@ COMMAND_LIST: tuple[Command, ...] = (
     Command("/session",
             "this conversation; `list` for the others, `<id>` to pick one up",
             "cmd_session", ("list", "resume")),
+    Command("/desktop",
+            "what wynxo can drive on this desktop, and what to install",
+            "cmd_desktop"),
     Command("/doctor", "check the server and model for problems", "cmd_doctor"),
     Command("/yolo", "stop asking permission for this session", "cmd_yolo"),
     Command("/sessions", "the conversations you can pick up (same as /session "
@@ -3878,6 +3881,69 @@ class Repl:
                 note(WARN, "project map", str(exc))
             return
         self.agent.refresh_system_prompt()
+
+    _DESKTOP_PHRASE = {
+        "type text": "type text", "press keys": "press keys",
+        "move the pointer": "move the pointer", "click": "click",
+        "scroll": "scroll", "list windows": "list windows",
+        "focus a window": "change which window has focus",
+        "screenshot": "take a screenshot",
+    }
+
+    def cmd_desktop(self, args: list[str]) -> bool:
+        """What can actually be driven here, and what is missing.
+
+        The point is that "it did not work" has an answer. Desktop
+        automation fails in ways that look identical from the outside --
+        no display, the wrong session type, a helper not installed, a
+        daemon not running -- and each has a different fix. This names the
+        one that applies.
+        """
+        from .desktop import detect
+
+        backend = detect()
+        self.ui.console.print()
+        if backend.name == "unavailable":
+            self.ui.warn("nothing on this desktop can be driven.")
+            self.ui.detail_line(getattr(backend, "reason", ""), MUTED)
+            self.ui.console.print()
+            return True
+
+        where = f" · {backend.display}" if backend.display else ""
+        self.ui.console.print(
+            Text(f"  {backend.name}{where}", style=f"bold {ACCENT}"))
+
+        # Every capability, present or not, because the absent ones are
+        # what somebody came here to find out about.
+        can = backend.actions()
+        rows = [
+            ("type text", "type"), ("press keys", "press"),
+            ("move the pointer", "move"), ("click", "click"),
+            ("scroll", "scroll"), ("list windows", "windows"),
+            ("focus a window", "focus"), ("screenshot", "screenshot"),
+        ]
+        self.ui.console.print()
+        for label, action in rows:
+            mark = self.ui.g.tick if action in can else self.ui.g.cross
+            style = GOOD if action in can else MUTED
+            line = Text(f"  {mark} ", style=style)
+            line.append(f"{label}", style="" if action in can else MUTED)
+            self.ui.console.print(line)
+
+        missing = [label for label, action in rows if action not in can]
+        if missing:
+            self.ui.console.print()
+            self.ui.detail_line(backend.missing(
+                self._DESKTOP_PHRASE.get(missing[0], missing[0])), MUTED)
+
+        import shutil as _shutil
+        if not _shutil.which("tesseract"):
+            self.ui.detail_line(
+                "Reading text off the screen needs tesseract "
+                "(apt install tesseract-ocr); without it `look` still "
+                "reports the windows and saves a screenshot.", MUTED)
+        self.ui.console.print()
+        return True
 
     def cmd_apps(self, args: list[str]) -> bool:
         """The applications actually discovered on this machine.
