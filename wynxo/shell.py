@@ -492,7 +492,7 @@ def _illustration(ui, show_rail: bool, column_rows: int):
     # poster with a note stuck to it.
     rows_available = min(terminal_height() - HEIGHT_OVERHEAD,
                          column_rows + BALANCE)
-    cells = min(portrait.NATIVE_CELLS, spare,
+    cells = min(portrait.MAX_CELLS, spare,
                 portrait.cells_for(max(0, rows_available)))
     if cells < portrait.MIN_CELLS:
         return None
