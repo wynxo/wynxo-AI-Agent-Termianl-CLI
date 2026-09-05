@@ -112,7 +112,10 @@ class Loaded:
 def same_model(a: str, b: str) -> bool:
     """Whether two model names are the same model."""
     a, b = a.strip().lower(), b.strip().lower()
-    return bool(a) and (a == b or a.split(":")[0] == b.split(":")[0])
+    # An omitted tag means latest, not every size of the same family.
+    def tagged(name: str) -> str:
+        return name if ":" in name.rsplit("/", 1)[-1] else name + ":latest"
+    return bool(a and b) and tagged(a) == tagged(b)
 
 
 def gpu_share(model_size: int, vram: int) -> float:
@@ -130,10 +133,13 @@ def faster_on_gpu(models: list["ModelInfo"], vram: int, current_share: float = 0
     both the terminal UI and the doctor.
     """
     if vram <= 0:
-        return list(models)
+        return []
+    # Unknown sizes cannot support a recommendation. Prefer the largest
+    # model among equally resident candidates, and never suggest a downgrade.
     return sorted(
-        models,
-        key=lambda model: (gpu_share(model.size, vram), -(model.size or 0)),
+        (model for model in models
+         if model.size > 0 and gpu_share(model.size, vram) > current_share),
+        key=lambda model: (gpu_share(model.size, vram), model.size),
         reverse=True,
     )
 

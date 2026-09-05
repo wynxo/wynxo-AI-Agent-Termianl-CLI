@@ -481,7 +481,8 @@ class TestTheConversationPieces:
         after = body[placeholder + 1:]
         # The box's own closing edge, and the three rows of the status bar.
         assert len(after) == 4, after
-        assert after[0].strip().startswith(ui.g.bl)
+        # The illustration may share the composer's closing row.
+        assert ui.g.bl in after[0] and after[0].rstrip().endswith(ui.g.br)
         assert "model:" in after[2] and after[3].strip().endswith(ui.g.br)
 
 

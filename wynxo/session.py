@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -12,6 +13,10 @@ from typing import Any
 
 from .coerce import as_float, as_int, as_list, as_text
 from .config import atomic_write, data_dir
+
+
+def _valid_id(value: str) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]+", value) is not None
 
 
 MIN_WORTH_COMPACTING = 400
@@ -324,6 +329,8 @@ class Session:
     # -- persistence -------------------------------------------------------
 
     def path(self) -> Path:
+        if not _valid_id(self.session_id):
+            raise ValueError("Invalid session id")
         return data_dir() / "sessions" / f"{self.session_id}.json"
 
     def title(self) -> str:
@@ -373,6 +380,7 @@ class Session:
                             "completion_tokens": self.usage.completion_tokens,
                             "requests": self.usage.requests,
                             "tool_calls": self.usage.tool_calls,
+                            "generation_seconds": self.usage.generation_seconds,
                         },
                     },
                     indent=2,
@@ -383,23 +391,25 @@ class Session:
                 self._pruned = True
                 self.prune()
             return path
-        except OSError:
+        except (OSError, ValueError):
             # Never let a full disk or a read-only home directory end a session.
             return None
 
     @classmethod
     def load(cls, session_id: str, workspace: Path) -> "Session | None":
+        if not _valid_id(session_id):
+            return None
         path = data_dir() / "sessions" / f"{session_id}.json"
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             return None
         if not isinstance(data, dict):
             return None
 
         session = cls(
             workspace=workspace,
-            session_id=as_text(data.get("session_id")) or session_id,
+            session_id=session_id,
             created_at=as_float(data.get("created_at"), time.time()),
             compactions=as_int(data.get("compactions")),
             superseded_chars=as_int(data.get("superseded_chars")),
@@ -414,6 +424,7 @@ class Session:
             completion_tokens=as_int(usage.get("completion_tokens")),
             requests=as_int(usage.get("requests")),
             tool_calls=as_int(usage.get("tool_calls")),
+            generation_seconds=max(0.0, as_float(usage.get("generation_seconds"))),
         )
         return session
 
@@ -469,7 +480,9 @@ class Session:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(data, dict):
                     continue
-                session_id = as_text(data.get("session_id")) or path.stem
+                session_id = path.stem
+                if not _valid_id(session_id):
+                    continue
                 if exclude and session_id == exclude:
                     continue
                 messages = [m for m in as_list(data.get("messages"))

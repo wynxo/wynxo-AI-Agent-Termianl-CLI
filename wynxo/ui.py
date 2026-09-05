@@ -173,6 +173,24 @@ definition, in every encoding, so there is no legitimate output to lose.
 U+00A0, the non-breaking space, is just past the end and is left alone."""
 
 
+def elide_tail(text: str, room: int, ellipsis: str = "…") -> str:
+    """Keep a useful suffix without exceeding the terminal cell budget."""
+    if room <= 0:
+        return ""
+    if cell_len(text) <= room:
+        return text
+    marker = ellipsis if cell_len(ellipsis) <= room else "." * room
+    budget = room - cell_len(marker)
+    tail = ""
+    for char in reversed(text):
+        size = cell_len(char)
+        if size > budget:
+            break
+        tail = char + tail
+        budget -= size
+    return marker + tail
+
+
 def _chunks(word: str, room: int):
     """A word too wide for any line, cut into pieces that fit."""
     piece, width = "", 0
@@ -712,6 +730,7 @@ class UI:
         """
         from . import shell
 
+        self.refresh_size()
         if not self.can_draw_shell():
             self.banner(model, "", "", workspace)
             return
@@ -720,7 +739,7 @@ class UI:
         self.console.print()
         self.console.print(shell.home(
             self, model=model, version=version or _version(),
-            mode=mode, companion=companion))
+            mode=mode, companion=companion, workspace=workspace))
         self.console.print()
 
     def can_draw_shell(self) -> bool:
@@ -767,14 +786,16 @@ class UI:
         the ones that went.
         """
         name = name.strip()
-        if room <= 0 or cell_len(name) <= room:
+        if room <= 0:
+            return ""
+        if cell_len(name) <= room:
             return name
         if "/" in name and cell_len(bare := name.rsplit("/", 1)[-1]) <= room:
             return bare
         name = name.rsplit("/", 1)[-1]
         if cell_len(name) <= room:
             return name
-        return self.g.ellipsis + name[-(max(1, room - 1)):]
+        return elide_tail(name, room, self.g.ellipsis)
 
     def shorten_path(self, path: str) -> str:
         """~/code/proj rather than /home/you/code/proj, and never the full
@@ -782,7 +803,7 @@ class UI:
         import os
 
         home = os.path.expanduser("~")
-        if path.startswith(home):
+        if path == home or path.startswith(home + os.sep):
             path = "~" + path[len(home):]
         budget = max(18, self.width // 3)
         if cell_len(path) <= budget:
@@ -801,7 +822,7 @@ class UI:
         tail = parts[-1] if parts else path
         if cell_len(tail) <= budget:
             return tail
-        return self.g.ellipsis + tail[-(budget - cell_len(self.g.ellipsis)):]
+        return elide_tail(tail, budget, self.g.ellipsis)
 
     def rule(self, label: str = "") -> None:
         self.console.print(Rule(label, style=MUTED, characters=self.g.hbar))

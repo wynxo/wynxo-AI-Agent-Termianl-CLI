@@ -747,8 +747,10 @@ class TestLeavingAConversationLeavesItBehind:
         repl._leave_conversation()
         self._assert_left_behind(repl, todo)
 
-    def test_resume_drops_it_and_restores_the_conversation(self):
+    def test_resume_drops_it_and_restores_the_conversation(self, tmp_path, monkeypatch):
         from wynxo.session import Session
+
+        monkeypatch.setattr("wynxo.session.data_dir", lambda: tmp_path)
 
         workspace = self._workspace()
         saved = Session(workspace=workspace)

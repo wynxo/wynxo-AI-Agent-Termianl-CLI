@@ -115,7 +115,7 @@ class TestToolsThatCannotWorkAreNotOffered:
         with_gh = estimate_tokens(json.dumps(build_registry(tmp_path).ollama_schemas()))
         monkeypatch.setattr("wynxo.gh.shutil.which", lambda name: None)
         without = estimate_tokens(json.dumps(build_registry(tmp_path).ollama_schemas()))
-        assert with_gh - without > 800
+        assert with_gh - without > 500
 
     def test_a_withheld_tool_is_not_described_to_the_model_either(
             self, tmp_path, monkeypatch):

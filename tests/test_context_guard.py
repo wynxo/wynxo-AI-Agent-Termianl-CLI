@@ -13,7 +13,7 @@ import asyncio
 import pytest
 
 from wynxo.session import estimate_tokens
-from wynxo.tools.files import MIN_READ_TOKENS, READ_SHARE, ReadFile, ReadInput
+from wynxo.tools.files import READ_SHARE, ReadFile, ReadInput
 
 
 @pytest.fixture
@@ -80,7 +80,9 @@ class TestNotInterfering:
         """A read cut to nothing teaches the model only that reading does
         not work, and it tries something worse."""
         result = read(big, context_left=1)
-        assert estimate_tokens(result.output) >= MIN_READ_TOKENS * 0.5
+        # Even an exhausted budget returns one useful line and a continuation,
+        # rather than forcing 500 tokens into a one-token allowance.
+        assert "offset=1" in result.output
         assert "function_0" in result.output
 
     def test_a_trimmed_read_still_succeeds(self, big):

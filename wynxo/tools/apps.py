@@ -127,7 +127,7 @@ class LaunchApplication(Tool):
             display=(f"launched {entry.name}"
                      + (f" running {command}" if command else "")),
             said=did + ".",
-            terminal=bool(command),
+            terminal=True,
             status="launched",
             application=entry.name,
             source=entry.source,

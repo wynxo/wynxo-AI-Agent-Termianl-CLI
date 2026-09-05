@@ -174,11 +174,21 @@ class TestTheApplicationCatalogOnWindows:
 
 
 class TestTerminalAndShell:
-    def test_the_shell_is_cmd(self):
+    def test_the_shell_falls_back_to_cmd(self):
         from wynxo import platforms
 
-        with patch.object(platforms.sys, "platform", "win32"):
+        with (patch.object(platforms, "is_windows", return_value=True),
+              patch.object(platforms.shutil, "which", return_value=None),
+              patch.dict(platforms.os.environ, {"COMSPEC": "cmd.exe"})):
             assert platforms.default_shell() == ("cmd.exe", ["/c"])
+
+    def test_the_shell_prefers_powershell_when_available(self):
+        from wynxo import platforms
+
+        with (patch.object(platforms, "is_windows", return_value=True),
+              patch.object(platforms.shutil, "which", return_value="pwsh")):
+            assert platforms.default_shell() == (
+                "pwsh", ["-NoProfile", "-NonInteractive", "-Command"])
             assert platforms.is_windows()
 
     def test_rich_is_told_to_use_modern_vt_output(self):

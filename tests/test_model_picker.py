@@ -5,15 +5,12 @@ must say which models can actually drive an agent."""
 import json
 
 import httpx
-import pytest
 from unittest.mock import AsyncMock
 
 from prompt_toolkit import PromptSession
 
 from wynxo.config import Config, Endpoint
 from wynxo.provider import OllamaClient, inspect_all
-from wynxo.ui import UI
-from wynxo.wizard import _badge, _humanise_context, _print_model_rows, ask_model
 
 CATALOGUE = {
     "qwen3-coder:30b": (18_600_000_000, "30.5B", "Q4_K_M", ["completion", "tools"], 262144),

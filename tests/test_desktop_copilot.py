@@ -95,15 +95,15 @@ class TestATerminalCanBeGivenSomethingToRun:
                   command="python3 main.py")
         assert [name for name, _ in machine["started"]] == ["kcalc", "firefox"]
         assert machine["argv"] == [
-            ["/usr/bin/konsole", "-e", "bash", "-c",
-             "python3 main.py; exec bash"]]
+            ["/usr/bin/konsole", "--separate", "--hold", "-e", "bash", "-lc",
+             f"cd -- {tmp_path} && python3 main.py"]]
 
     async def test_the_window_stays_open_afterwards(self, tmp_path, machine):
         """"Open a terminal and run this" means the window is there to be
         read. Left to exit, a command taking a second flashes a window and
         closes it, and the output is gone before anyone sees it."""
         await act(tmp_path, machine, ["konsole"], command="echo hello")
-        assert machine["argv"][0][-1].endswith("; exec bash")
+        assert "--hold" in machine["argv"][0]
 
     async def test_the_user_is_told_what_was_run(self, tmp_path, machine):
         out, _ = await act(tmp_path, machine, ["konsole"],

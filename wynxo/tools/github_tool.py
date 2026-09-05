@@ -98,17 +98,18 @@ class GitHubRead(Tool):
         listing = dirs + files
         notes: list[str] = []
         if tree.truncated:
-            notes.append("INCOMPLETE: GitHub truncated this tree; absence from this listing does not prove a path is absent. Use search or stat.")
+            notes.append("INCOMPLETE: GitHub truncated this tree. Do not conclude a file is absent from this listing. Use search or stat.")
         if tree.malformed:
-            notes.append(f"{tree.malformed} unusable tree entries were omitted.")
+            notes.append(f"{tree.malformed} entries were unusable and omitted; this listing is incomplete.")
         shown = listing[:MAX_TREE_LINES]
         if len(listing) > MAX_TREE_LINES:
             notes.append(f"Showing {MAX_TREE_LINES} of {len(listing)} paths. Narrow with 'path' or use search.")
         body = [f"{args.repo}@{branch}" + (f" under {prefix}/" if prefix else "")]
         if notes:
             body += ["", *notes, ""]
-        body += shown
-        return ToolResult.success("\n".join(body), truncated=tree.truncated, complete=not tree.truncated,
+        body += [f"{len(files)} files", *shown]
+        complete = not (tree.truncated or tree.malformed or len(listing) > MAX_TREE_LINES)
+        return ToolResult.success("\n".join(body), truncated=tree.truncated, complete=complete,
                                   files=len(files), shown=len(shown), malformed=tree.malformed)
 
     def _stat(self, owner, repo, branch, args) -> ToolResult:
@@ -242,7 +243,7 @@ class GitHubWrite(Tool):
                     kind="needs_base_sha", sha=current.sha)
             if args.base_sha != current.sha:
                 return ToolResult.failure(
-                    f"{args.path} changed on {args.branch} since it was read: expected {args.base_sha[:12]}, found {current.sha[:12]}. Nothing was written.",
+                    f"{args.path} changed on {args.branch} since it was read: expected {args.base_sha[:12]}, found {current.sha[:12]}. Nothing was written. Read it again and reapply your changes to the current content.",
                     kind="conflict", expected=args.base_sha, actual=current.sha, path=args.path)
             if current.text == args.content:
                 return ToolResult.success(f"{args.path} on {args.branch} already has exactly this content; nothing to commit.",

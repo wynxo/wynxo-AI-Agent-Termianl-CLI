@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rich.box import Box
+from rich.box import ASCII, Box
 from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
@@ -269,7 +269,7 @@ def assistant_card(ui, text: str) -> Panel:
     for index, line in enumerate(text.splitlines()):
         if index:
             body.append("\n")
-        body.append(_glyphs(ui, line), style=palette.text)
+        body.append(_glyphs(ui, line), style=f"bold {palette.text}" if index == 0 else palette.muted)
     return Panel(body, box=_box(ui), border_style=palette.faint,
                  padding=(0, 1))
 
@@ -286,7 +286,7 @@ def suggestions(ui, items) -> Group:
     grid.add_column(width=11)
     grid.add_column(ratio=1)
     for command, what in items:
-        grid.add_row(Text(command, style=palette.accent_dim),
+        grid.add_row(Text(command, style=f"bold {palette.accent}"),
                      Text(what, style=palette.muted))
     return Group(Text("suggestions:", style=palette.faint), grid)
 
@@ -357,6 +357,13 @@ def status_text(ui, metrics: Metrics) -> Text:
             out.append(f"   {ui.g.dot}   ", style=palette.faint)
         out.append(f"{label}: ", style=palette.faint)
         out.append(value, style=palette.muted)
+    room = max(1, ui.width - 11)  # frame, padding, gap, and state marks
+    if out.cell_len > room:
+        suffix = f" {ui.g.dot} {metrics.mode} {ui.g.dot} {metrics.companion}"
+        model_room = max(1, room - Text(suffix).cell_len - 7)
+        out = Text("model: ", style=palette.faint, no_wrap=True, overflow="crop")
+        out.append(ui.shorten_model(metrics.model, model_room), style=palette.text)
+        out.append(suffix, style=palette.muted)
     return out
 
 
@@ -373,15 +380,15 @@ def marks(ui, roles) -> Text:
 
 # -- the home screen ---------------------------------------------------------
 
-GREETING = ("Hey! 👋",
-            "What do you want to do? I can help with coding,",
-            "tools, files, or just chat. Let me know!")
+GREETING = ("Let's build something.",
+            "Bring an idea, a bug, or a question.",
+            "We'll work through it together.")
 
 
 def home(ui, *, model: str, version: str, mode: str = "agent",
          companion: str = "ready", greeting=GREETING,
          placeholder: str = "Type a message or command...",
-         items=DEFAULT_SUGGESTIONS) -> Group:
+         items=DEFAULT_SUGGESTIONS, workspace: str = "") -> Group:
     """The whole screen, composed once.
 
     The illustration is the subject and everything else is measured around
@@ -396,6 +403,12 @@ def home(ui, *, model: str, version: str, mode: str = "agent",
     box sits on the illustration's baseline rather than floating halfway up
     a column with a dozen dead rows under it.
     """
+    # A normal 24-row terminal needs space for the real composer too.
+    # The illustrated layout is reserved for screens that can hold it.
+    if terminal_height() < 34:
+        return compact_home(ui, model=model, version=version, mode=mode,
+                            companion=companion, workspace=workspace,
+                            greeting=greeting, items=items)
     show_rail = ui.width >= RAIL_FROM
     column_rows = _column_rows(greeting, items)
     art = _illustration(ui, show_rail, column_rows)
@@ -428,7 +441,36 @@ def home(ui, *, model: str, version: str, mode: str = "agent",
     row.append(column)
     body.add_row(*row)
 
-    return Group(header(ui, version), Text(""), body, Text(""),
+    return Group(header(ui, version), workspace_line(ui, workspace), Text(""),
+                 body, Text(""), status_bar(ui, Metrics(
+                     model=model, mode=mode, companion=companion)))
+
+
+def workspace_line(ui, workspace: str) -> Text:
+    line = Text(no_wrap=True, overflow="ellipsis")
+    if workspace:
+        line.append("  workspace  ", style=ui.palette.faint)
+        line.append(ui.shorten_path(workspace), style=ui.palette.muted)
+    return line
+
+
+def compact_home(ui, *, model, version, mode, companion, workspace,
+                 greeting, items) -> Group:
+    """An uncluttered welcome that leaves room to type on short screens."""
+    palette = ui.palette
+    title = Text("  wynxo", style=f"bold {palette.accent}")
+    title.append(f"  {version}", style=palette.faint)
+    title.append(f"   {ui.g.dot}   your local ai companion", style=palette.muted)
+    welcome = Text("  " + _glyphs(ui, greeting[0] if greeting else "Welcome."),
+                   style=f"bold {palette.text}")
+    shortcuts = Text("  ", no_wrap=True, overflow="ellipsis")
+    for index, (command, _) in enumerate(items):
+        if index:
+            shortcuts.append("   ", style=palette.faint)
+        shortcuts.append(command, style=palette.accent)
+    return Group(title, workspace_line(ui, workspace), Text(""), welcome,
+                 Text("  Describe a task to get started.", style=palette.muted),
+                 Text(""), shortcuts, Text(""),
                  status_bar(ui, Metrics(model=model, mode=mode,
                                         companion=companion)))
 
@@ -503,7 +545,7 @@ def _illustration(ui, show_rail: bool, column_rows: int):
 # -- shared helpers ----------------------------------------------------------
 
 def _box(ui) -> Box:
-    return THIN if ui.g.unicode else ui.box
+    return THIN if ui.g.unicode else ASCII
 
 
 def _glyphs(ui, text: str) -> str:
