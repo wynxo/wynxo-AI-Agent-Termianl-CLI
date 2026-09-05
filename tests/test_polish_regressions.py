@@ -86,3 +86,28 @@ def test_corrupt_utf8_session_does_not_break_resume(store):
     (store / "sessions" / "broken.json").write_bytes(b"\xff")
     assert Session.load("broken", store) is None
     assert Session.recent() == []
+
+
+def test_closed_loop_shutdown_reaps_its_child():
+    import asyncio
+    import subprocess
+    import sys
+    from types import SimpleNamespace
+    from wynxo.tools.shell import _reap_after_loop_close
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    loop = asyncio.new_event_loop()
+    process = SimpleNamespace(_loop=loop, _transport=SimpleNamespace(_proc=child))
+    try:
+        assert not _reap_after_loop_close(process)
+        loop.close()
+        assert not _reap_after_loop_close(process)
+        child.terminate()
+        assert _reap_after_loop_close(process, timeout=5.0)
+        assert child.returncode is not None
+    finally:
+        if not loop.is_closed():
+            loop.close()
+        if child.poll() is None:
+            child.kill()
+        child.wait()

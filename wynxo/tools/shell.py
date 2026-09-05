@@ -571,22 +571,39 @@ def shutdown_background(timeout: float = 3.0) -> int:
         for process in doomed:
             if not _gone(process):
                 _signal_group(process, terminate=False)
+            # A pidfd watcher cannot reap after its loop has closed.
+            # Wait for SIGKILL too, rather than leaving a zombie until exit.
+            _reap_after_loop_close(process, timeout=1.0)
             _close_transports(process, force=True)
     finally:
         asyncio_log.setLevel(previous)
     return len(doomed)
 
 
+def _reap_after_loop_close(process, timeout: float = 0.0) -> bool:
+    """Reap an exited child when its event loop can no longer do so."""
+    loop = getattr(process, "_loop", None)
+    transport = getattr(process, "_transport", None)
+    child = getattr(transport, "_proc", None)
+    if loop is None or not loop.is_closed() or child is None:
+        return False
+    try:
+        if timeout > 0:
+            return child.wait(timeout=timeout) is not None
+        return child.poll() is not None
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def _gone(process) -> bool:
     """True when the process is no longer running.
 
     ``returncode`` is filled in by the event loop's child watcher, which is
-    not running during atexit -- so the process table is asked directly,
-    with signal 0, rather than waited on. Waiting here would reap a child
-    the watcher thread is also waiting on, and the loser of that race raises
-    inside a thread nobody is reading.
+    not running during atexit. Once the loop is closed, poll the underlying
+    Popen to reap exited children; signal 0 alone also sees zombies as alive.
+    With a live loop, leave reaping to its watcher and only query existence.
     """
-    if process.returncode is not None:
+    if process.returncode is not None or _reap_after_loop_close(process):
         return True
     if process.pid is None or os.name == "nt":
         return process.returncode is not None
