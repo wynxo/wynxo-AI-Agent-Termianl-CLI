@@ -425,7 +425,16 @@ def entry_point_script(python: Path) -> Path | None:
         return None
     name = "wynxo.exe" if sys.platform == "win32" else "wynxo"
     script = Path(result.stdout.strip()) / name
-    return script if script.exists() else None
+    # A path left behind by a test, interrupted install, or a copied venv can
+    # exist without being executable.  Delegating to it would make the
+    # user's launcher fail with a misleading shell-level "Permission denied".
+    # Windows dispatches .exe/.cmd files by name, so the POSIX mode check is
+    # only relevant on Unix-like systems.
+    if not script.is_file():
+        return None
+    if sys.platform != "win32" and not os.access(script, os.X_OK):
+        return None
+    return script
 
 
 def link_command(python: Path, venv_dir: Path,

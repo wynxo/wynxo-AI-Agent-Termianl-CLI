@@ -76,12 +76,29 @@ class TestEntryPointScript:
         scripts_dir = tmp_path
         # pip names it wynxo.exe on Windows, which is what the code looks for.
         name = "wynxo.exe" if sys.platform == "win32" else "wynxo"
-        (scripts_dir / name).write_text("#!/bin/sh\n")
+        script = scripts_dir / name
+        script.write_text("#!/bin/sh\n")
+        if sys.platform != "win32":
+            script.chmod(0o755)
         monkeypatch.setattr(
             install.subprocess, "run",
             lambda *a, **k: type("R", (), {"returncode": 0,
                                            "stdout": str(scripts_dir) + "\n"})())
-        assert install.entry_point_script(Path(sys.executable)) == scripts_dir / name
+        assert install.entry_point_script(Path(sys.executable)) == script
+
+    def test_non_executable_script_is_not_returned(self, monkeypatch, tmp_path):
+        import sys
+
+        name = "wynxo.exe" if sys.platform == "win32" else "wynxo"
+        script = tmp_path / name
+        script.write_text("#!/bin/sh\n")
+        monkeypatch.setattr(
+            install.subprocess, "run",
+            lambda *a, **k: type("R", (), {"returncode": 0,
+                                           "stdout": str(tmp_path) + "\n"})())
+        if sys.platform == "win32":
+            pytest.skip("Windows does not use POSIX executable bits")
+        assert install.entry_point_script(Path(sys.executable)) is None
 
     def test_a_missing_script_is_not_returned(self, monkeypatch, tmp_path):
         import sys
@@ -151,6 +168,7 @@ class TestLauncher:
         scripts_dir.mkdir(parents=True)
         real_entry = scripts_dir / "wynxo"
         real_entry.write_text("#!/bin/sh\necho real\n")
+        real_entry.chmod(0o755)
         monkeypatch.setattr(install, "entry_point_script", lambda python: real_entry)
 
         launcher, _ = install.link_command(
@@ -310,5 +328,4 @@ class TestPathHandling:
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
         monkeypatch.setenv("PATH", "/somewhere/else")
         assert install.user_bin_dir() == tmp_path / "Programs" / "wynxo"
-
 
