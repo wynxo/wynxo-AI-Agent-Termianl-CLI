@@ -25,6 +25,7 @@ from prompt_toolkit.formatted_text.html import html_escape as escape
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.filters import Always, Condition
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import Dimension, Window
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from . import __version__
@@ -1735,6 +1736,13 @@ class Repl:
             content = getattr(window, "content", None)
             if getattr(content, "buffer", None) is session.default_buffer:
                 window.dont_extend_height = Always()
+        # Prompt_toolkit renders a non-full-screen application from the
+        # current cursor downward. Its default leftover space is placed after
+        # the input, which makes the composer float in the middle of a tall
+        # terminal. Give that space an explicit weighted slot before the
+        # input so the composer and toolbar are docked to the bottom edge.
+        session.app.layout.container.children.insert(
+            0, Window(height=Dimension(weight=1)))
         silence_cpr_warning(session.app)
         return session
 

@@ -20,3 +20,6 @@ def test_prompt_input_window_does_not_fill_unused_terminal_rows():
 
     assert input_windows
     assert all(window.dont_extend_height() for window in input_windows)
+
+    spacer = session.app.layout.container.children[0]
+    assert spacer.height.weight == 1
