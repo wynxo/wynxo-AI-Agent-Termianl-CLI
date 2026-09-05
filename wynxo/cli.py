@@ -23,7 +23,7 @@ from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.formatted_text import ANSI, HTML
 from prompt_toolkit.formatted_text.html import html_escape as escape
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.filters import Condition
+from prompt_toolkit.filters import Always, Condition
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 
@@ -1725,6 +1725,16 @@ class Repl:
             # _echo_prompt prints instead.
             erase_when_done=True,
         )
+        # Prompt_toolkit's default input window is allowed to extend to every
+        # unused row in the terminal. That is harmless for a plain one-line
+        # prompt, but our two-line top edge plus bottom toolbar turns the
+        # unused space into a giant empty composer between them. Keep the
+        # window at its content height; it can still grow when the input
+        # wraps, but it never becomes a floating panel.
+        for window in session.app.layout.find_all_windows():
+            content = getattr(window, "content", None)
+            if getattr(content, "buffer", None) is session.default_buffer:
+                window.dont_extend_height = Always()
         silence_cpr_warning(session.app)
         return session
 
