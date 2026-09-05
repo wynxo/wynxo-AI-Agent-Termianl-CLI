@@ -112,12 +112,13 @@ class TestNothingKeepsRunningAfterwards:
 
 
 class TestStartupAnimationsAreBounded:
-    def test_there_is_no_startup_animation_left_to_wait_through(self):
-        """Start-up is one line and then the prompt. The block-art logo went
-        first, then the wake-up the companion used to play before the
-        header -- both were things you sat through before you could type."""
+    def test_startup_reveal_is_short_and_transient(self):
+        """The new reveal is a hand-off, not another screen to sit through."""
         assert not hasattr(UI, "WAKE")
         assert not hasattr(UI, "wake")
+        source = inspect.getsource(UI.boot_sequence)
+        assert "frames = 8" in source
+        assert "transient=True" in source
 
     def test_nothing_animates_without_a_terminal(self):
         """A Live where nothing can repaint writes its cursor moves into the

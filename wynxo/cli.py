@@ -1809,14 +1809,20 @@ class Repl:
                 status.line(state, message, detail)
         status.close()
 
-        # The opening screen: header, rail, the companion at his desk, and
-        # the outline of the box about to open under it. Drawn once and
-        # then scrolled past like any other output -- it is not a layout
-        # the session lives inside, which is what keeps streaming, tool
-        # calls, resizing and the prompt exactly as they were.
+        # The opening screen is a launchpad: header, workspace, welcome,
+        # capabilities and quick-start commands. It is drawn once and then
+        # scrolled past like any other output -- it is not a layout the
+        # session lives inside, which keeps streaming, tool calls, resizing
+        # and the prompt exactly as they were.
+        await self.ui.boot_sequence(
+            self.config.model, str(self.workspace),
+            enabled=self.config.animations)
         self.ui.home(self.config.model, str(self.workspace),
                      mode=self._agent_mode(),
-                     companion=self._companion_state())
+                     companion=self._companion_state(),
+                     show_companion=self.config.pet,
+                     show_art=True,
+                     show_static_controls=False)
         self._start_warming()
         return True
 
@@ -3588,7 +3594,10 @@ class Repl:
         self.ui.clear()
         self.ui.home(self.config.model, str(self.workspace),
                      mode=self._agent_mode(),
-                     companion=self._companion_state())
+                     companion=self._companion_state(),
+                     show_companion=self.config.pet,
+                     show_art=True,
+                     show_static_controls=False)
         self.ui.info("new chat -- memory kept, history and undo reset")
         return True
 

@@ -485,6 +485,59 @@ class TestTheConversationPieces:
         assert ui.g.bl in after[0] and after[0].rstrip().endswith(ui.g.br)
         assert "model:" in after[2] and after[3].strip().endswith(ui.g.br)
 
+    def test_the_interactive_home_does_not_fake_the_live_composer(self):
+        """The prompt owns the input and status rows after this render.
+
+        Printing a screenshot of the composer here leaves a second, dead box
+        above the real prompt and makes the first interaction feel broken.
+        """
+        ui = screen(120)
+        body = "\n".join(drawn(ui, shell.home(
+            ui, model="qwen3:8b", version="v1", show_static_controls=False)))
+        assert "Type a message" not in body
+        assert "model: qwen3:8b" not in body
+        assert "capabilities" in body
+
+    def test_interactive_home_uses_compact_layout_with_prompt_headroom(self):
+        ui = screen(120, height=34)
+        body = "\n".join(drawn(ui, shell.home(
+            ui, model="m", version="v1", show_static_controls=False)))
+        assert "capabilities" not in body
+        assert "Tab completes slash commands" in body
+
+    def test_capability_panel_names_the_safe_machine_surface(self):
+        ui = screen(120)
+        body = "\n".join(drawn(ui, shell.capability_panel(ui)))
+        for name in ("inspect", "build", "operate", "remember", "guard"):
+            assert name in body
+        assert "approval first" in body
+
+    def test_the_requested_wide_home_uses_painted_hero_art(self):
+        """A premium terminal can carry the actual scene, not an ASCII face."""
+        ui = screen(120, height=48)
+        body = "\n".join(drawn(ui, shell.home(
+            ui, model="qwen3:8b", version="v1", show_art=True,
+            show_static_controls=False)))
+        assert "WYNXO // COPILOT" in body
+        assert any(char in body for char in ("▀", "▄", "█"))
+        assert "Type a message" not in body
+
+    def test_boot_frame_has_art_motion_and_a_bounded_progress_ribbon(self):
+        ui = screen(120, height=48)
+        body = "\n".join(drawn(ui, shell.boot_frame(
+            ui, "qwen3:8b", "/workspace", frame=7, total=8)))
+        assert "connecting" in body
+        assert "wynxo is ready" in body
+        assert "100%" in body
+        assert any(char in body for char in ("▀", "▄", "█"))
+
+    def test_boot_frame_never_forces_unicode_into_an_ascii_terminal(self):
+        ui = screen(120, height=48)
+        ui.g = Glyphs(False)
+        body = "\n".join(drawn(ui, shell.boot_frame(
+            ui, "qwen3:8b", "/workspace", frame=3, total=8)))
+        body.encode("ascii")
+
 
 class TestTheStatusBar:
     def test_it_says_which_model_what_mode_and_what_the_companion_is_doing(self):

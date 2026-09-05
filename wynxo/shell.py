@@ -1,4 +1,4 @@
-"""The application's visual shell: header, rail, cards, status bar.
+"""The application's visual shell: header, cards, and session chrome.
 
 One place for the chrome, so the interface is a single application rather
 than a pile of widgets that happen to share a terminal. Everything here is
@@ -31,11 +31,13 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from . import portrait
+from . import portrait, sprite
+from .companion import State
 from .platforms import terminal_height
 
 __all__ = ["header", "rail", "chip", "user_message", "assistant_card",
-           "suggestions", "input_box", "status_bar", "home", "Metrics"]
+           "suggestions", "capability_panel", "hero_card", "boot_frame",
+           "input_box", "status_bar", "home", "Metrics"]
 
 
 # A hairline box. rich's ROUNDED draws a heavier top and bottom than this
@@ -128,14 +130,15 @@ TAGLINE = ("your local ai companion", "think · build · explore · together")
 
 
 def header(ui, version: str) -> Panel:
-    """The wordmark, a hairline separator, what this is, and the version.
+    """A compact brand bar that reads cleanly in a real terminal.
 
-    Compact on purpose: three rows of content and a rule top and bottom.
-    A header is read once, so anything in it that changes belongs on the
-    status bar instead -- which is where the model and the mode live.
+    The old header spent three rows on a pixel wordmark that looked like
+    damaged text in many fonts. The brand is more legible as type; the
+    personality can live in the optional companion and the colour palette.
     """
     palette = ui.palette
-    mark = wordmark(palette) if ui.g.unicode else plain_wordmark(palette)
+    mark = Text("WYNXO" if ui.g.unicode else "wynxo",
+                style=f"bold {palette.accent}")
 
     lines = Text(no_wrap=True)
     for index, line in enumerate(TAGLINE):
@@ -145,7 +148,7 @@ def header(ui, version: str) -> Panel:
                      style=palette.text if not index else palette.muted)
 
     grid = Table.grid(expand=True)
-    grid.add_column(width=WORDMARK_CELLS if ui.g.unicode else 5)
+    grid.add_column(width=5)
     grid.add_column(width=3)
     grid.add_column(ratio=1)
     grid.add_column(justify="right")
@@ -291,6 +294,206 @@ def suggestions(ui, items) -> Group:
     return Group(Text("suggestions:", style=palette.faint), grid)
 
 
+def welcome_card(ui, greeting=()) -> Panel:
+    """The first thing the user reads: purpose, then the useful promise.
+
+    This is deliberately content-first. It gives the landing screen one
+    strong card instead of several decorative boxes competing with the
+    composer that prompt_toolkit owns below it.
+    """
+    palette = ui.palette
+    lines = list(greeting) or ["Welcome to wynxo."]
+    body = Text(no_wrap=False)
+    for index, line in enumerate(lines):
+        if index:
+            body.append("\n")
+        body.append(_glyphs(ui, line),
+                    style=f"bold {palette.text}" if index == 0
+                    else palette.muted)
+    body.append("\n\n")
+    body.append(f"local-first  {ui.g.dot}  scoped  {ui.g.dot}  "
+                "ask before writes",
+                style=palette.faint)
+    return Panel(body, title="new session", box=_box(ui),
+                 border_style=palette.accent_dim, padding=(1, 2))
+
+
+def quick_panel(ui, items) -> Panel:
+    """A small command palette preview, without pretending to be clickable."""
+    palette = ui.palette
+    grid = Table.grid(padding=(0, 1))
+    grid.add_column(width=11)
+    grid.add_column(ratio=1)
+    for command, what in items[:6]:
+        grid.add_row(Text(command, style=f"bold {palette.accent}"),
+                     Text(what, style=palette.muted))
+    return Panel(Group(Text("start with a slash command", style=palette.faint),
+                       Text(""), grid),
+                 title="quick start", box=_box(ui),
+                 border_style=palette.faint, padding=(1, 1))
+
+
+CAPABILITIES = (
+    ("inspect", "files + search"),
+    ("build", "edit + verify"),
+    ("operate", "apps + GitHub"),
+    ("remember", "long-term context"),
+    ("guard", "approval first"),
+)
+
+
+def capability_panel(ui, items=CAPABILITIES) -> Panel:
+    """Show the useful surface area without pretending it is clickable.
+
+    The landing screen should explain why this is more than a chat prompt.
+    These are deliberately short verbs and honest boundaries: the agent can
+    work across the local project and installed apps, while writes and other
+    consequential actions still pass through permission checks.
+    """
+    palette = ui.palette
+    grid = Table.grid(padding=(0, 1))
+    grid.add_column(width=10)
+    grid.add_column(ratio=1)
+    for name, description in items:
+        grid.add_row(Text(name, style=f"bold {palette.accent}"),
+                     Text(description, style=palette.muted))
+    return Panel(Group(Text("one agent, many workflows", style=palette.faint),
+                       Text(""), grid),
+                 title="capabilities", box=_box(ui),
+                 border_style=palette.faint, padding=(1, 1))
+
+
+HERO_MIN_WIDTH = 110
+HERO_MIN_HEIGHT = 46
+HERO_PANEL_WIDTH = 44
+HERO_MIN_CELLS = 32
+HERO_MAX_CELLS = 38
+
+
+def _hero_cells(ui) -> int:
+    """Choose a painted scene size that leaves the launchpad breathing room."""
+    # The painting is deliberately kept below its native maximum here. A
+    # larger terminal gains whitespace and readable copy, not a mascot whose
+    # pixels are simply bigger. This is the same scene as the live companion,
+    # just given the room a landing screen can afford.
+    return min(HERO_MAX_CELLS, max(HERO_MIN_CELLS, ui.width // 4))
+
+
+def _hero_status(ui, companion: str = "ready") -> Text:
+    """The small status ribbon under the painted scene."""
+    palette = ui.palette
+    out = Text()
+    out.append(f"{ui.g.busy}  ", style=f"bold {palette.bar_accent}")
+    out.append(state_label(companion).upper(), style=f"bold {palette.text}")
+    out.append("   ", style=palette.faint)
+    out.append("local copilot", style=palette.muted)
+    return out
+
+
+def hero_card(ui, model: str = "", companion: str = "ready") -> Panel:
+    """The full painted identity of wynxo.
+
+    This is the visual anchor the landing screen was missing. It uses the
+    hand-painted truecolour scene rather than approximating a face with ASCII,
+    then keeps the copy underneath deliberately quiet so the art remains the
+    first thing the eye sees. The live task scene uses the smaller animated
+    sprite; this one is a still, high-resolution introduction to the same
+    character.
+    """
+    palette = ui.palette
+    art = portrait.rows(_hero_cells(ui), palette)
+    caption = Text("your local copilot, ready to work", style=palette.faint)
+    if model:
+        caption.append(f"  {ui.g.dot}  {ui.shorten_model(model, 22)}",
+                       style=palette.faint)
+    body = Group(*art, Text(""), _hero_status(ui, companion), caption)
+    return Panel(body, title="WYNXO // COPILOT", box=_box(ui),
+                 border_style=palette.accent, padding=(0, 1))
+
+
+BOOT_PHASES = (
+    ("calibrating the workspace", "scope locked"),
+    ("arming the local tools", "approval gates online"),
+    ("warming the copilot", "memory ready"),
+    ("wynxo is ready", "your move"),
+)
+
+
+def _progress_line(ui, frame: int, total: int) -> Text:
+    """A restrained progress glow for the short boot reveal."""
+    palette = ui.palette
+    total = max(1, total)
+    progress = min(1.0, max(0.0, (frame + 1) / total))
+    width = 28
+    filled = int(round(width * progress))
+    line = Text()
+    line.append("  ", style=palette.faint)
+    line.append(ui.g.hbar * filled, style=palette.bar_accent)
+    line.append(ui.g.dot * (width - filled), style=palette.faint)
+    line.append(f"  {int(progress * 100):3d}%", style=palette.muted)
+    return line
+
+
+def boot_frame(ui, model: str, workspace: str, frame: int = 0,
+               total: int = 8) -> Panel:
+    """One frame of the fast, transient launch reveal.
+
+    The image itself stays stable so it reads as art, while the progress
+    ribbon and phase copy supply motion. A moving scanline over every pixel
+    would look like a broken terminal capture; one controlled accent is
+    enough to make the hand-off feel alive.
+    """
+    palette = ui.palette
+    phase, detail = BOOT_PHASES[min(len(BOOT_PHASES) - 1,
+                                    (frame * len(BOOT_PHASES)) // max(1, total))]
+    title = Text()
+    title.append("WYNXO", style=f"bold {palette.accent}")
+    title.append("  //  LOCAL COPILOT", style=f"bold {palette.text}")
+    title.append(f"  {ui.g.spark}", style=palette.bar_accent)
+
+    if (ui.width >= HERO_MIN_WIDTH and terminal_height() >= HERO_MIN_HEIGHT
+            and ui.g.unicode
+            and portrait.fits(ui.width, ui.g.unicode)):
+        art = portrait.rows(_hero_cells(ui), palette)
+    elif sprite.fits(ui.width, ui.g.unicode):
+        art = sprite.rows(State.THINKING, frame // 2, palette)
+    else:
+        art = []
+
+    meta = Text(f"  {phase}", style=f"bold {palette.text}")
+    meta.append(f"  {ui.g.dot}  {detail}", style=palette.muted)
+    location = Text("  ", style=palette.faint)
+    if workspace:
+        location.append(ui.shorten_path(workspace), style=palette.faint)
+    body = Group(title, location, Text(""), *art, Text(""), meta,
+                 _progress_line(ui, frame, total))
+    return Panel(body, title="connecting", box=_box(ui),
+                 border_style=palette.accent_dim if frame % 2 else palette.accent,
+                 padding=(1, 2))
+
+
+def companion_card(ui, companion: str) -> Panel:
+    """A restrained companion preview for users who opt into the mascot.
+
+    The full raster portrait is beautiful in source but too visually dense
+    for a terminal landing screen. The same half-block sprite used by the
+    live task view is clearer, cheaper to render, and keeps the companion
+    visually connected to actual work.
+    """
+    palette = ui.palette
+    try:
+        state = companion if isinstance(companion, State) else State(
+            str(companion).strip().lower())
+    except ValueError:
+        state = State.IDLE
+    art = sprite.rows(state, 0, palette)
+    body = Group(*art, Text(""),
+                 Text(state_label(companion), style=f"bold {palette.text}"),
+                 Text("appears while wynxo works", style=palette.faint))
+    return Panel(body, title="companion", box=_box(ui),
+                 border_style=palette.accent_dim, padding=(0, 1))
+
+
 DEFAULT_SUGGESTIONS = (
     ("/help", "show all commands"),
     ("/tools", "list available tools"),
@@ -388,62 +591,79 @@ GREETING = ("Let's build something.",
 def home(ui, *, model: str, version: str, mode: str = "agent",
          companion: str = "ready", greeting=GREETING,
          placeholder: str = "Type a message or command...",
-         items=DEFAULT_SUGGESTIONS, workspace: str = "") -> Group:
+         items=DEFAULT_SUGGESTIONS, workspace: str = "",
+         show_companion: bool = True, show_art: bool = False,
+         show_static_controls: bool = True) -> Group:
     """The whole screen, composed once.
 
-    The illustration is the subject and everything else is measured around
-    it, in that order: the picture takes what the terminal's *height* can
-    afford, the rail takes a fixed thirteen columns when there is room for
-    one, and the conversation takes the rest. Sizing the picture from the
-    width instead is what makes a hero image push the content it is meant
-    to introduce off the bottom of a short terminal.
-
-    The two columns end on the same row. The picture is the taller of the
-    two by design, so the conversation is spaced to meet it -- the input
-    box sits on the illustration's baseline rather than floating halfway up
-    a column with a dozen dead rows under it.
+    The home screen is a launchpad, not a fake screenshot of the prompt.
+    The real composer and toolbar belong to prompt_toolkit, so callers can
+    hide the static controls when this is followed by an interactive prompt.
+    ``show_static_controls=True`` remains available for render-only callers
+    and backwards compatibility.
     """
-    # A normal 24-row terminal needs space for the real composer too.
-    # The illustrated layout is reserved for screens that can hold it.
-    if terminal_height() < 34:
+    # A normal 24-row terminal needs space for the real composer too. Use the
+    # same content hierarchy, just with one column and no decorative panels.
+    # Interactive callers still have to place a live three-row composer
+    # underneath this scrollback. The extra headroom keeps a 34-row terminal
+    # on the compact composition instead of making the prompt arrive after a
+    # one-line scroll.
+    compact_height = 38 if not show_static_controls else 34
+    if terminal_height() < compact_height:
         return compact_home(ui, model=model, version=version, mode=mode,
                             companion=companion, workspace=workspace,
-                            greeting=greeting, items=items)
-    show_rail = ui.width >= RAIL_FROM
-    column_rows = _column_rows(greeting, items)
-    art = _illustration(ui, show_rail, column_rows)
+                            greeting=greeting, items=items,
+                            show_static_controls=show_static_controls)
 
-    body = Table.grid(expand=True, padding=(0, 0))
-    if show_rail:
-        body.add_column(width=RAIL_CELLS)
-        body.add_column(width=2)
-    if art is not None:
-        body.add_column(width=art[1])
-        body.add_column(width=3)
-    body.add_column(ratio=1)
+    # On a genuinely wide, tall terminal the painted scene is the identity
+    # anchor. It is deliberately a different composition from the compact
+    # launchpad: the left side explains the product, the right side gives it
+    # a face. The CLI opts into this; render-only callers keep the lighter
+    # historical composition unless they ask for the art explicitly.
+    if (show_art and ui.width >= HERO_MIN_WIDTH
+            and terminal_height() >= HERO_MIN_HEIGHT
+            and portrait.fits(ui.width, ui.g.unicode)):
+        body = Table.grid(expand=True, padding=(0, 2))
+        body.add_column(ratio=1)
+        body.add_column(width=HERO_PANEL_WIDTH)
+        main = Group(welcome_card(ui, greeting), Text(""),
+                     capability_panel(ui), Text(""), quick_panel(ui, items))
+        body.add_row(main, hero_card(ui, model, companion))
+    elif ui.width >= 82:
+        # Two purposeful columns on wide screens: the welcome message and the
+        # command palette. No fake rail, no floating status chip, and no
+        # giant illustration pushing the thing the user came to type off-screen.
+        body = Table.grid(expand=True, padding=(0, 2))
+        body.add_column(ratio=1)
+        body.add_column(width=36)
+        main = Group(welcome_card(ui, greeting), Text(""),
+                     capability_panel(ui))
+        side: list = []
+        # The compact sprite is shown only when explicitly enabled and when
+        # the terminal can afford its full card without wrapping.
+        if ((show_companion or show_art) and ui.width >= 82
+                and terminal_height() >= 40
+                and sprite.fits(ui.width, ui.g.unicode)):
+            side.append(companion_card(ui, companion))
+            side.append(Text(""))
+        side.append(quick_panel(ui, items))
+        body.add_row(main, Group(*side))
+    else:
+        body = Group(welcome_card(ui, greeting), Text(""),
+                     suggestions(ui, items))
 
-    slack = max(0, (art[2] if art else 0) - column_rows)
-    column = Group(
-        chip(ui, state_label(companion)),
-        Text(""),
-        assistant_card(ui, "\n".join(greeting)),
-        Text(""),
-        suggestions(ui, items),
-        *[Text("") for _ in range(slack + 1)],
-        input_box(ui, placeholder),
-    )
-
-    row: list = []
-    if show_rail:
-        row += [rail(ui), Text("")]
-    if art is not None:
-        row += [art[0], Text("")]
-    row.append(column)
-    body.add_row(*row)
-
-    return Group(header(ui, version), workspace_line(ui, workspace), Text(""),
-                 body, Text(""), status_bar(ui, Metrics(
-                     model=model, mode=mode, companion=companion)))
+    parts: list = [header(ui, version), workspace_line(ui, workspace),
+                   Text(""), body, Text(""),
+                   Text(f"  ready  {ui.g.dot}  type a task below, or start with /help",
+                        style=ui.palette.muted)]
+    if show_static_controls:
+        # Render-only callers can still request the complete preview. The
+        # interactive CLI passes False so prompt_toolkit owns these rows and
+        # they are never printed twice.
+        parts.extend([Text(""), input_box(ui, placeholder), Text(""),
+                      status_bar(ui, Metrics(model=model, mode=mode,
+                                             companion=companion))])
+    return Group(*parts)
 
 
 def workspace_line(ui, workspace: str) -> Text:
@@ -455,12 +675,15 @@ def workspace_line(ui, workspace: str) -> Text:
 
 
 def compact_home(ui, *, model, version, mode, companion, workspace,
-                 greeting, items) -> Group:
+                 greeting, items, show_static_controls: bool = True) -> Group:
     """An uncluttered welcome that leaves room to type on short screens."""
     palette = ui.palette
-    title = Text("  wynxo", style=f"bold {palette.accent}")
+    title = Text("  WYNXO", style=f"bold {palette.accent}")
     title.append(f"  {version}", style=palette.faint)
-    title.append(f"   {ui.g.dot}   your local ai companion", style=palette.muted)
+    title.append(f"   {ui.g.dot}   local-first coding agent", style=palette.muted)
+    state = Text("  READY", style=f"bold {palette.good}")
+    state.append(f"  {ui.g.dot}  describe what you want to build",
+                 style=palette.muted)
     welcome = Text("  " + _glyphs(ui, greeting[0] if greeting else "Welcome."),
                    style=f"bold {palette.text}")
     shortcuts = Text("  ", no_wrap=True, overflow="ellipsis")
@@ -468,11 +691,24 @@ def compact_home(ui, *, model, version, mode, companion, workspace,
         if index:
             shortcuts.append("   ", style=palette.faint)
         shortcuts.append(command, style=palette.accent)
-    return Group(title, workspace_line(ui, workspace), Text(""), welcome,
+    visual: list = []
+    # A short terminal cannot carry the full painted scene, but it can still
+    # carry a real terminal illustration. Keeping the sprite in the compact
+    # composition means the art does not appear for half a second during boot
+    # and then disappear the moment the prompt opens.
+    if terminal_height() >= 30 and sprite.fits(ui.width, ui.g.unicode):
+        visual = [Text(""), Group(*sprite.rows(State.IDLE, 0, palette)),
+                  Text("")]
+    parts: list = [title, workspace_line(ui, workspace), Text(""), state,
+                 welcome,
                  Text("  Describe a task to get started.", style=palette.muted),
-                 Text(""), shortcuts, Text(""),
-                 status_bar(ui, Metrics(model=model, mode=mode,
-                                        companion=companion)))
+                 *visual, shortcuts,
+                 Text(f"  ready  {ui.g.dot}  Tab completes slash commands",
+                      style=palette.faint)]
+    if show_static_controls:
+        parts.extend([Text(""), status_bar(ui, Metrics(
+            model=model, mode=mode, companion=companion))])
+    return Group(*parts)
 
 
 CHAT_CELLS = 40

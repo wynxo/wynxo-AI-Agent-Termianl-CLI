@@ -18,7 +18,7 @@ from typing import Iterable
 
 from rich.box import ASCII as ASCII_BOX, ROUNDED
 from rich.cells import cell_len
-from rich.console import Console, Control, Group
+from rich.console import COLOR_SYSTEMS, Console, Control, Group
 from rich.live import Live
 from rich.rule import Rule
 from rich.text import Text
@@ -43,6 +43,25 @@ BAD = PALETTE.bad
 BAR_STYLE = f"on {PALETTE.bar_bg}"
 BAR_ACCENT = PALETTE.bar_accent
 BAR_DIM = PALETTE.bar_dim
+
+
+def _enable_forced_terminal_colour(console) -> None:
+    """Make an explicitly forced terminal behave like a coloured terminal.
+
+    Rich 15 infers ``no_color`` from an in-memory stream even when a caller
+    later sets ``force_terminal`` for a render test or a terminal adapter.
+    That leaves styled ``Text`` objects silently plain. The normal Wynxo
+    console is detected at construction time; this small compatibility shim
+    only changes a console that has explicitly been forced into terminal
+    mode, and never changes redirected output.
+    """
+    if not getattr(console, "_force_terminal", False):
+        return
+    console.no_color = False
+    if getattr(console, "_color_system", None) is None:
+        console._color_system = COLOR_SYSTEMS["truecolor"]
+
+
 def _ansi_of(style: str) -> str:
     """One rich style as the escape that turns it on."""
     from rich.style import Style
@@ -344,6 +363,7 @@ class SafeConsole(Console):
 
 
     def print(self, *args, **kwargs):
+        _enable_forced_terminal_colour(self)
         # print() with no arguments is how the whole interface asks for a
         # separation. There was a gap() alias saying the same thing more
         # readably, and it kept breaking: it exists only on this subclass,
@@ -714,13 +734,16 @@ class UI:
         self.console.print()
 
     def home(self, model: str, workspace: str, *, mode: str = "agent",
-             companion: str = "ready", version: str = "") -> None:
+             companion: str = "ready", version: str = "",
+             show_companion: bool = False,
+             show_art: bool = False,
+             show_static_controls: bool = False) -> None:
         """The application's opening screen, drawn once.
 
-        The header, the navigation rail, the companion at his desk, the
-        greeting, the commands worth knowing and the outline of the box you
-        are about to type into -- one composition, measured to the terminal
-        it landed in.
+        The header, workspace, welcome card and useful commands are one
+        composition, measured to the terminal it landed in. The interactive
+        prompt owns its own composer and toolbar; keeping those out of this
+        one-shot landing render prevents a duplicate box below it.
 
         It gives way rather than degrading. A terminal too narrow for the
         illustration gets the conversation column at full width, one too
@@ -739,8 +762,48 @@ class UI:
         self.console.print()
         self.console.print(shell.home(
             self, model=model, version=version or _version(),
-            mode=mode, companion=companion, workspace=workspace))
+            mode=mode, companion=companion, workspace=workspace,
+            show_companion=show_companion,
+            show_art=show_art,
+            show_static_controls=show_static_controls))
         self.console.print()
+
+    async def boot_sequence(self, model: str, workspace: str, *,
+                            enabled: bool = True) -> None:
+        """Play a short, transient reveal before the first prompt.
+
+        The launch animation is a hand-off, not a loading screen: it lasts
+        well under a second, never writes a frame into scrollback, and is
+        skipped for pipes, dumb terminals, narrow layouts, and reduced
+        motion. The rendered scene and the real prompt remain separate, so a
+        resize or an interrupted connection cannot strand animation rows.
+        """
+        if not enabled or not self.live_ok or not self.console.is_terminal:
+            return
+        if self.narrow:
+            return
+
+        from . import shell
+
+        frames = 8
+        live = Live(
+            shell.boot_frame(self, model, workspace, 0, frames),
+            console=self.console,
+            auto_refresh=False,
+            transient=True,
+        )
+        try:
+            live.start(refresh=True)
+            for frame in range(1, frames):
+                live.update(shell.boot_frame(
+                    self, model, workspace, frame, frames), refresh=True)
+                await asyncio.sleep(0.045)
+            # Let the completed frame register before the transient region
+            # disappears; the following launchpad is the lasting result.
+            await asyncio.sleep(0.045)
+        finally:
+            with contextlib.suppress(Exception):
+                live.stop()
 
     def can_draw_shell(self) -> bool:
         """Whether the composed screen can be drawn honestly here.
@@ -898,6 +961,7 @@ class UI:
         the first word rather than under the marker, so the "!" stays the
         only thing in its column and the prose forms a clean block.
         """
+        _enable_forced_terminal_colour(self.console)
         head = f"{marker} " if marker else ""
         hang = " " * cell_len(head)
         width = max(20, self.width - 1)
@@ -1299,6 +1363,7 @@ class UI:
         characters, and never reflowed: a line of code means what its
         characters say and rearranging it would make it say something else.
         """
+        _enable_forced_terminal_colour(self.console)
         gutter = self.code_gutter()
         room = max(8, self.width - cell_len(gutter.plain)
                    - cell_len(indent) - 1)
@@ -2040,6 +2105,13 @@ class CodeStreamer:
         """
         if self.started:
             if self.ui.bar is not None:
+                # A caller may replace the normal SafeConsole with a
+                # force-terminal capture console (as the rendering tests and
+                # terminal adapters do). Rich 15 still infers no colour from
+                # that in-memory stream, so make the same explicit-terminal
+                # compatibility adjustment before the Live region commits
+                # the styled line.
+                _enable_forced_terminal_colour(self.ui.console)
                 self.ui.bar.set_lead(None)
                 self.ui.console.print(self.line, markup=False, highlight=False,
                                       soft_wrap=True)
