@@ -84,6 +84,18 @@ def _matcher(pattern: str):
     return matches
 
 
+def _display_path(tool: Tool, path: Path) -> str:
+    """Stable workspace path for model/tool output on every OS.
+
+    Tool paths are protocol text, not native shell paths. Returning backslashes
+    on Windows made the same glob or grep produce different strings depending
+    on the runner and also broke patterns written with the documented `/`
+    separator. Keep native ``Path`` objects for filesystem access and normalize
+    only at the display/protocol boundary.
+    """
+    return tool.relative(path).replace("\\", "/")
+
+
 class Glob(Tool):
     name = "glob"
     description = "Find files by name pattern. Use this to locate files before reading them."
@@ -108,21 +120,31 @@ class Glob(Tool):
 
     def _collect(self, root: Path, pattern: str) -> list[str]:
         matches = _matcher(pattern.replace("\\", "/").lstrip("./"))
-        out: list[str] = []
+        out: list[tuple[str, float]] = []
         for path in root.rglob("*"):
             if len(out) > MAX_MATCHES * 4:
                 break
-            if not path.is_file():
+            try:
+                is_file = path.is_file()
+            except OSError:
+                continue
+            if not is_file:
                 continue
             if any(part in IGNORED or part.startswith(".") for part in path.parts):
                 continue
-            rel = self.relative(path)
-            if matches(rel.replace("\\", "/")):
-                out.append(rel)
+            rel = _display_path(self, path)
+            if matches(rel):
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
+                out.append((rel, mtime))
         # Most-recently-modified first: when a model is hunting for the file it
-        # just changed, that is nearly always the one it wants.
-        out.sort(key=lambda r: -(root.joinpath(r).stat().st_mtime if (root / r).exists() else 0))
-        return out
+        # just changed, that is nearly always the one it wants. Keep the native
+        # path only for stat above; rebuilding a Windows path from the normalized
+        # display string used to make sorting itself platform-dependent.
+        out.sort(key=lambda item: -item[1])
+        return [rel for rel, _mtime in out]
 
 
 class GrepInput(Schema):
@@ -184,16 +206,13 @@ class Grep(Tool):
             if _looks_binary(path):
                 continue
             if self.shield.blocks(path):
-                # A grep is a read with extra steps. Matching inside a
-                # credentials file would hand over the secret a line at a
-                # time, which is the same leak in a shape nobody checks.
                 continue
             try:
                 lines = _read_text(path).splitlines()
             except OSError:
                 continue
             scanned += 1
-            rel = self.relative(path)
+            rel = _display_path(self, path)
             for i, line in enumerate(lines):
                 if not regex.search(line):
                     continue
@@ -208,18 +227,18 @@ class Grep(Tool):
         return hits, scanned
 
     def _candidates(self, root: Path, glob: str) -> list[Path]:
-        # The same matcher the glob tool uses. This had its own copy of the
-        # fnmatch pair, so narrowing a search with "src/*.py" searched every
-        # Python file in the tree -- the filter that was meant to make a
-        # search cheaper and more precise did neither.
         matches = _matcher(glob.replace("\\", "/").lstrip("./")) if glob else None
         out = []
         for path in root.rglob("*"):
-            if not path.is_file():
+            try:
+                is_file = path.is_file()
+            except OSError:
+                continue
+            if not is_file:
                 continue
             if any(part in IGNORED or part.startswith(".") for part in path.parts):
                 continue
-            if matches and not matches(self.relative(path).replace("\\", "/")):
+            if matches and not matches(_display_path(self, path)):
                 continue
             out.append(path)
         return out

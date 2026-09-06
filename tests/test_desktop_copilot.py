@@ -12,6 +12,7 @@ command half is asked about on the same terms a shell command would be.
 from __future__ import annotations
 
 import pathlib
+import shlex
 import time
 
 import pytest
@@ -33,7 +34,6 @@ def entry(name: str, suffix: str = "") -> AppEntry:
 
 @pytest.fixture
 def machine(monkeypatch):
-    """A machine with three applications and nothing really launched."""
     record = {"started": [], "argv": []}
 
     async def started(app, open_path=""):
@@ -54,10 +54,6 @@ async def act(tmp_path, machine, targets, command="", decision=Decision.ALLOW,
     cb = RecordingCallbacks(permission=decision)
     agent, _, _ = make_agent(tmp_path, [{"content": "ok"}], callbacks=cb)
     catalog = agent.tools.get("launch_application").catalog
-    # Stubbed at the scan, not the cache: a miss triggers one rescan (so an
-    # application installed a minute ago is findable), and a fixture that
-    # only set the cache would be wiped by it -- which looks exactly like
-    # "a missing application stops the ones after it".
     catalog._scan = lambda: tuple(entry(n) for n in installed)
     catalog._entries = catalog._scan()
     out = await agent._system_action(
@@ -74,9 +70,6 @@ class TestSeveralApplicationsInOneSentence:
 
     async def test_what_the_user_is_told_is_not_the_model_s_instructions(
             self, tmp_path, machine):
-        """launch_application's output ends with "reply and stop" -- that is
-        scaffolding aimed at the model, and it was being shown verbatim as
-        the answer. Three applications meant three copies of it."""
         out, _ = await act(tmp_path, machine, ["kcalc", "firefox"])
         assert "do not perform further tool calls" not in out.content
         assert out.content.count("Launched") == 2
@@ -89,19 +82,15 @@ class TestSeveralApplicationsInOneSentence:
 
 class TestATerminalCanBeGivenSomethingToRun:
     async def test_the_command_goes_to_the_last_target(self, tmp_path, machine):
-        """Where the sentence puts it: "kcalc, then firefox, then a terminal
-        running main.py"."""
         await act(tmp_path, machine, ["kcalc", "firefox", "konsole"],
                   command="python3 main.py")
         assert [name for name, _ in machine["started"]] == ["kcalc", "firefox"]
+        workspace = shlex.quote(str(tmp_path.resolve()))
         assert machine["argv"] == [
             ["/usr/bin/konsole", "--separate", "--hold", "-e", "bash", "-lc",
-             f"cd -- {tmp_path} && python3 main.py"]]
+             f"cd -- {workspace} && python3 main.py"]]
 
     async def test_the_window_stays_open_afterwards(self, tmp_path, machine):
-        """"Open a terminal and run this" means the window is there to be
-        read. Left to exit, a command taking a second flashes a window and
-        closes it, and the output is gone before anyone sees it."""
         await act(tmp_path, machine, ["konsole"], command="echo hello")
         assert "--hold" in machine["argv"][0]
 
@@ -111,9 +100,6 @@ class TestATerminalCanBeGivenSomethingToRun:
         assert "python3 main.py" in out.content
 
     def test_every_terminal_has_a_spelling_that_was_looked_up(self):
-        """The flag meaning "the rest is the program" is -e, -x, --, or
-        nothing, and there is no convention. A guess does not fail cleanly:
-        it opens a terminal that ignores the command."""
         for name, flags in TERMINALS.items():
             assert isinstance(flags, tuple), name
 
@@ -122,9 +108,6 @@ class TestATerminalCanBeGivenSomethingToRun:
 
     async def test_and_is_refused_rather_than_launched_without_it(
             self, tmp_path, machine):
-        """Dropping the command silently would open the application and
-        report success, and the user would be told their script was run by
-        something that never saw it."""
         out, _ = await act(tmp_path, machine, ["firefox"],
                            command="python3 main.py")
         assert machine["started"] == []
@@ -132,8 +115,6 @@ class TestATerminalCanBeGivenSomethingToRun:
         assert out.errors
 
     def test_a_desktop_entry_resolves_to_its_binary(self, monkeypatch):
-        """gio launch has nowhere to put a command, so the executable is
-        looked up on PATH instead of the .desktop file being run."""
         monkeypatch.setattr(apps_module.shutil, "which",
                             lambda n: f"/usr/bin/{n}")
         argv = terminal_argv(entry("konsole", ".desktop"), "ls")
@@ -142,9 +123,6 @@ class TestATerminalCanBeGivenSomethingToRun:
 
 
 class TestACommandIsACommandWhateverLaunchedIt:
-    """It runs outside every guard the shell tool has -- no output ceiling,
-    no workspace, no read-only test -- in a window wynxo does not own."""
-
     @pytest.mark.parametrize("mode", [Mode.MANUAL, Mode.AUTO])
     def test_a_dangerous_one_is_asked_about_in_every_mode(self, mode):
         store = PermissionStore()
@@ -173,7 +151,6 @@ class TestACommandIsACommandWhateverLaunchedIt:
         assert machine["argv"] == []
 
     async def test_the_earlier_launches_still_happened(self, tmp_path, machine):
-        """Declining the command is not declining the whole sentence."""
         await act(tmp_path, machine, ["kcalc", "konsole"],
                   command="rm -rf ~", decision=Decision.DENY)
         assert [name for name, _ in machine["started"]] == ["kcalc"]
@@ -191,9 +168,6 @@ class TestTheRouterCanSayIt:
         assert got.command == "python3 main.py"
 
     def test_a_command_on_any_other_kind_is_dropped(self):
-        """A command on a conversation or a coding turn is the model
-        filling in a field it was shown, and acting on it would run
-        something nobody asked for."""
         for kind in ("conversation", "coding"):
             got = parse('{"kind": "%s", "targets": [], '
                         '"command": "rm -rf /"}' % kind)

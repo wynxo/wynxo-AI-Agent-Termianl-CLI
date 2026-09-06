@@ -106,7 +106,13 @@ class TestSafety:
 @pytest.mark.skipif(sys.platform == "win32", reason="posix termios")
 class TestTerminalRestore:
     def test_terminal_settings_are_restored(self, monkeypatch):
-        """The important one: the shell must be usable afterwards."""
+        """The important settings return even when BSD reports PENDIN state.
+
+        macOS may set PENDIN after canonical mode is restored. PENDIN is a
+        kernel-maintained "retype pending input" state bit, not a setting
+        Wynxo enabled, so compare the actual terminal configuration with that
+        transient bit masked out on systems that expose it.
+        """
         master, slave = pty.openpty()
         try:
             reader = os.fdopen(slave, "r")
@@ -120,7 +126,11 @@ class TestTerminalRestore:
             assert not (during[3] & termios.ICANON), "cbreak not actually applied"
 
             watcher.stop()
-            assert termios.tcgetattr(slave) == before
+            after = termios.tcgetattr(slave)
+            transient = getattr(termios, "PENDIN", 0)
+            before[3] &= ~transient
+            after[3] &= ~transient
+            assert after == before
         finally:
             reader.close()          # takes the slave fd with it
             os.close(master)

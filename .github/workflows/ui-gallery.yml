@@ -1,0 +1,30 @@
+name: ui-gallery
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ui-gallery-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  render:
+    name: render five UI screens
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Wynxo
+        run: python -m pip install -e "."
+      - name: Render gallery
+        run: python scripts/render_ui_gallery.py --out ui-gallery
+      - name: Upload gallery
+        uses: actions/upload-artifact@v4
+        with:
+          name: wynxo-ui-gallery
+          path: ui-gallery/*.svg
+          if-no-files-found: error

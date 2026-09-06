@@ -21,16 +21,6 @@ that decides:
     conversation    talk back; no tools, no planning, no repository
     system_action   launch what was named, then stop
     coding          the full agent loop
-
-Two things it is careful *not* to be:
-
-* It holds no table of application names. "vscode -> code.exe" is a promise
-  that rots on the first machine that spells it differently; the model reads
-  the user's words and the OS catalog decides what exists.
-* It holds no list of chat phrases as its primary answer. The regex
-  heuristics in agent.py remain as the fallback for when the model is
-  unreachable or answers with nonsense, because a router that fails closed
-  into "coding" on a greeting is the behaviour this module exists to remove.
 """
 
 from __future__ import annotations
@@ -42,33 +32,16 @@ from dataclasses import dataclass
 CONVERSATION = "conversation"
 SYSTEM_ACTION = "system_action"
 CODING = "coding"
-
 KINDS = (CONVERSATION, SYSTEM_ACTION, CODING)
 
 
 @dataclass(frozen=True)
 class Intent:
-    """The decision, and where it came from."""
-
     kind: str
     targets: tuple[str, ...] = ()
-    """For a system action: what to launch, in the user's own words. Passed
-    to the catalog as-is -- resolving it is the OS's job, not ours."""
     command: str = ""
-    """A command to run inside the last target, when it is a terminal.
-
-    "open a terminal and run main.py" is one request, not two: the terminal
-    and what it should be running arrive together, and splitting them opens
-    an empty window and calls it done. It applies to the last target
-    because that is where the sentence puts it -- "the calculator, then the
-    browser, then a terminal running main.py"."""
     then_coding: bool = False
-    """A genuinely combined request ("open the editor and inspect this
-    repo"): do the action, then carry on into the agent loop. Only ever set
-    because the model said so; a turn must not invent the second half."""
     source: str = "model"
-    """``model`` or ``fallback``, so the runtime can tell a real decision
-    from a guess when something goes wrong."""
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -118,49 +91,63 @@ Message:
 {request}
 """
 
-_JSON = re.compile(r"\{.*\}", re.DOTALL)
+
+def _first_json_object(text: str) -> dict | None:
+    """Decode the first JSON object embedded in model prose in bounded time.
+
+    The old ``\{.*\}`` DOTALL regex backtracked quadratically on an answer
+    containing an opening brace but no closing one. Intent routing runs before
+    every task, so one malformed small-model response could pin a CPU core.
+    ``JSONDecoder.raw_decode`` already knows where a JSON value ends. Try only
+    the first few object starts; model replies are capped upstream and a reply
+    with sixteen stray opening braces before its answer is already nonsense.
+    """
+    decoder = json.JSONDecoder()
+    start = 0
+    attempts = 0
+    while attempts < 16:
+        start = text.find("{", start)
+        if start < 0:
+            return None
+        attempts += 1
+        try:
+            value, _end = decoder.raw_decode(text[start:])
+        except (ValueError, TypeError):
+            start += 1
+            continue
+        if isinstance(value, dict):
+            return value
+        start += 1
+    return None
 
 
 def parse(raw: str) -> Intent | None:
-    """The model's answer, or None when it did not give a usable one.
-
-    Small local models wrap JSON in prose, in fences, or hand back a bare
-    word. All three are recoverable; anything else is not, and the caller
-    falls back rather than guessing.
-    """
+    """The model's answer, or None when it did not give a usable one."""
     text = (raw or "").strip()
     if not text:
         return None
 
-    match = _JSON.search(text)
-    if match:
-        try:
-            data = json.loads(match.group(0))
-        except (ValueError, TypeError):
-            data = None
-        if isinstance(data, dict):
-            kind = str(data.get("kind", "")).strip().lower()
-            if kind in KINDS:
-                raw_targets = data.get("targets") or []
-                if isinstance(raw_targets, str):
-                    raw_targets = [raw_targets]
-                targets = tuple(
-                    str(t).strip() for t in raw_targets
-                    if isinstance(t, (str, int, float)) and str(t).strip()
-                )[:4]
-                command = data.get("command")
-                command = (str(command).strip()
-                           if isinstance(command, (str, int, float)) else "")
-                return Intent(kind=kind, targets=targets,
-                              # Only where it can mean anything. A command
-                              # on a conversation or a coding turn is the
-                              # model filling in a field it was shown, and
-                              # acting on it would run something nobody
-                              # asked for.
-                              command=command if kind == SYSTEM_ACTION else "",
-                              then_coding=bool(data.get("then_coding")))
+    data = _first_json_object(text)
+    if isinstance(data, dict):
+        kind = str(data.get("kind", "")).strip().lower()
+        if kind in KINDS:
+            raw_targets = data.get("targets") or []
+            if isinstance(raw_targets, str):
+                raw_targets = [raw_targets]
+            targets = tuple(
+                str(t).strip() for t in raw_targets
+                if isinstance(t, (str, int, float)) and str(t).strip()
+            )[:4]
+            command = data.get("command")
+            command = (str(command).strip()
+                       if isinstance(command, (str, int, float)) else "")
+            return Intent(
+                kind=kind,
+                targets=targets,
+                command=command if kind == SYSTEM_ACTION else "",
+                then_coding=bool(data.get("then_coding")),
+            )
 
-    # A bare word, which is what a very small model tends to answer with.
     lowered = text.lower()
     for kind in KINDS:
         if re.fullmatch(rf"\W*{kind}\W*", lowered):
@@ -169,23 +156,10 @@ def parse(raw: str) -> Intent | None:
 
 
 def fallback(request: str, *, chatting: bool) -> Intent:
-    """The answer when the model could not give one.
-
-    ``chatting`` is agent.is_small_talk(), the heuristic that was doing this
-    job alone before. Keeping it here means an unreachable or incoherent
-    provider degrades to the previous behaviour instead of routing every
-    greeting into the coding loop.
-    """
     return Intent(kind=CONVERSATION if chatting else CODING, source="fallback")
 
 
 async def classify(call, request: str, *, chatting: bool) -> Intent:
-    """Ask the model what this is. ``call`` is an async callable taking a
-    prompt and returning text; the agent supplies one bound to its client.
-
-    Never raises: a router that can fail is a router that takes the turn
-    down with it, and every failure here has a defined answer.
-    """
     request = (request or "").strip()
     if not request:
         return Intent(kind=CONVERSATION, source="fallback")
@@ -197,9 +171,6 @@ async def classify(call, request: str, *, chatting: bool) -> Intent:
     if decided is None:
         return fallback(request, chatting=chatting)
     if decided.is_system_action and not decided.targets:
-        # A launch with nothing to launch is not actionable. The words are
-        # the user's own; hand the whole message to the catalog and let it
-        # decide whether anything matches.
         decided = Intent(kind=SYSTEM_ACTION, targets=(request,),
                          command=decided.command,
                          then_coding=decided.then_coding)
