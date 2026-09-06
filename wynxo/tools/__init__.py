@@ -12,7 +12,9 @@ from .dev import Git, RunTests
 from ..secrets import Shield
 from .memory_tool import Remember
 from .search import Glob, Grep
+from . import shell as _shell_module
 from .shell import BackgroundPoll, Shell
+from .shell_guard import hard_refusal as _portable_hard_refusal
 from .todo import TodoWrite
 from .apps import LaunchApplication, ListApplications
 from .appcatalog import ApplicationCatalog
@@ -20,6 +22,12 @@ from .navigation_tool import NavigateSymbols
 from .references_tool import FindReferences
 from .github_tool import GitHubRead, GitHubWrite
 from .web import WebSearch
+
+# Shell.run resolves ``hard_refusal`` through its module globals at call time.
+# Keep the execution implementation in shell.py while using one host-independent
+# parser for the safety decision. This also means direct imports of
+# ``wynxo.tools.shell.hard_refusal`` see the same guard on every platform.
+_shell_module.hard_refusal = _portable_hard_refusal
 
 __all__ = ["Tool", "ToolResult", "Registry", "build_registry"]
 
@@ -62,7 +70,6 @@ class Registry:
         return [t.ollama_schema() for t in self._tools.values()]
 
     def suggest(self, name: str) -> str | None:
-        """A model that invents a tool name usually invents a near miss."""
         import difflib
 
         close = difflib.get_close_matches(name, self.names(), n=1, cutoff=0.6)
@@ -81,9 +88,6 @@ def build_registry(
     app_catalog: ApplicationCatalog | None = None,
     shell_max_output: int | None = None,
 ) -> Registry:
-    # Discovery and launching intentionally share one catalog instance. A
-    # read-only list_applications call warms the cache for a launch that comes
-    # next, and a refresh is immediately visible to both tools.
     app_catalog = app_catalog or ApplicationCatalog()
 
     tools: list[Tool] = [
