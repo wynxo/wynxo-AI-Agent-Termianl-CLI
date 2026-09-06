@@ -4,22 +4,25 @@ from __future__ import annotations
 
 
 def main():
-    """Start the CLI with runtime compatibility installed first.
+    """Start the CLI with compatibility and the product shell installed.
 
-    No layout decisions here. The visual shell used to be installed from
-    this function, by replacing ``UI.banner`` on the class -- which meant
-    the look of the application depended on which entry point had been
-    called, and a single import of ``bootstrap`` in a test suite silently
-    changed the header for everything that ran after it. The shell is part
-    of ``UI`` now, so there is nothing to install.
+    The agent and REPL stay in ``cli.py``. The visual layer is installed
+    separately so terminal chrome can evolve without coupling layout
+    decisions to provider/tool behaviour.
     """
     # Install compatibility shims before cli imports the provider/client.
-    # This keeps startup resilient when the CLI and provider signatures are
-    # briefly out of sync during development.
     from . import runtime_compat  # noqa: F401
 
-    from .cli import main as cli_main
-    return cli_main()
+    from . import cli
+    from . import product_ui
+
+    # Tests and embedders sometimes replace cli.main with their own callable.
+    # In that case this function is only a dispatcher; do not globally restyle
+    # classes in the host process. The installed command always reaches the
+    # real wynxo.cli.main and therefore gets the product shell.
+    if getattr(cli.main, "__module__", "") == cli.__name__:
+        product_ui.install()
+    return cli.main()
 
 
 if __name__ == "__main__":
