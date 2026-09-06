@@ -28,15 +28,20 @@ def test_ui_gallery_renders_five_review_screens(tmp_path):
     home = files[0].read_text(encoding="utf-8")
     conversation = files[1].read_text(encoding="utf-8")
     tools = files[2].read_text(encoding="utf-8")
+    plan = files[3].read_text(encoding="utf-8")
 
-    # These assertions prevent CI's non-TTY fallback from producing a tiny
-    # one-line "gallery" and catch the direct-console streaming path being
-    # invisible to Rich's SVG recorder.
-    assert "What are we building?" in home
-    assert "Quick start" in home
+    # The gallery must be the interactive product shell, not redirected output.
+    assert "Ready to build." in home
+    assert "/apps" in home
     assert "renderer bug" in conversation
+    assert "[ok]" in tools
     assert "list applications" in tools
+    assert "[&gt;]" in plan or "[>]" in plan
 
-    # Review artifacts must not rely on a CDN font to display terminal rails.
+    # The redesign intentionally does not use giant box/card borders.
+    assert "Tool  done" not in tools
+    assert "Plan  2/5 complete" not in plan
+
+    # Review artifacts must not rely on a CDN font.
     assert "cdnjs.cloudflare.com" not in home
     assert "DejaVu Sans Mono" in home
