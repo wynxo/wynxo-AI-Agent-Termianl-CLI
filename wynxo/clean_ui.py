@@ -1,9 +1,9 @@
 """Crisp, width-safe product shell for Wynxo.
 
-This layer is intentionally conservative about terminal rendering.  It keeps
+This layer is intentionally conservative about terminal rendering. It keeps
 Wynxo's product-style hierarchy while avoiding font-fragile iconography and
-making the composer, tool cards, plans, and status dock fit predictably in
-real monospace terminals.
+making the composer, tool cards, plans, messages, and status dock fit
+predictably in real monospace terminals.
 """
 
 from __future__ import annotations
@@ -25,6 +25,11 @@ from .platforms import is_dumb_terminal, terminal_height
 _INSTALLED = False
 _PREV: dict[str, object] = {}
 
+# The clean shell uses a two-cell rail plus one space between columns. Keep the
+# reply body on that same baseline. This constant is shared by normal markdown
+# rendering and live streaming so the two paths cannot drift apart again.
+MESSAGE_INDENT = "   "
+
 
 def _box(ui):
     return shell.THIN if ui.g.unicode else shell.ASCII
@@ -44,22 +49,44 @@ def _feature(ui, title: str, description: str) -> Group:
     )
 
 
-def _context_row(ui, model: str, workspace: str, mode: str) -> Table:
-    """Compact session metadata for the home screen."""
+def _context_row(ui, model: str, workspace: str, mode: str, width: int) -> Table:
+    """Compact session metadata that still fits when names get long."""
     palette = ui.palette
+    model_name = product_ui._trim_cells(
+        ui_mod.sanitise(model or "local model"), max(12, min(34, width // 3)))
+    mode_name = product_ui._trim_cells(ui_mod.sanitise(mode or "agent"), 16)
+    path = ui.shorten_path(workspace)
+
+    if width < 88:
+        row = Table.grid(padding=(0, 2), expand=False)
+        row.add_column(no_wrap=True)
+        row.add_column(no_wrap=True)
+        row.add_row(
+            Text.assemble(("MODEL  ", palette.faint), (model_name, palette.muted)),
+            Text.assemble(("MODE  ", palette.faint), (mode_name, palette.muted)),
+        )
+        path_room = max(18, width - 12)
+        row.add_row(
+            Text.assemble(
+                ("WORKSPACE  ", palette.faint),
+                (product_ui._trim_cells(path, path_room), palette.muted),
+            ),
+            Text(""),
+        )
+        return row
+
     row = Table.grid(padding=(0, 2), expand=False)
     row.add_column(no_wrap=True)
     row.add_column(no_wrap=True)
     row.add_column(no_wrap=False)
-
-    model_name = ui_mod.sanitise(model or "local model")
-    mode_name = ui_mod.sanitise(mode or "agent")
-    path = ui.shorten_path(workspace)
-
+    path_room = max(20, width - cell_len(model_name) - cell_len(mode_name) - 30)
     row.add_row(
         Text.assemble(("MODEL  ", palette.faint), (model_name, palette.muted)),
         Text.assemble(("MODE  ", palette.faint), (mode_name, palette.muted)),
-        Text.assemble(("WORKSPACE  ", palette.faint), (path, palette.muted)),
+        Text.assemble(
+            ("WORKSPACE  ", palette.faint),
+            (product_ui._trim_cells(path, path_room), palette.muted),
+        ),
     )
     return row
 
@@ -88,7 +115,7 @@ def _home(self, model: str, workspace: str, *, mode: str = "agent",
     brand.append(f"  {version or __version__}", style=palette.faint)
     brand.append("  LOCAL-FIRST CODING AGENT", style=palette.muted)
     self.console.print(brand)
-    self.console.print(_context_row(self, model, workspace, mode))
+    self.console.print(_context_row(self, model, workspace, mode, width))
     self.console.print(_rule(self, width))
     self.console.print()
 
@@ -126,8 +153,8 @@ def _home(self, model: str, workspace: str, *, mode: str = "agent",
         ("/help", "Commands and keyboard shortcuts"),
         ("/tools", "Available local tools"),
         ("/status", "Model, mode, context, and session state"),
+        ("/apps", "Browse applications installed on this machine"),
         ("/theme", "Switch terminal theme"),
-        ("/clear", "Clear the conversation view"),
     ):
         quick.add_row(
             Text(command, style=f"bold {palette.accent}"),
@@ -189,11 +216,25 @@ def _assistant_heading(ui) -> None:
     ui.console.print(grid)
 
 
+def _assistant_markdown(self, text: str) -> None:
+    """Render a complete reply on the same baseline as the clean heading."""
+    if not text.strip():
+        return
+    if self.narrow or not self.g.unicode:
+        return _PREV["assistant_markdown"](self, text)
+
+    _assistant_heading(self)
+    streamer = ui_mod.CodeStreamer(self, indent=MESSAGE_INDENT)
+    streamer.feed(text)
+    streamer.finish()
+    self.console.print()
+
+
 def _tool_call(self, name: str, target: str, detail: str = "",
                ok: bool = True) -> None:
     """Render a tool event without depending on cli.py presentation helpers."""
     palette = self.palette
-    operation = ui_mod.verb(name)
+    operation = ui_mod.verb(name).replace("_", " ")
     target = ui_mod.sanitise(target)[:160]
     detail = ui_mod.sanitise(detail)[:200]
 
@@ -268,7 +309,7 @@ def _prompt_message(self) -> HTML:
     width = max(30, self.ui.width)
 
     left = product_ui._prompt_hint(self)
-    right = "Alt+Enter newline   Ctrl+C stop"
+    right = "Enter send   Alt+Enter newline"
     room = width - cell_len(left) - cell_len(right)
     if room >= 2:
         hint = left + (" " * room) + right
@@ -349,6 +390,24 @@ def _bottom_toolbar(self):
     return ANSI(value)
 
 
+async def _on_content(self, text: str) -> None:
+    """Stream replies on exactly the same baseline as non-streamed replies."""
+    if not text:
+        return
+    async with self._status_lock:
+        self.tokens += 1
+        if not self._streaming:
+            self._end_stream()
+            _assistant_heading(self.ui)
+            self.streamer = ui_mod.CodeStreamer(self.ui, indent=MESSAGE_INDENT)
+            self._streaming = True
+        if self.bar is not None:
+            self.bar.update(activity="writing", detail="",
+                            tokens=self.tokens,
+                            state=self._writing_state())
+        self.typed.feed(self._write_content, text)
+
+
 def install() -> None:
     """Install the width-safe product shell after :mod:`wynxo.product_ui`."""
     global _INSTALLED
@@ -360,22 +419,27 @@ def install() -> None:
     _PREV.update({
         "home": ui_mod.UI.home,
         "user_line": ui_mod.UI.user_line,
+        "assistant_markdown": ui_mod.UI.assistant_markdown,
         "tool_call": ui_mod.UI.tool_call,
         "todos": ui_mod.UI.todos,
         "prompt_message": cli_mod.Repl._prompt_message,
         "bottom_toolbar": cli_mod.Repl._bottom_toolbar,
+        "on_content": cli_mod.TerminalCallbacks.on_content,
     })
 
     ui_mod.UI.home = _home
     ui_mod.UI.user_line = _user_line
+    ui_mod.UI.assistant_markdown = _assistant_markdown
     ui_mod.UI.tool_call = _tool_call
     ui_mod.UI.todos = _todos
 
     cli_mod.Repl._prompt_message = _prompt_message
     cli_mod.Repl._bottom_toolbar = _bottom_toolbar
+    cli_mod.TerminalCallbacks.on_content = _on_content
 
     # product_ui's streaming callbacks resolve this helper through module
-    # globals, so replacing it also keeps live responses visually consistent.
+    # globals, so replacing it also keeps any fallback response path visually
+    # consistent with the clean shell.
     product_ui._assistant_heading = _assistant_heading
 
     _INSTALLED = True
