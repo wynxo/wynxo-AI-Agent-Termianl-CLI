@@ -267,7 +267,13 @@ class ApplicationCatalog:
             except OSError:
                 continue
             for child in children:
-                if child.suffix == ".app" and child.is_dir():
+                if child.suffix != ".app":
+                    continue
+                try:
+                    is_dir = child.is_dir()
+                except OSError:
+                    continue
+                if is_dir:
                     offer(AppEntry(child.stem, child, "macos_app"))
 
     def _scan_desktops(self, offer) -> None:
@@ -352,7 +358,17 @@ class ApplicationCatalog:
             for child in children:
                 if seen >= MAX_PATH_ENTRIES:
                     break
-                if not child.is_file() or child.name.startswith("."):
+                if child.name.startswith("."):
+                    continue
+                # A PATH directory can contain entries the current account
+                # cannot stat (macOS system tools are a real example). One
+                # unreadable executable must not make installed-app discovery
+                # fail for every other application on the machine.
+                try:
+                    is_file = child.is_file()
+                except OSError:
+                    continue
+                if not is_file:
                     continue
                 if sys.platform == "win32":
                     if child.suffix.lower() not in executable_suffixes:
