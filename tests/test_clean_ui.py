@@ -1,4 +1,4 @@
-"""Regression checks for the cleaned product-shell typography."""
+"""Regression checks for the minimal product shell."""
 
 from __future__ import annotations
 
@@ -59,8 +59,7 @@ def test_clean_shell_install_is_idempotent():
     assert result.returncode == 0, result.stderr
 
 
-def test_tool_renderer_does_not_depend_on_cli_verb():
-    """Regression for launch_application crashing after a successful tool call."""
+def test_tool_renderer_does_not_depend_on_cli_verb_or_box_glyphs():
     result = _run(
         """
         import io
@@ -79,17 +78,19 @@ def test_tool_renderer_does_not_depend_on_cli_verb():
         ui.tool_call("list_applications", "terminal", "2 matches", True)
 
         rendered = ui.console.file.getvalue()
+        assert "[ok]" in rendered
         assert "kcalc" in rendered
         assert "opened" in rendered
         assert "list applications" in rendered
         assert "2 matches" in rendered
+        # Tool events are intentionally typography-only; no giant card border.
+        assert "┌" not in rendered and "└" not in rendered
         """
     )
     assert result.returncode == 0, result.stderr
 
 
 def test_assistant_heading_and_body_share_one_indent_contract():
-    """The two-cell clean rail must not leave the old six-cell body indent."""
     result = _run(
         """
         import io
@@ -118,8 +119,36 @@ def test_assistant_heading_and_body_share_one_indent_contract():
         ui.console.file = io.StringIO()
         ui.assistant_markdown("aligned answer")
 
-        assert clean_ui.MESSAGE_INDENT == "   "
+        assert clean_ui.MESSAGE_INDENT == "  "
         assert seen == [clean_ui.MESSAGE_INDENT]
+        """
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_plan_renderer_is_compact_and_ascii_structured():
+    result = _run(
+        """
+        import io
+        from wynxo import clean_ui, product_ui
+        from wynxo.ui import Glyphs, UI
+
+        product_ui.install()
+        clean_ui.install()
+
+        ui = UI()
+        ui.g = Glyphs(True)
+        ui.narrow = False
+        ui.width = 100
+        ui.console.file = io.StringIO()
+        ui.todos("[x] audit\\n[>] fix UI\\n[ ] test")
+
+        rendered = ui.console.file.getvalue()
+        assert "plan" in rendered.lower()
+        assert "[x]" in rendered
+        assert "[>]" in rendered
+        assert "[ ]" in rendered
+        assert "┌" not in rendered and "└" not in rendered
         """
     )
     assert result.returncode == 0, result.stderr
