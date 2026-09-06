@@ -14,7 +14,7 @@ from .memory_tool import Remember
 from .search import Glob, Grep
 from .shell import BackgroundPoll, Shell
 from .todo import TodoWrite
-from .apps import LaunchApplication
+from .apps import LaunchApplication, ListApplications
 from .appcatalog import ApplicationCatalog
 from .navigation_tool import NavigateSymbols
 from .references_tool import FindReferences
@@ -81,6 +81,11 @@ def build_registry(
     app_catalog: ApplicationCatalog | None = None,
     shell_max_output: int | None = None,
 ) -> Registry:
+    # Discovery and launching intentionally share one catalog instance. A
+    # read-only list_applications call warms the cache for a launch that comes
+    # next, and a refresh is immediately visible to both tools.
+    app_catalog = app_catalog or ApplicationCatalog()
+
     tools: list[Tool] = [
         ReadFile(workspace, boundary, shield),
         WriteFile(workspace, boundary, shield),
@@ -90,6 +95,7 @@ def build_registry(
         Glob(workspace, boundary, shield),
         Grep(workspace, boundary, shield),
         TodoWrite(workspace, boundary, shield),
+        ListApplications(workspace, boundary, shield, catalog=app_catalog),
         LaunchApplication(workspace, boundary, shield, catalog=app_catalog),
         NavigateSymbols(workspace, boundary, shield),
         FindReferences(workspace, boundary, shield),
