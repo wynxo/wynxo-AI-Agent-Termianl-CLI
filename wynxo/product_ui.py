@@ -1,7 +1,7 @@
 """Product-style terminal chrome for Wynxo.
 
 This module layers the polished, chat-first shell over the battle-tested
-prompt/streaming engine in :mod:`wynxo.cli`.  It deliberately leaves the
+prompt/streaming engine in :mod:`wynxo.cli`. It deliberately leaves the
 agent, provider, permissions, tools, and prompt-session lifecycle alone.
 
 The important split is:
@@ -127,7 +127,7 @@ def _home(self, model: str, workspace: str, *, mode: str = "agent",
           companion: str = "ready", version: str = "",
           show_companion: bool = False, show_art: bool = False,
           show_static_controls: bool = False) -> None:
-    """Draw the mockup-inspired launch screen without faking the live composer."""
+    """Draw the product launch screen without faking the live composer."""
     self.refresh_size()
     if is_dumb_terminal() or self.narrow or not self.console.is_terminal:
         return _ORIGINALS["home"](
@@ -197,7 +197,7 @@ def _home(self, model: str, workspace: str, *, mode: str = "agent",
     footer = Text()
     footer.append("Ready. Type a message to start building.", style=palette.faint)
     if width >= 82:
-        hint = "Alt+Enter for newline  ·  Ctrl+C to stop"
+        hint = "Enter to send  ·  Alt+Enter for newline"
         gap = max(2, width - cell_len(footer.plain) - cell_len(hint) - 1)
         footer.append(" " * gap)
         footer.append(hint, style=palette.faint)
@@ -237,12 +237,12 @@ def _tool_call(self, name: str, target: str, detail: str = "",
     line.append(self.g.tick if ok else self.g.cross,
                 style=palette.good if ok else palette.bad)
     line.append("  ")
-    from . import cli as cli_mod
-    line.append(cli_mod.verb(name), style=f"bold {palette.accent}")
+    line.append(ui_mod.verb(name).replace("_", " "),
+                style=f"bold {palette.accent}")
     if target:
         line.append(f"  {ui_mod.sanitise(target)[:120]}", style=palette.text)
     if detail:
-        line.append(f"  {detail[:120]}",
+        line.append(f"  {ui_mod.sanitise(detail)[:120]}",
                     style=palette.muted if ok else palette.bad)
 
     card = Table.grid(expand=True, padding=(0, 1))
@@ -308,7 +308,7 @@ def _prompt_hint(repl) -> str:
     typed = cli_mod.command_hints(cli_mod._composer_text(repl))
     if typed:
         return "  ".join(typed)
-    return "Ready. Type a message to start building."
+    return "Describe a task, or type /help for commands."
 
 
 def _prompt_message(self) -> HTML:
@@ -320,7 +320,7 @@ def _prompt_message(self) -> HTML:
     width = max(30, self.ui.width)
 
     left = _prompt_hint(self)
-    right = "Alt+Enter newline  ·  Ctrl+C stop"
+    right = "Enter send  ·  Alt+Enter newline"
     room = width - cell_len(left) - cell_len(right)
     if room >= 2:
         hint = left + (" " * room) + right
