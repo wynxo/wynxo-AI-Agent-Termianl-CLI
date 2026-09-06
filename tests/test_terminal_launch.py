@@ -1,3 +1,4 @@
+import shlex
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,13 +25,13 @@ def test_konsole_command_preserves_shell_syntax():
     assert argv[-1] == command
 
 
-def test_konsole_command_uses_the_wynxo_workspace():
+def test_konsole_command_uses_the_wynxo_workspace(tmp_path):
     entry = SimpleNamespace(name="Konsole", path=Path("/usr/bin/konsole"))
-    workspace = Path("/tmp").resolve()
+    workspace = tmp_path.resolve()
     argv = terminal_argv(entry, "pwd", str(workspace))
 
     assert argv is not None
-    assert argv[-1] == f"cd -- {workspace} && pwd"
+    assert argv[-1] == f"cd -- {shlex.quote(str(workspace))} && pwd"
 
 
 def test_unknown_terminal_is_rejected():
