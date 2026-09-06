@@ -102,6 +102,50 @@ def test_generic_terminal_can_run_a_command_without_model_guessing(monkeypatch, 
     assert "printf hello" in argv[-1]
 
 
+def test_windows_terminal_is_recognised_for_generic_launch(monkeypatch):
+    monkeypatch.delenv("TERMINAL", raising=False)
+    monkeypatch.delenv("XDG_CURRENT_DESKTOP", raising=False)
+    monkeypatch.delenv("DESKTOP_SESSION", raising=False)
+    monkeypatch.setattr(apps_module.sys, "platform", "win32")
+    catalog = catalog_with(
+        AppEntry("Windows Terminal", Path("Windows Terminal.lnk"), "start_menu"),
+        AppEntry("Calculator", Path("Calculator.lnk"), "start_menu"),
+    )
+
+    chosen = apps_module.preferred_terminal(catalog)
+
+    assert chosen is not None
+    assert chosen.name == "Windows Terminal"
+
+
+def test_macos_terminal_is_recognised_for_generic_launch(monkeypatch):
+    monkeypatch.delenv("TERMINAL", raising=False)
+    monkeypatch.delenv("XDG_CURRENT_DESKTOP", raising=False)
+    monkeypatch.delenv("DESKTOP_SESSION", raising=False)
+    monkeypatch.setattr(apps_module.sys, "platform", "darwin")
+    catalog = catalog_with(
+        AppEntry("Terminal", Path("/Applications/Utilities/Terminal.app"), "mac_app"),
+        AppEntry("TextEdit", Path("/Applications/TextEdit.app"), "mac_app"),
+    )
+
+    chosen = apps_module.preferred_terminal(catalog)
+
+    assert chosen is not None
+    assert chosen.name == "Terminal"
+
+
+def test_recognised_terminal_with_unknown_command_contract_runs_nothing(tmp_path):
+    entry = AppEntry(
+        "Windows Terminal", Path("Windows Terminal.lnk"), "start_menu")
+    tool = LaunchApplication(tmp_path, catalog=catalog_with(entry))
+
+    result = asyncio.run(tool._launch(entry, command="echo hello"))
+
+    assert not result.ok
+    assert result.metadata["status"] == "terminal_command_unsupported"
+    assert "not run" in result.error.lower()
+
+
 def test_generic_terminal_request_fails_honestly_when_none_is_installed(tmp_path):
     catalog = catalog_with(
         AppEntry("Calculator", Path("/apps/kcalc"), "path"),
@@ -127,4 +171,5 @@ def test_registry_exposes_read_only_app_discovery_and_shares_catalog(tmp_path):
     assert discovery is not None
     assert launcher is not None
     assert discovery.mutating is False
+    assert discovery.concurrency_safe is False
     assert discovery.catalog is launcher.catalog is catalog
