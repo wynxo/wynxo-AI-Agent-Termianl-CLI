@@ -7,6 +7,8 @@ marks: closer to a serious coding CLI than a dashboard rendered in a terminal.
 
 from __future__ import annotations
 
+import os
+
 from prompt_toolkit.formatted_text import ANSI, HTML
 from prompt_toolkit.formatted_text.html import html_escape
 from rich.cells import cell_len
@@ -20,8 +22,6 @@ from .platforms import is_dumb_terminal
 
 _INSTALLED = False
 _PREV: dict[str, object] = {}
-
-# The whole transcript shares one content baseline.
 MESSAGE_INDENT = "  "
 
 
@@ -29,12 +29,34 @@ def _trim(text: str, room: int) -> str:
     return product_ui._trim_cells(ui_mod.sanitise(text), max(1, room))
 
 
+def _shorten_path(self, path: str) -> str:
+    """Compact a path consistently even when Windows separators are mixed.
+
+    prompt_toolkit, pathlib, git output and model arguments can legitimately
+    hand the UI a mixture of ``\\`` and ``/`` on Windows. Comparing with
+    ``home + os.sep`` therefore missed paths that were visibly inside home.
+    Normalize only the display form, fold case for the containment check, and
+    keep the familiar ``~/...`` representation on every platform.
+    """
+    raw = ui_mod.sanitise(str(path or ""))
+    display = raw.replace("\\", "/")
+    home = os.path.expanduser("~").replace("\\", "/").rstrip("/")
+    folded = display.casefold()
+    home_folded = home.casefold()
+    if folded == home_folded:
+        display = "~"
+    elif home and folded.startswith(home_folded + "/"):
+        display = "~" + display[len(home):]
+
+    room = max(12, min(40, max(1, self.width // 3)))
+    return ui_mod.elide_tail(display, room, self.g.ellipsis)
+
+
 def _meta_line(ui, model: str, workspace: str, mode: str, width: int) -> Group:
     palette = ui.palette
     model_name = _trim(model or "local model", max(12, min(36, width // 2)))
     mode_name = _trim(mode or "agent", 14)
     path = _trim(ui.shorten_path(workspace), max(16, width - 2))
-
     session = Text()
     session.append(model_name, style=palette.muted)
     session.append("  /  ", style=palette.faint)
@@ -46,20 +68,16 @@ def _home(self, model: str, workspace: str, *, mode: str = "agent",
           companion: str = "ready", version: str = "",
           show_companion: bool = False, show_art: bool = False,
           show_static_controls: bool = False) -> None:
-    """Identity, context and useful entry points. No dashboard chrome."""
     self.refresh_size()
-    # Redirected output should keep the battle-tested plain-text behaviour.
     if not self.console.is_terminal:
         return _PREV["home"](
             self, model, workspace, mode=mode, companion=companion,
             version=version, show_companion=show_companion, show_art=show_art,
             show_static_controls=show_static_controls,
         )
-
     palette = self.palette
     width = self.width
     self.console.print()
-
     brand = Text()
     brand.append("WYNXO", style=f"bold {palette.accent}")
     brand.append(f"  {version or __version__}", style=palette.faint)
@@ -67,15 +85,11 @@ def _home(self, model: str, workspace: str, *, mode: str = "agent",
         brand.append("    local-first coding agent", style=palette.muted)
     self.console.print(brand)
     self.console.print(_meta_line(self, model, workspace, mode, width))
-
     self.console.print()
     self.console.print(Text("Ready to build.", style=f"bold {palette.text}"))
     self.console.print(Text(
         "Describe the outcome. I can inspect code, edit files, run tests, and "
-        "use installed applications.",
-        style=palette.muted,
-    ))
-
+        "use installed applications.", style=palette.muted))
     self.console.print()
     for command, description in (
         ("/help", "commands + keyboard shortcuts"),
@@ -97,7 +111,6 @@ def _message_block(ui, who: str, text: str, *, note: str = "",
     head.append(who.lower(), style=(f"bold {palette.accent}" if assistant
                                      else f"bold {palette.muted}"))
     head.append(f"  {product_ui._clock()}", style=palette.faint)
-
     body = Text(MESSAGE_INDENT + ui_mod.sanitise(text), style=palette.text)
     if note:
         body.append(f"  {ui_mod.sanitise(note)}", style=palette.faint)
@@ -133,12 +146,10 @@ def _tool_label(name: str) -> str:
 
 def _tool_call(self, name: str, target: str, detail: str = "",
                ok: bool = True) -> None:
-    """A tool call is an operation record, not a card."""
     palette = self.palette
     operation = _tool_label(name)
     target = ui_mod.sanitise(target)[:180]
     detail = ui_mod.sanitise(detail)[:220]
-
     line = Text()
     line.append("[ok]" if ok else "[x] ",
                 style=palette.good if ok else palette.bad)
@@ -147,7 +158,6 @@ def _tool_call(self, name: str, target: str, detail: str = "",
     if target:
         line.append("  ")
         line.append(target, style=palette.muted)
-
     self.console.boundary()
     self.console.print(line)
     if detail:
@@ -161,13 +171,11 @@ def _todos(self, rendered: str) -> None:
     steps = ui_mod.plan_steps(ui_mod.sanitise(rendered))
     if not steps:
         return
-
     palette = self.palette
     done = sum(1 for state, _ in steps if state == "done")
     body = Text()
     body.append("plan", style=f"bold {palette.text}")
     body.append(f"  {done}/{len(steps)}\n", style=palette.faint)
-
     for index, (state, text) in enumerate(steps):
         marker, tone = {
             "done": ("[x]", palette.good),
@@ -180,7 +188,6 @@ def _todos(self, rendered: str) -> None:
         body.append(text, style=palette.text if state == "now" else palette.muted)
         if index != len(steps) - 1:
             body.append("\n")
-
     self.console.boundary()
     self.console.print(body)
 
@@ -188,12 +195,10 @@ def _todos(self, rendered: str) -> None:
 def _prompt_message(self) -> HTML:
     if is_dumb_terminal() or self.ui.width < 36:
         return _PREV["prompt_message"](self)
-
     palette = self.ui.palette
     width = max(30, self.ui.width)
     left = product_ui._prompt_hint(self)
     right = "Enter send  /  Alt+Enter newline"
-
     room = width - cell_len(left) - cell_len(right)
     if room >= 3:
         hint = left + (" " * room) + right
@@ -202,19 +207,16 @@ def _prompt_message(self) -> HTML:
         hint = product_ui._trim_cells(left, left_room)
         if cell_len(hint) + cell_len(right) + 3 <= width:
             hint += "   " + right
-
     return HTML(
         '<style fg="%s">%s</style>\n'
         '<b><style fg="%s">&gt;</style></b> '
-        % (palette.faint, html_escape(hint), palette.accent)
-    )
+        % (palette.faint, html_escape(hint), palette.accent))
 
 
 def _status_parts(self, width: int) -> tuple[str, str]:
     left = self._status_line().replace(" · ", " / ")
     workspace = self.ui.shorten_path(str(self.workspace))
     right = f"ready  /  {workspace}"
-
     gap = 3
     if cell_len(left) + cell_len(right) + gap > width:
         left = product_ui._trim_cells(
@@ -228,7 +230,6 @@ def _status_parts(self, width: int) -> tuple[str, str]:
 def _bottom_toolbar(self):
     if is_dumb_terminal() or self.ui.width < 36:
         return _PREV["bottom_toolbar"](self)
-
     palette = self.ui.palette
     width = max(30, self.ui.width)
     left, right = _status_parts(self, width)
@@ -236,7 +237,6 @@ def _bottom_toolbar(self):
     body = left + (" " * gap) + right
     if cell_len(body) > width:
         body = product_ui._trim_cells(body, width)
-
     muted = ui_mod._ansi_of(palette.muted)
     good = ui_mod._ansi_of(palette.good)
     reset = "\x1b[0m"
@@ -247,7 +247,6 @@ def _bottom_toolbar(self):
 
 
 async def _on_content(self, text: str) -> None:
-    """Streaming and completed replies share the exact same baseline."""
     if not text:
         return
     async with self._status_lock:
@@ -265,33 +264,29 @@ async def _on_content(self, text: str) -> None:
 
 
 def install() -> None:
-    """Install the minimal shell after :mod:`wynxo.product_ui`."""
     global _INSTALLED
     if _INSTALLED:
         return
-
     from . import cli as cli_mod
-
     _PREV.update({
         "home": ui_mod.UI.home,
         "user_line": ui_mod.UI.user_line,
         "assistant_markdown": ui_mod.UI.assistant_markdown,
         "tool_call": ui_mod.UI.tool_call,
         "todos": ui_mod.UI.todos,
+        "shorten_path": ui_mod.UI.shorten_path,
         "prompt_message": cli_mod.Repl._prompt_message,
         "bottom_toolbar": cli_mod.Repl._bottom_toolbar,
         "on_content": cli_mod.TerminalCallbacks.on_content,
     })
-
     ui_mod.UI.home = _home
     ui_mod.UI.user_line = _user_line
     ui_mod.UI.assistant_markdown = _assistant_markdown
     ui_mod.UI.tool_call = _tool_call
     ui_mod.UI.todos = _todos
-
+    ui_mod.UI.shorten_path = _shorten_path
     cli_mod.Repl._prompt_message = _prompt_message
     cli_mod.Repl._bottom_toolbar = _bottom_toolbar
     cli_mod.TerminalCallbacks.on_content = _on_content
-
     product_ui._assistant_heading = _assistant_heading
     _INSTALLED = True
