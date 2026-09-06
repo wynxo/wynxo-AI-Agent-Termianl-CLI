@@ -13,6 +13,7 @@ terminal-safe glyph decisions are visible without needing a live Ollama model.
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 from wynxo import clean_ui, product_ui
@@ -22,6 +23,25 @@ WIDTH = 112
 HEIGHT = 34
 WORKSPACE = "/home/elliot/wynxo-AI-Agent-Termianl-CLI"
 MODEL = "qwen3-coder:30b"
+
+_FONT_FACE = re.compile(r"\s*@font-face\s*\{.*?\}\s*", re.DOTALL)
+
+
+class GalleryBar:
+    """Tiny stand-in for the live bar so streamed text goes through Rich.
+
+    CodeStreamer normally writes partial prose directly to console.file when
+    there is no live region. That is correct for the real terminal, but Rich's
+    SVG recorder only sees content that goes through Console.print. A live bar
+    keeps the line in Rich until it is committed, which is exactly the path a
+    normal interactive agent turn uses while it is answering.
+    """
+
+    def __init__(self):
+        self.lead = None
+
+    def set_lead(self, lead) -> None:
+        self.lead = lead
 
 
 def make_ui() -> UI:
@@ -37,15 +57,34 @@ def make_ui() -> UI:
     ui.g = Glyphs(True)
     ui.width = WIDTH
     ui.narrow = False
+    ui.bar = GalleryBar()
     # Home normally re-measures the real TTY. A gallery has a deliberate
     # viewport, so keep it fixed and deterministic.
     ui.refresh_size = lambda: None
     return ui
 
 
+def _portable_svg(path: Path) -> None:
+    """Make Rich's SVG self-contained enough for offline review.
+
+    Rich references Fira Code from a CDN. CI artifacts and chat attachments
+    are commonly viewed without network font access, where box drawing then
+    falls back unpredictably. Keep the SVG text-based, remove the remote font
+    faces, and ask for a broadly available monospace with line-drawing glyphs.
+    """
+    text = path.read_text(encoding="utf-8")
+    text = _FONT_FACE.sub("\n", text)
+    text = text.replace(
+        "font-family: Fira Code, monospace;",
+        'font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace;',
+    )
+    path.write_text(text, encoding="utf-8")
+
+
 def save(ui: UI, out: Path, name: str, title: str) -> Path:
     target = out / f"{name}.svg"
     ui.console.save_svg(str(target), title=title, clear=False)
+    _portable_svg(target)
     return target
 
 
@@ -119,8 +158,16 @@ def render(out: Path) -> list[Path]:
     # Match bootstrap.py's real install order.
     product_ui.install()
     clean_ui.install()
+
+    # CI is intentionally non-interactive. For a visual gallery we want to
+    # exercise the interactive branch at a fixed viewport, not the compact
+    # redirected-output fallback that CI itself normally uses.
+    product_ui.is_dumb_terminal = lambda: False
+    clean_ui.is_dumb_terminal = lambda: False
+
     # Keep screenshots stable across machines and review times.
     product_ui._clock = lambda: "2:28 AM"
+    product_ui.terminal_height = lambda: HEIGHT
     clean_ui.terminal_height = lambda: HEIGHT
 
     return [
