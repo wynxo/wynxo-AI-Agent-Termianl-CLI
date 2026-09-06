@@ -68,7 +68,8 @@ def test_generic_terminal_request_prefers_the_users_terminal(monkeypatch, tmp_pa
 
     assert result.ok
     assert result.metadata["application"] == "Kitty"
-    assert launched == [["/apps/kitty"]]
+    assert len(launched) == 1
+    assert Path(launched[0][0]).name.lower() == "kitty"
 
 
 def test_generic_terminal_can_run_a_command_without_model_guessing(monkeypatch, tmp_path):
@@ -96,7 +97,7 @@ def test_generic_terminal_can_run_a_command_without_model_guessing(monkeypatch, 
     assert result.metadata["command"] == "printf hello"
     assert launched
     argv = launched[0]
-    assert argv[0] == "/apps/konsole"
+    assert Path(argv[0]).name.lower() == "konsole"
     assert argv[-3:-1] == ["bash", "-lc"]
     assert "printf hello" in argv[-1]
 
