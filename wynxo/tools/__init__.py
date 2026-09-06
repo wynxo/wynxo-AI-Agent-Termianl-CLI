@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ..memory import Memory
 from ..scope import Boundary
-from .base import Tool
+from .base import Tool, ToolResult
 from .files import EditFile, ListDir, MultiEdit, ReadFile, WriteFile
 from .dev import Git, RunTests
 from ..secrets import Shield
