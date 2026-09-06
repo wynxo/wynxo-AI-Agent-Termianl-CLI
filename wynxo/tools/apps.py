@@ -1,6 +1,6 @@
 """Discover and launch installed applications without guessing.
 
-The catalog is the source of truth.  The tools in this module only act on
+The catalog is the source of truth. The tools in this module only act on
 entries the operating system reported, so a model can search for an app or
 ask for "any terminal" without inventing an executable name or silently
 substituting some unrelated program.
@@ -25,6 +25,9 @@ from .base import Tool, ToolResult
 # Terminal discovery and execution
 # ---------------------------------------------------------------------------
 
+# Terminal programs for which Wynxo knows a safe argv contract for running a
+# shell command. Generic launching can recognise a wider set below; command
+# execution is deliberately narrower because the switches differ by terminal.
 TERMINALS: dict[str, tuple[str, ...]] = {
     # --separate prevents Konsole from handing the request to an existing
     # process. --hold keeps the session visible after the command exits.
@@ -48,6 +51,22 @@ TERMINALS: dict[str, tuple[str, ...]] = {
     "rxvt": ("-e",),
     "st": ("-e",),
     "qterminal": ("-e",),
+}
+
+# Canonical terminal ids -> names an OS catalog may actually report. The
+# platform-native entries are launchable even when Wynxo intentionally does
+# not claim a command-line contract for them.
+_TERMINAL_ALIASES: dict[str, tuple[str, ...]] = {
+    **{key: (key,) for key in TERMINALS},
+    "windows-terminal": (
+        "windows terminal",
+        "windows terminal preview",
+        "wt",
+        "wt.exe",
+    ),
+    "terminal-app": ("terminal", "terminal.app"),
+    "iterm2": ("iterm", "iterm2", "iterm.app", "iterm2.app"),
+    "warp": ("warp", "warp.app"),
 }
 
 _GENERIC_TERMINAL_QUERIES = frozenset({
@@ -74,12 +93,19 @@ _DESKTOP_TERMINAL_PREFERENCE = {
 
 
 def _terminal_key(entry: AppEntry) -> str:
-    """The supported terminal key represented by an installed app entry."""
+    """Canonical terminal id represented by an installed app entry."""
     forms = {condense(str(entry.name)), condense(str(entry.path.stem))}
-    for key in TERMINALS:
-        if condense(key) in forms:
+    for key, aliases in _TERMINAL_ALIASES.items():
+        alias_forms = {condense(key), *(condense(alias) for alias in aliases)}
+        if forms & alias_forms:
             return key
     return ""
+
+
+def _terminal_key_matches(key: str, wanted: str) -> bool:
+    forms = {condense(key)}
+    forms.update(condense(alias) for alias in _TERMINAL_ALIASES.get(key, ()))
+    return condense(wanted) in forms
 
 
 def is_a_terminal(entry: AppEntry) -> bool:
@@ -87,7 +113,7 @@ def is_a_terminal(entry: AppEntry) -> bool:
 
 
 def terminal_entries(catalog: ApplicationCatalog) -> list[AppEntry]:
-    """Supported terminal emulators that are genuinely installed."""
+    """Recognised terminal emulators that are genuinely installed."""
     return [entry for entry in catalog.entries() if is_a_terminal(entry)]
 
 
@@ -95,7 +121,7 @@ def _terminal_preference() -> tuple[str, ...]:
     """Preference order for a generic terminal request.
 
     This is not an installed-app list: every returned candidate is still
-    checked against the catalog.  Desktop conventions only choose between
+    checked against the catalog. Desktop conventions only choose between
     several *real* matches, while $TERMINAL wins when the user configured it.
     """
     preferred: list[str] = []
@@ -109,6 +135,11 @@ def _terminal_preference() -> tuple[str, ...]:
         if executable:
             preferred.append(Path(executable).name.lower())
 
+    if sys.platform == "win32":
+        preferred.append("windows-terminal")
+    elif sys.platform == "darwin":
+        preferred.extend(("terminal-app", "iterm2", "warp"))
+
     desktop = " ".join(filter(None, (
         os.environ.get("XDG_CURRENT_DESKTOP", ""),
         os.environ.get("DESKTOP_SESSION", ""),
@@ -118,13 +149,13 @@ def _terminal_preference() -> tuple[str, ...]:
             preferred.extend(order)
             break
 
-    preferred.extend(TERMINALS)
+    preferred.extend(_TERMINAL_ALIASES)
     # Preserve priority while making repeated values harmless.
     return tuple(dict.fromkeys(preferred))
 
 
 def preferred_terminal(catalog: ApplicationCatalog) -> AppEntry | None:
-    """Choose one installed supported terminal for an explicitly generic ask."""
+    """Choose one installed recognised terminal for an explicitly generic ask."""
     entries = terminal_entries(catalog)
     if not entries:
         return None
@@ -136,13 +167,10 @@ def preferred_terminal(catalog: ApplicationCatalog) -> AppEntry | None:
             by_key[key] = entry
 
     for wanted in _terminal_preference():
-        wanted_folded = condense(wanted)
         for key, entry in by_key.items():
-            if condense(key) == wanted_folded:
+            if _terminal_key_matches(key, wanted):
                 return entry
 
-    # Every supported terminal should be represented in TERMINALS, but keep a
-    # deterministic fallback if a future entry reaches this point.
     return sorted(entries, key=lambda item: item.name.casefold())[0]
 
 
@@ -156,7 +184,7 @@ def matching_applications(catalog: ApplicationCatalog, query: str = "",
 
     The same resolver used by launch_application gets first say, so
     abbreviations such as ``vscode`` and harmless typos behave consistently
-    between discovery and launching.  A simple word search is the fallback
+    between discovery and launching. A simple word search is the fallback
     for broad browsing queries that intentionally match several apps.
     """
     limit = max(1, min(50, int(limit)))
@@ -190,9 +218,9 @@ def matching_applications(catalog: ApplicationCatalog, query: str = "",
 
 def terminal_argv(entry: AppEntry, command: str,
                   workspace: str = "") -> list[str] | None:
-    """Build a terminal argv that executes command in WYNXO's workspace."""
+    """Build an argv for terminals whose command contract Wynxo knows."""
     key = _terminal_key(entry)
-    if not key:
+    if not key or key not in TERMINALS:
         return None
 
     binary = shutil.which(key)
@@ -251,7 +279,9 @@ class ListApplications(Tool):
     )
     Input = ListApplicationsInput
     mutating = False
-    concurrency_safe = True
+    # The catalog has a shared lazy cache and refresh operation. Serialising
+    # calls avoids two concurrent model tool calls scanning the same OS tree.
+    concurrency_safe = False
 
     def __init__(self, workspace, boundary=None, shield=None,
                  catalog: ApplicationCatalog | None = None):
@@ -260,11 +290,11 @@ class ListApplications(Tool):
 
     async def run(self, args: ListApplicationsInput) -> ToolResult:
         if args.refresh:
-            self.catalog.refresh()
+            await asyncio.to_thread(self.catalog.refresh)
 
         query = (args.query or "").strip()
-        matches, total = matching_applications(
-            self.catalog, query, limit=args.limit)
+        matches, total = await asyncio.to_thread(
+            matching_applications, self.catalog, query, limit=args.limit)
 
         if not matches:
             message = (f"No installed applications match '{query}'." if query
@@ -323,12 +353,13 @@ class LaunchApplication(Tool):
         "Launch an installed GUI application. Resolve named applications from "
         "the machine's application catalog; never guess or substitute. If the "
         "user explicitly says any/default terminal, pass query='terminal' and "
-        "the tool deterministically chooses a supported terminal that is "
+        "the tool deterministically chooses a recognised terminal that is "
         "actually installed. If the user asks to open a terminal and run a "
         "command, put that command in `command`. The command must actually "
-        "execute before the tool reports success. Keep the terminal open so "
-        "the user can see the output. A successful launch completes that "
-        "request; do not invent follow-up tool calls."
+        "execute before the tool reports success; if Wynxo cannot guarantee "
+        "that terminal's command contract it fails honestly instead. Keep the "
+        "terminal open so the user can see the output. A successful launch "
+        "completes that request; do not invent follow-up tool calls."
     )
     Input = LaunchApplicationInput
     mutating = True
@@ -347,13 +378,13 @@ class LaunchApplication(Tool):
             )
 
         if is_generic_terminal_query(query):
-            entry = preferred_terminal(self.catalog)
+            entry = await asyncio.to_thread(preferred_terminal, self.catalog)
             if entry is None:
-                self.catalog.refresh()
-                entry = preferred_terminal(self.catalog)
+                await asyncio.to_thread(self.catalog.refresh)
+                entry = await asyncio.to_thread(preferred_terminal, self.catalog)
             if entry is None:
                 return ToolResult.failure(
-                    "Could not find a supported installed terminal emulator. "
+                    "Could not find a recognised installed terminal emulator. "
                     "Nothing was launched.",
                     not_found=True,
                     query=query,
@@ -365,10 +396,10 @@ class LaunchApplication(Tool):
                 (args.command or "").strip(),
             )
 
-        resolution = self.catalog.resolve(query)
+        resolution = await asyncio.to_thread(self.catalog.resolve, query)
         if resolution.status == "not_found":
-            self.catalog.refresh()
-            resolution = self.catalog.resolve(query)
+            await asyncio.to_thread(self.catalog.refresh)
+            resolution = await asyncio.to_thread(self.catalog.resolve, query)
 
         if resolution.status == "path_query":
             return ToolResult.failure(
@@ -402,6 +433,14 @@ class LaunchApplication(Tool):
             if command:
                 argv = terminal_argv(entry, command, self.workspace)
                 if argv is None:
+                    if is_a_terminal(entry):
+                        return ToolResult.failure(
+                            f"'{entry.name}' is an installed terminal, but Wynxo "
+                            "does not know a safe command-execution contract for "
+                            "it on this platform. The terminal was not launched "
+                            "and the command was not run.",
+                            status="terminal_command_unsupported",
+                            application=entry.name, query=entry.name)
                     return ToolResult.failure(
                         f"'{entry.name}' is not a supported terminal emulator, "
                         "so the command was not run.",
