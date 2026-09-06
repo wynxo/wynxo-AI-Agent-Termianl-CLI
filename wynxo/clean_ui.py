@@ -1,8 +1,8 @@
 """Minimal, terminal-native product shell for Wynxo.
 
 The shell deliberately avoids decorative boxes and font-fragile iconography.
-Hierarchy comes from spacing, typography, and a small number of status marks:
-closer to a serious coding CLI than a dashboard rendered inside a terminal.
+Hierarchy comes from spacing, typography, and a small number of ASCII status
+marks: closer to a serious coding CLI than a dashboard rendered in a terminal.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from prompt_toolkit.formatted_text import ANSI, HTML
 from prompt_toolkit.formatted_text.html import html_escape
 from rich.cells import cell_len
 from rich.console import Group
-from rich.table import Table
 from rich.text import Text
 
 from . import __version__
@@ -22,7 +21,7 @@ from .platforms import is_dumb_terminal
 _INSTALLED = False
 _PREV: dict[str, object] = {}
 
-# Replies, tools, and plans all begin on the same quiet two-cell content rail.
+# The whole transcript shares one content baseline.
 MESSAGE_INDENT = "  "
 
 
@@ -32,9 +31,9 @@ def _trim(text: str, room: int) -> str:
 
 def _meta_line(ui, model: str, workspace: str, mode: str, width: int) -> Group:
     palette = ui.palette
-    model_name = _trim(model or "local model", max(12, min(36, width // 3)))
+    model_name = _trim(model or "local model", max(12, min(36, width // 2)))
     mode_name = _trim(mode or "agent", 14)
-    path = _trim(ui.shorten_path(workspace), max(18, width - 4))
+    path = _trim(ui.shorten_path(workspace), max(16, width - 2))
 
     session = Text()
     session.append(model_name, style=palette.muted)
@@ -47,9 +46,10 @@ def _home(self, model: str, workspace: str, *, mode: str = "agent",
           companion: str = "ready", version: str = "",
           show_companion: bool = False, show_art: bool = False,
           show_static_controls: bool = False) -> None:
-    """A calm launch screen: identity, context, useful entry points, nothing else."""
+    """Identity, context and useful entry points. No dashboard chrome."""
     self.refresh_size()
-    if is_dumb_terminal() or self.narrow or not self.console.is_terminal:
+    # Redirected output should keep the battle-tested plain-text behaviour.
+    if not self.console.is_terminal:
         return _PREV["home"](
             self, model, workspace, mode=mode, companion=companion,
             version=version, show_companion=show_companion, show_art=show_art,
@@ -58,39 +58,35 @@ def _home(self, model: str, workspace: str, *, mode: str = "agent",
 
     palette = self.palette
     width = self.width
-
     self.console.print()
 
     brand = Text()
     brand.append("WYNXO", style=f"bold {palette.accent}")
     brand.append(f"  {version or __version__}", style=palette.faint)
-    brand.append("    local-first coding agent", style=palette.muted)
+    if width >= 58:
+        brand.append("    local-first coding agent", style=palette.muted)
     self.console.print(brand)
     self.console.print(_meta_line(self, model, workspace, mode, width))
 
     self.console.print()
     self.console.print(Text("Ready to build.", style=f"bold {palette.text}"))
     self.console.print(Text(
-        "Describe the outcome. Wynxo can inspect the project, edit files, run "
-        "tests, and use installed applications.",
+        "Describe the outcome. I can inspect code, edit files, run tests, and "
+        "use installed applications.",
         style=palette.muted,
     ))
 
     self.console.print()
-    quick = Table.grid(padding=(0, 2), expand=False)
-    quick.add_column(width=10, no_wrap=True)
-    quick.add_column(no_wrap=False)
     for command, description in (
         ("/help", "commands + keyboard shortcuts"),
         ("/tools", "agent capabilities"),
         ("/apps", "installed applications"),
         ("/status", "model, mode, context + session"),
     ):
-        quick.add_row(
-            Text(command, style=f"bold {palette.accent}"),
-            Text(description, style=palette.faint),
-        )
-    self.console.print(quick)
+        line = Text(MESSAGE_INDENT)
+        line.append(command.ljust(10), style=f"bold {palette.accent}")
+        line.append(description, style=palette.faint)
+        self.console.print(line)
     self.console.print()
 
 
@@ -109,8 +105,6 @@ def _message_block(ui, who: str, text: str, *, note: str = "",
 
 
 def _user_line(self, text: str, note: str = "") -> None:
-    if self.narrow or not self.g.unicode:
-        return _PREV["user_line"](self, text, note)
     self.console.boundary()
     self.console.print(_message_block(self, "you", text, note=note))
 
@@ -126,9 +120,6 @@ def _assistant_heading(ui) -> None:
 def _assistant_markdown(self, text: str) -> None:
     if not text.strip():
         return
-    if self.narrow or not self.g.unicode:
-        return _PREV["assistant_markdown"](self, text)
-
     _assistant_heading(self)
     streamer = ui_mod.CodeStreamer(self, indent=MESSAGE_INDENT)
     streamer.feed(text)
@@ -142,7 +133,7 @@ def _tool_label(name: str) -> str:
 
 def _tool_call(self, name: str, target: str, detail: str = "",
                ok: bool = True) -> None:
-    """One compact operation record instead of a card around every tool call."""
+    """A tool call is an operation record, not a card."""
     palette = self.palette
     operation = _tool_label(name)
     target = ui_mod.sanitise(target)[:180]
@@ -167,9 +158,6 @@ def _tool_call(self, name: str, target: str, detail: str = "",
 def _todos(self, rendered: str) -> None:
     if not rendered.strip():
         return
-    if self.narrow or not self.g.unicode:
-        return _PREV["todos"](self, rendered)
-
     steps = ui_mod.plan_steps(ui_mod.sanitise(rendered))
     if not steps:
         return
@@ -198,7 +186,7 @@ def _todos(self, rendered: str) -> None:
 
 
 def _prompt_message(self) -> HTML:
-    if is_dumb_terminal() or self.ui.width < 48:
+    if is_dumb_terminal() or self.ui.width < 36:
         return _PREV["prompt_message"](self)
 
     palette = self.ui.palette
@@ -227,19 +215,18 @@ def _status_parts(self, width: int) -> tuple[str, str]:
     workspace = self.ui.shorten_path(str(self.workspace))
     right = f"ready  /  {workspace}"
 
-    inner = max(1, width)
     gap = 3
-    if cell_len(left) + cell_len(right) + gap > inner:
+    if cell_len(left) + cell_len(right) + gap > width:
         left = product_ui._trim_cells(
-            left, max(10, inner - cell_len(right) - gap))
-    if cell_len(left) + cell_len(right) + gap > inner:
+            left, max(10, width - cell_len(right) - gap))
+    if cell_len(left) + cell_len(right) + gap > width:
         right = product_ui._trim_cells(
-            right, max(10, inner - cell_len(left) - gap))
+            right, max(10, width - cell_len(left) - gap))
     return left, right
 
 
 def _bottom_toolbar(self):
-    if is_dumb_terminal() or self.ui.width < 48:
+    if is_dumb_terminal() or self.ui.width < 36:
         return _PREV["bottom_toolbar"](self)
 
     palette = self.ui.palette
@@ -260,7 +247,7 @@ def _bottom_toolbar(self):
 
 
 async def _on_content(self, text: str) -> None:
-    """Streaming and completed replies use the same two-cell content baseline."""
+    """Streaming and completed replies share the exact same baseline."""
     if not text:
         return
     async with self._status_lock:
