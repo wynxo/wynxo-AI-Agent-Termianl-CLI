@@ -26,10 +26,11 @@ def test_konsole_command_preserves_shell_syntax():
 
 def test_konsole_command_uses_the_wynxo_workspace():
     entry = SimpleNamespace(name="Konsole", path=Path("/usr/bin/konsole"))
-    argv = terminal_argv(entry, "pwd", "/tmp")
+    workspace = Path("/tmp").resolve()
+    argv = terminal_argv(entry, "pwd", str(workspace))
 
     assert argv is not None
-    assert argv[-1] == "cd -- /tmp && pwd"
+    assert argv[-1] == f"cd -- {workspace} && pwd"
 
 
 def test_unknown_terminal_is_rejected():
