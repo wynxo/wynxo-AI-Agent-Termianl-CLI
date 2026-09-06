@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from wynxo.tools import ToolResult
 from wynxo.tools import apps as apps_module
 from wynxo.tools import build_registry
 from wynxo.tools.appcatalog import AppEntry, ApplicationCatalog, Sources
@@ -18,6 +19,10 @@ def catalog_with(*entries: AppEntry) -> ApplicationCatalog:
     # exact OS result and stay independent of the runner's desktop.
     catalog._entries = tuple(entries)
     return catalog
+
+
+def test_tool_result_is_really_exported_from_tools_package():
+    assert ToolResult.success("ok").ok is True
 
 
 def test_list_applications_uses_the_same_fuzzy_matching_as_launch(tmp_path):
