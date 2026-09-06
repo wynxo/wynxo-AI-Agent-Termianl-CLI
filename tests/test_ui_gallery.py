@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
+
+
+def _visible_text(path) -> str:
+    """Text a person sees in Rich's SVG, independent of tspans/layout tags."""
+    root = ET.fromstring(path.read_text(encoding="utf-8"))
+    return " ".join("".join(root.itertext()).split())
 
 
 def test_ui_gallery_renders_five_review_screens(tmp_path):
@@ -25,10 +32,11 @@ def test_ui_gallery_renders_five_review_screens(tmp_path):
     ]
     assert all(path.stat().st_size > 500 for path in files)
 
-    home = files[0].read_text(encoding="utf-8")
-    conversation = files[1].read_text(encoding="utf-8")
-    tools = files[2].read_text(encoding="utf-8")
-    plan = files[3].read_text(encoding="utf-8")
+    home_svg = files[0].read_text(encoding="utf-8")
+    home = _visible_text(files[0])
+    conversation = _visible_text(files[1])
+    tools = _visible_text(files[2])
+    plan = _visible_text(files[3])
 
     # The gallery must be the interactive product shell, not redirected output.
     assert "Ready to build." in home
@@ -36,12 +44,12 @@ def test_ui_gallery_renders_five_review_screens(tmp_path):
     assert "renderer bug" in conversation
     assert "[ok]" in tools
     assert "list applications" in tools
-    assert "[&gt;]" in plan or "[>]" in plan
+    assert "[>]" in plan
 
-    # The redesign intentionally does not use giant box/card borders.
-    assert "Tool  done" not in tools
-    assert "Plan  2/5 complete" not in plan
+    # The redesign intentionally does not use giant box/card headings.
+    assert "Tool done" not in tools
+    assert "Plan 2/5 complete" not in plan
 
     # Review artifacts must not rely on a CDN font.
-    assert "cdnjs.cloudflare.com" not in home
-    assert "DejaVu Sans Mono" in home
+    assert "cdnjs.cloudflare.com" not in home_svg
+    assert "DejaVu Sans Mono" in home_svg
