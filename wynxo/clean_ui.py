@@ -1,9 +1,9 @@
-"""Typography and alignment cleanup for the Wynxo product shell.
+"""Crisp, width-safe product shell for Wynxo.
 
-The product shell intentionally aims for a polished terminal-native look, but
-terminal fonts disagree about several decorative Unicode glyphs.  This layer
-keeps the same information architecture while using width-safe primitives and
-simpler spacing so the UI stays crisp in real monospace terminals.
+This layer is intentionally conservative about terminal rendering.  It keeps
+Wynxo's product-style hierarchy while avoiding font-fragile iconography and
+making the composer, tool cards, plans, and status dock fit predictably in
+real monospace terminals.
 """
 
 from __future__ import annotations
@@ -30,19 +30,45 @@ def _box(ui):
     return shell.THIN if ui.g.unicode else shell.ASCII
 
 
+def _rule(ui, width: int | None = None) -> Text:
+    """A quiet separator that stays inside the active terminal width."""
+    width = max(8, (width or ui.width) - 1)
+    return Text(ui.g.hbar * width, style=ui.palette.faint, no_wrap=True)
+
+
 def _feature(ui, title: str, description: str) -> Group:
-    """Plain text feature block with no font-dependent decorative icon."""
     palette = ui.palette
-    heading = Text(title.upper(), style=f"bold {palette.accent}")
-    detail = Text(description, style=palette.muted)
-    return Group(heading, detail)
+    return Group(
+        Text(title.upper(), style=f"bold {palette.accent}"),
+        Text(description, style=palette.muted),
+    )
+
+
+def _context_row(ui, model: str, workspace: str, mode: str) -> Table:
+    """Compact session metadata for the home screen."""
+    palette = ui.palette
+    row = Table.grid(padding=(0, 2), expand=False)
+    row.add_column(no_wrap=True)
+    row.add_column(no_wrap=True)
+    row.add_column(no_wrap=False)
+
+    model_name = ui_mod.sanitise(model or "local model")
+    mode_name = ui_mod.sanitise(mode or "agent")
+    path = ui.shorten_path(workspace)
+
+    row.add_row(
+        Text.assemble(("MODEL  ", palette.faint), (model_name, palette.muted)),
+        Text.assemble(("MODE  ", palette.faint), (mode_name, palette.muted)),
+        Text.assemble(("WORKSPACE  ", palette.faint), (path, palette.muted)),
+    )
+    return row
 
 
 def _home(self, model: str, workspace: str, *, mode: str = "agent",
           companion: str = "ready", version: str = "",
           show_companion: bool = False, show_art: bool = False,
           show_static_controls: bool = False) -> None:
-    """Render the same home screen with cleaner monospace typography."""
+    """Render a clean, productivity-first launch screen."""
     self.refresh_size()
     if is_dumb_terminal() or self.narrow or not self.console.is_terminal:
         return _PREV["home"](
@@ -60,22 +86,20 @@ def _home(self, model: str, workspace: str, *, mode: str = "agent",
     brand = Text()
     brand.append("WYNXO", style=f"bold {palette.accent}")
     brand.append(f"  {version or __version__}", style=palette.faint)
-    brand.append("  -  local-first coding agent", style=palette.muted)
+    brand.append("  LOCAL-FIRST CODING AGENT", style=palette.muted)
     self.console.print(brand)
-
-    location = Text()
-    location.append("workspace  ", style=palette.faint)
-    location.append(self.shorten_path(workspace), style=palette.muted)
-    self.console.print(location)
+    self.console.print(_context_row(self, model, workspace, mode))
+    self.console.print(_rule(self, width))
     self.console.print()
 
-    self.console.print(Text("Welcome to Wynxo", style=f"bold {palette.text}"))
+    self.console.print(Text("What are we building?", style=f"bold {palette.text}"))
     self.console.print(Text(
-        "Your local-first coding agent. Describe what you want to build.",
+        "Describe a task in plain language. Wynxo can inspect the project, "
+        "edit files, run tools, and keep the work moving.",
         style=palette.muted,
     ))
 
-    if width >= 96 and height >= 28:
+    if width >= 96 and height >= 27:
         self.console.print()
         features = Table.grid(expand=True, padding=(0, 3))
         for _ in range(4):
@@ -83,42 +107,57 @@ def _home(self, model: str, workspace: str, *, mode: str = "agent",
         features.add_row(
             _feature(self, "Build", "Create, edit, and\nrefactor code."),
             _feature(self, "Explore", "Search and understand\nyour codebase."),
-            _feature(self, "Plan", "Break down complex\ntasks."),
-            _feature(self, "Automate", "Run tools and\naccomplish more."),
+            _feature(self, "Plan", "Break down larger\ntasks clearly."),
+            _feature(self, "Automate", "Run local tools and\ninstalled apps."),
         )
-        self.console.print(features)
+
+        self.console.print(Panel(
+            features,
+            box=_box(self),
+            border_style=palette.faint,
+            padding=(0, 2),
+        ))
 
     self.console.print()
-    self.console.print(Text("Quick start", style=f"bold {palette.accent}"))
-
     quick = Table.grid(padding=(0, 2))
-    quick.add_column(width=11)
+    quick.add_column(width=11, no_wrap=True)
     quick.add_column()
     for command, description in (
-        ("/help", "Show commands"),
-        ("/tools", "List available tools"),
-        ("/theme", "Change the theme"),
-        ("/status", "Show session status"),
-        ("/clear", "Clear the terminal"),
+        ("/help", "Commands and keyboard shortcuts"),
+        ("/tools", "Available local tools"),
+        ("/status", "Model, mode, context, and session state"),
+        ("/theme", "Switch terminal theme"),
+        ("/clear", "Clear the conversation view"),
     ):
         quick.add_row(
             Text(command, style=f"bold {palette.accent}"),
             Text(description, style=palette.muted),
         )
-    self.console.print(quick)
+
+    self.console.print(Panel(
+        quick,
+        title=" Quick start ",
+        title_align="left",
+        box=_box(self),
+        border_style=palette.faint,
+        padding=(0, 2),
+    ))
     self.console.print()
 
 
-def _message_grid(ui, who: str, text: str, *, note: str = ""):
-    """Simple two-column message block that cannot drift by glyph width."""
+def _message_grid(ui, who: str, text: str, *, note: str = "",
+                  assistant: bool = False):
+    """Two-column message block with a stable rail and readable hierarchy."""
     palette = ui.palette
     grid = Table.grid(padding=(0, 1), expand=True)
     grid.add_column(width=2, no_wrap=True)
     grid.add_column(ratio=1)
 
-    rail = Text(ui.g.vbar, style=palette.accent_dim)
+    rail_tone = palette.accent if assistant else palette.accent_dim
+    rail = Text(ui.g.vbar, style=rail_tone)
+
     head = Text()
-    head.append(who.upper(), style=f"bold {palette.accent}")
+    head.append(who.upper(), style=f"bold {palette.accent if assistant else palette.text}")
     head.append(f"  {product_ui._clock()}", style=palette.faint)
 
     body = Text(ui_mod.sanitise(text), style=palette.text)
@@ -152,30 +191,31 @@ def _assistant_heading(ui) -> None:
 
 def _tool_call(self, name: str, target: str, detail: str = "",
                ok: bool = True) -> None:
-    if self.narrow or not self.g.unicode:
-        return _PREV["tool_call"](self, name, target, detail, ok)
-
-    from . import cli as cli_mod
-
+    """Render a tool event without depending on cli.py presentation helpers."""
     palette = self.palette
-    line = Text()
-    line.append(self.g.tick if ok else self.g.cross,
+    operation = ui_mod.verb(name)
+    target = ui_mod.sanitise(target)[:160]
+    detail = ui_mod.sanitise(detail)[:200]
+
+    body = Text()
+    body.append(self.g.tick if ok else self.g.cross,
                 style=palette.good if ok else palette.bad)
-    line.append("  ")
-    line.append(cli_mod.verb(name), style=f"bold {palette.accent}")
+    body.append("  ")
+    body.append(operation, style=f"bold {palette.accent}")
     if target:
-        line.append(f"  {ui_mod.sanitise(target)[:120]}", style=palette.text)
+        body.append("\n   ")
+        body.append(target, style=palette.text)
     if detail:
-        line.append(f"  {ui_mod.sanitise(detail)[:120]}",
-                    style=palette.muted if ok else palette.bad)
+        body.append("\n   ")
+        body.append(detail, style=palette.muted if ok else palette.bad)
 
     self.console.boundary()
     self.console.print(Panel(
-        line,
-        title=" Tool ",
+        body,
+        title=" Tool  done " if ok else " Tool  failed ",
         title_align="left",
         box=_box(self),
-        border_style=palette.faint,
+        border_style=palette.faint if ok else palette.bad,
         padding=(0, 2),
     ))
 
@@ -194,11 +234,13 @@ def _todos(self, rendered: str) -> None:
 
     palette = self.palette
     body = Text()
+    done = 0
     for state, text in steps:
         if body.plain:
             body.append("\n")
         if state == "done":
             marker, tone = self.g.step_done, palette.good
+            done += 1
         elif state == "now":
             marker, tone = self.g.step_now, palette.accent
         else:
@@ -209,7 +251,7 @@ def _todos(self, rendered: str) -> None:
     self.console.boundary()
     self.console.print(Panel(
         body,
-        title=f" Plan  {len(steps)} step{'s' if len(steps) != 1 else ''} ",
+        title=f" Plan  {done}/{len(steps)} complete ",
         title_align="left",
         box=_box(self),
         border_style=palette.faint,
@@ -226,7 +268,7 @@ def _prompt_message(self) -> HTML:
     width = max(30, self.ui.width)
 
     left = product_ui._prompt_hint(self)
-    right = "Alt+Enter newline  |  Ctrl+C stop"
+    right = "Alt+Enter newline   Ctrl+C stop"
     room = width - cell_len(left) - cell_len(right)
     if room >= 2:
         hint = left + (" " * room) + right
@@ -252,9 +294,9 @@ def _prompt_message(self) -> HTML:
 
 
 def _status_parts(self, width: int) -> tuple[str, str]:
-    """Fit status text deterministically and preserve the right-hand state."""
+    """Fit session status while preserving the workspace and READY state."""
     g = self.ui.g
-    left = self._status_line().replace(" · ", " | ")
+    left = self._status_line().replace(" · ", "  |  ")
     workspace = self.ui.shorten_path(str(self.workspace))
     right = f"READY  {g.vbar}  {workspace}"
 
@@ -308,7 +350,7 @@ def _bottom_toolbar(self):
 
 
 def install() -> None:
-    """Install typography cleanup after :mod:`wynxo.product_ui`."""
+    """Install the width-safe product shell after :mod:`wynxo.product_ui`."""
     global _INSTALLED
     if _INSTALLED:
         return
@@ -332,8 +374,8 @@ def install() -> None:
     cli_mod.Repl._prompt_message = _prompt_message
     cli_mod.Repl._bottom_toolbar = _bottom_toolbar
 
-    # product_ui's streaming callbacks resolve this helper through their module
-    # globals, so replacing it here also cleans the live-response heading.
+    # product_ui's streaming callbacks resolve this helper through module
+    # globals, so replacing it also keeps live responses visually consistent.
     product_ui._assistant_heading = _assistant_heading
 
     _INSTALLED = True

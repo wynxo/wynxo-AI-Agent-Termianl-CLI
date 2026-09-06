@@ -53,3 +53,29 @@ def test_clean_shell_install_is_idempotent():
         """
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_tool_renderer_does_not_depend_on_cli_verb():
+    """Regression for launch_application crashing after a successful tool call."""
+    result = _run(
+        """
+        import io
+        from wynxo import clean_ui, product_ui
+        from wynxo.ui import Glyphs, UI
+
+        product_ui.install()
+        clean_ui.install()
+
+        ui = UI()
+        ui.g = Glyphs(True)
+        ui.narrow = False
+        ui.width = 100
+        ui.console.file = io.StringIO()
+        ui.tool_call("launch_application", "kcalc", "opened", True)
+
+        rendered = ui.console.file.getvalue()
+        assert "kcalc" in rendered
+        assert "opened" in rendered
+        """
+    )
+    assert result.returncode == 0, result.stderr
