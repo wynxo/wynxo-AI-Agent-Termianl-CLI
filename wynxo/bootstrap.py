@@ -13,6 +13,7 @@ def main():
     # Install compatibility shims before cli imports the provider/client.
     from . import runtime_compat  # noqa: F401
 
+    from . import clean_ui
     from . import cli
     from . import product_ui
 
@@ -22,6 +23,7 @@ def main():
     # real wynxo.cli.main and therefore gets the product shell.
     if getattr(cli.main, "__module__", "") == cli.__name__:
         product_ui.install()
+        clean_ui.install()
     return cli.main()
 
 
