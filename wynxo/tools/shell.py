@@ -31,27 +31,31 @@ def _new_process_group() -> dict:
     if os.name == "nt":
         flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         return {"creationflags": flags} if flags else {}
+    # POSIX: a new session, which is also a new process group.
     return {"start_new_session": True}
 
 
 def _signal_group(process, terminate: bool) -> None:
-    """Signal the command's whole process group, falling back to one process."""
+    """Signal the command's whole process group, falling back to the one
+    process where the platform will not do groups."""
     if process.pid is None:
         return
     if os.name == "nt":
+        # Windows has no process groups in the POSIX sense; taskkill /T is
+        # the equivalent, and /F is the only reliable form of it.
         try:
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)],
                            capture_output=True, timeout=10)
             return
         except (OSError, subprocess.SubprocessError):
-            pass
+            pass          # fall through to the single-process attempt
     else:
         sig = signal.SIGTERM if terminate else signal.SIGKILL
         try:
             os.killpg(os.getpgid(process.pid), sig)
             return
         except (ProcessLookupError, PermissionError, OSError):
-            pass
+            pass          # already gone, or never got its own group
     try:
         process.terminate() if terminate else process.kill()
     except (ProcessLookupError, OSError, ValueError):
@@ -59,7 +63,23 @@ def _signal_group(process, terminate: bool) -> None:
 
 
 def _close_transports(process, force: bool = False) -> None:
-    """Retire a finished process's pipe transports."""
+    """Retire a finished process's pipe transports.
+
+    ``process.stdout`` is a StreamReader, and StreamReader has no close().
+    So the ``stream.close()`` this replaces raised AttributeError into a
+    bare ``except Exception`` on every command that ever ran, and the
+    transports were never retired at all -- the Windows deallocator message
+    the docstring above describes was never actually prevented, and on POSIX
+    a killed background job left its stdout pipe open for the rest of the
+    session. What owns the pipes is the subprocess transport underneath.
+
+    Only ever on a process that has stopped: closing a subprocess transport
+    kills a process that is still running, which would turn a tidy-up into
+    a way to lose a command. ``force`` is for the one caller that has just
+    killed it itself -- there the returncode is still unset, because the
+    child watcher that fills it in needs a running loop and shutdown may be
+    happening without one.
+    """
     if not force and getattr(process, "returncode", None) is None:
         return
     transport = getattr(process, "_transport", None)
@@ -68,30 +88,63 @@ def _close_transports(process, force: bool = False) -> None:
     try:
         transport.close()
     except Exception:
+        # Closing a pipe schedules work on the event loop, and there may not
+        # be one left -- this also runs from an atexit hook. The transport
+        # marks itself closed before it gets that far, which is the part
+        # that matters: it is what stops __del__ complaining later.
         pass
 
 
 def _clean(raw: bytes) -> str:
-    """Output as text, collapsing in-place progress redraws."""
+    """Output as text. Carriage returns are collapsed so a progress bar
+    reads as its final state rather than every frame at once.
+
+    Windows child processes commonly end lines with CRLF, and a pipe can
+    add extra carriage returns (PowerShell turning ``\n`` into ``\r\n``);
+    those are line endings, not progress-bar frames, so they are stripped
+    *before* the lone-``\r`` collapse. Without that a ``\r\r\n`` line
+    collapsed to an empty string on Windows.
+    """
     text = raw.decode("utf-8", "replace")
-    text = re.sub(r"\r+(\n|$)", r"\1", text)
+    text = re.sub(r"\r+(\n|$)", r"\1", text)   # CRLF / trailing CR -> LF / end
     if "\r" in text:
+        # A genuine in-place redraw: keep only the final frame.
         text = text.split("\r")[-1]
     return text.rstrip("\n")
 
+# Commands that are almost never what a confused model meant, and are
+# unrecoverable when they are wrong. These are refused outright rather than
+# merely prompted for, because a yes/no prompt is exactly the thing a user
+# clicks through on autopilot.
+#
+# Matched against the command being run rather than as a substring of the
+# line. Substrings refused far too much: "rm -rf /tmp/build" starts with
+# "rm -rf /", and "git commit -m 'handle shutdown cleanly'" contains the
+# word shutdown, as does "grep -rn reboot src". All three were refused
+# outright, with no way past it.
 
 _EVERYTHING = {"/", "/*", "/.", "~", "~/", "~/*", "*", "/usr", "/etc",
                "/home", "/var", "/bin", "/lib", "/boot", "/sys", "/proc"}
+"""Targets that mean "the machine" rather than "this project"."""
+
 _FORMATTERS = ("mkfs", "mke2fs", "mkdosfs", "newfs", "diskpart")
 _TURNS_IT_OFF = {"shutdown", "reboot", "halt", "poweroff"}
 _FORK_BOMB = ":(){:|:&};:"
 _RAW_DISK = re.compile(r">\s*/dev/(sd|nvme|hd|disk|vd)", re.IGNORECASE)
 _WINDOWS_ROOT = re.compile(r"^[a-z]:[\\/]?$", re.IGNORECASE)
+
 _SEPARATORS = re.compile(r"&&|\|\||[;|&\n\r]")
 
 
 def _split_segments(line: str) -> list[str]:
-    """The line's separate commands, without splitting inside quotes."""
+    """The line's separate commands, as text, without splitting inside quotes.
+
+    The separator regex alone cut `sh -c "build; rm -rf /"` at the semicolon
+    *inside* the quotes, leaving two fragments with one dangling quote each
+    -- neither of which parses, so the dangerous half was never examined.
+    A quote-aware scan keeps the script in one piece for _commands_in to
+    recurse into.
+    """
     segments, current, quote, index = [], [], "", 0
     while index < len(line):
         char = line[index]
@@ -118,13 +171,19 @@ def _split_segments(line: str) -> list[str]:
 
 
 def _commands_in(line: str, depth: int = 0) -> list[list[str]]:
-    """Return separate commands, recursively including inline shell scripts."""
+    """The separate commands a line would run, each as its tokens.
+
+    A shell asked to run an inline script (`sh -c "..."`) contributes the
+    commands *inside* that script as well as itself, so a destructive one
+    cannot hide behind a level of quoting. The depth cap stops a pathological
+    `sh -c "sh -c "..."` nest from recursing without end.
+    """
     out = []
     for segment in _split_segments(line):
         try:
             tokens = shlex.split(segment, posix=os.name != "nt")
         except ValueError:
-            tokens = segment.split()
+            tokens = segment.split()      # unbalanced quotes; do the crude thing
         if not tokens:
             continue
         out.append(tokens)
@@ -136,11 +195,17 @@ def _commands_in(line: str, depth: int = 0) -> list[list[str]]:
 
 _WRAPPERS = {"sudo", "doas", "env", "nice", "ionice", "nohup", "time",
              "command", "exec", "stdbuf", "xargs"}
+"""Things that run something else. "sudo rm -rf /" is still "rm -rf /"."""
+
 _SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "ash", "busybox"}
+"""Shells, which run something else via -c. Without these in the unwrap,
+`sh -c "rm -rf /"` sailed straight past a guard that stops `sudo rm -rf /`
+-- one token's difference, and the destructive half sat inside a quoted
+string the tokenizer had already stripped the quotes from."""
 
 
 def _unwrap(tokens: list[str]) -> list[str]:
-    """Strip wrappers off the front to find the command being run."""
+    """Strip the wrappers off the front to find the command being run."""
     while tokens and tokens[0].lower().rsplit("/", 1)[-1] in _WRAPPERS:
         tokens = tokens[1:]
         while tokens and (tokens[0].startswith("-") or "=" in tokens[0]):
@@ -151,12 +216,10 @@ def _unwrap(tokens: list[str]) -> list[str]:
 def _dequote_script(script: str) -> str:
     """Undo quote retention from ``shlex(..., posix=False)`` on Windows.
 
-    The safety parser intentionally follows the host tokenizer for ordinary
-    commands. On Windows that tokenizer retains the surrounding quotes of
-    ``bash -c 'rm -rf /'``. Feeding that quoted token back into the recursive
-    parser made the whole script look like one harmless command and allowed a
-    destructive command to hide behind ``sh -c``/``bash -lc``. Only remove one
-    matching outer quote pair; inner quoting still belongs to the script.
+    On Windows shlex keeps the matching outer quote pair around a ``-c``
+    payload. Feeding that token back into the recursive safety parser made
+    the entire script look like one harmless command. Remove only that one
+    pair; all inner quoting still belongs to the script itself.
     """
     script = script.strip()
     if len(script) >= 2 and script[0] == script[-1] and script[0] in "'\"":
@@ -165,14 +228,19 @@ def _dequote_script(script: str) -> str:
 
 
 def _script_of(tokens: list[str]) -> str | None:
-    """The inline script a shell was asked to run, if any."""
+    """The script a shell was asked to run, for `sh -c "..."` and friends.
+
+    Returns None when these tokens are not a shell invoked with -c.
+    """
     if not tokens or tokens[0].lower().rsplit("/", 1)[-1] not in _SHELLS:
         return None
     rest = tokens[1:]
     while rest:
         flag, rest = rest[0], rest[1:]
         if not flag.startswith("-"):
-            return None
+            return None                  # a script *file*, not an inline one
+        # Short options cluster, so the -c of `bash -lc '...'` is a letter in
+        # the middle of the flag rather than the whole of it.
         letters = flag[1:]
         if (not flag.startswith("--") and "c" in letters) or flag == "--command":
             return _dequote_script(rest[0]) if rest else None
@@ -236,6 +304,8 @@ class Shell(Tool):
     def __init__(self, workspace, boundary=None, shield=None,
                  max_output: int = MAX_OUTPUT):
         super().__init__(workspace, boundary, shield)
+        # The agent threads config.max_command_output_chars through here; the
+        # hardcoded default keeps every other construction site working.
         self.max_output = max(int(max_output or 0), 1000)
 
     async def run(self, args: ShellInput) -> ToolResult:
@@ -256,6 +326,7 @@ class Shell(Tool):
 
         shell, flags = default_shell()
         env = dict(os.environ)
+        # Stop interactive pagers and prompts from hanging the agent forever.
         env.update({
             "GIT_PAGER": "cat", "PAGER": "cat", "GIT_TERMINAL_PROMPT": "0",
             "DEBIAN_FRONTEND": "noninteractive", "NO_COLOR": "1",
@@ -270,6 +341,11 @@ class Shell(Tool):
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                # Its own process group, so the whole command can be killed
+                # rather than just the shell that launched it. `make -j8` and
+                # `npm install` spawn workers, and killing their parent leaves
+                # those workers running -- eating the machine long after the
+                # user thinks they stopped it.
                 **_new_process_group(),
             )
         except OSError as exc:
@@ -281,12 +357,20 @@ class Shell(Tool):
         try:
             output, timed_out = await self._stream(process, args.timeout)
         except (asyncio.CancelledError, KeyboardInterrupt):
+            # Ctrl-C. Without this the await is abandoned and the command
+            # carries on in the background, still writing to the project,
+            # while the user believes they stopped it.
             await self._terminate(process)
             await self._close_streams(process)
             raise
         if timed_out:
             await self._terminate(process)
             await self._close_streams(process)
+            # The output is handed back rather than discarded. A command that
+            # hangs is exactly when its last few lines matter most -- they say
+            # which test wedged or which download stalled -- and throwing them
+            # away leaves the model with nothing to act on but the word
+            # "timeout".
             return ToolResult.failure(
                 f"Command timed out after {args.timeout}s and was killed: "
                 f"{command}\n\nOutput before it was killed:\n"
@@ -298,6 +382,9 @@ class Shell(Tool):
         await self._close_streams(process)
 
         code = process.returncode or 0
+        # A shell may encode a child failure in its own status; on Windows
+        # PowerShell commonly emits the real code in the output while exiting
+        # with 1. Preserve the useful status for structured consumers.
         if code == 1 and output:
             import re as _re
             match = _re.search(r"exit(?:ed)?\s+code\s+(-?\d+)", output, _re.IGNORECASE)
@@ -321,6 +408,18 @@ class Shell(Tool):
         )
 
     async def _stream(self, process, timeout: int) -> tuple[str, bool]:
+        """Read the command's output as it arrives, not once it is over.
+
+        `communicate()` waits for the process to exit, so a five-minute test
+        run or an `npm install` showed absolutely nothing until it finished
+        -- and if it hit the timeout, the output that would have explained
+        why was thrown away with it. Both of those are worst exactly when
+        something is going wrong.
+
+        Read in chunks rather than by line: asyncio's readline() raises once
+        a line exceeds its buffer limit, and a progress bar that redraws with
+        \r is one enormous line.
+        """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
 
@@ -340,6 +439,8 @@ class Shell(Tool):
                     dropped += 1
                 tail.append(line)
             if self.on_output is not None:
+                # A tool that crashes the turn because the UI hiccuped would
+                # be a poor trade for a progress display.
                 try:
                     await self.on_output(line)
                 except Exception:
@@ -352,7 +453,8 @@ class Shell(Tool):
                 timed_out = True
                 break
             try:
-                chunk = await asyncio.wait_for(process.stdout.read(4096), timeout=remaining)
+                chunk = await asyncio.wait_for(process.stdout.read(4096),
+                                               timeout=remaining)
             except asyncio.TimeoutError:
                 timed_out = True
                 break
@@ -363,6 +465,8 @@ class Shell(Tool):
             for raw_line in lines:
                 await emit(_clean(raw_line))
             if len(pending) > MAX_LINE_BYTES:
+                # A progress bar rewriting one line forever. Flush what we
+                # have so it is not held in memory until the process exits.
                 await emit(_clean(pending))
                 pending = b""
 
@@ -378,10 +482,27 @@ class Shell(Tool):
 
     @staticmethod
     async def _close_streams(process) -> None:
+        """Retire the pipe transports before the loop does.
+
+        On Windows the ProactorEventLoop hands a subprocess a pipe transport
+        for stdout. If the loop closes while that transport is still alive
+        -- the exact shape of a cancelled or timed-out command -- the
+        deallocator later runs against an already-closed socket and the
+        interpreter prints "Exception ignored while calling deallocator"
+        (asyncio: I/O operation on closed pipe). Explicitly closing it
+        retires the transport cleanly, which any asyncio program should do
+        once the process has been reaped.
+        """
         _close_transports(process)
 
     @staticmethod
     async def _terminate(process) -> None:
+        """Stop the command and everything it started.
+
+        Politely first: SIGTERM to the group gives a test runner the chance
+        to tear down its own children and remove its temp files. SIGKILL is
+        the follow-up for anything that ignores it.
+        """
         if process.returncode is not None:
             return
         _signal_group(process, terminate=True)
@@ -391,6 +512,8 @@ class Shell(Tool):
         except (asyncio.TimeoutError, ProcessLookupError):
             pass
         except asyncio.CancelledError:
+            # Interrupted again while cleaning up. Finish the job -- leaving
+            # a half-killed process group is the thing we are here to avoid.
             _signal_group(process, terminate=False)
             raise
         _signal_group(process, terminate=False)
@@ -400,18 +523,49 @@ class Shell(Tool):
             pass
 
 
+# -- background jobs ---------------------------------------------------------
+#
+# shell(background=true) returns a job id and keeps the process alive; the
+# agent polls with background_poll and keeps chatting in between. The store
+# is process-local and per-interpreter: a job cannot outlive its session,
+# which is exactly the boundary a background job should respect.
+
 _BACKGROUND: dict[str, dict] = {}
+"""job id -> job state, for the lifetime of this interpreter."""
+
 _ATEXIT_REGISTERED = False
 
 
 def shutdown_background(timeout: float = 3.0) -> int:
-    """Stop every background job still running. Returns how many were killed."""
+    """Stop every background job still running. Returns how many were killed.
+
+    A background command is started in its own session so that the whole of
+    it can be killed rather than just the shell that launched it -- and that
+    same detachment means the terminal never hangs it up either. So quitting
+    wynxo left `npm run dev`, a watcher, or a `while true` loop running
+    forever, still writing into the project, with nothing left that knew its
+    pid. The docstring on the job table said jobs live only for the lifetime
+    of the session; the *processes* did not.
+
+    Synchronous on purpose: it is called from an atexit hook as well as from
+    the REPL's teardown, and by the time atexit runs there is no event loop
+    left to await anything on.
+    """
+    # Jobs already signalled are skipped rather than re-signalled. The REPL's
+    # teardown and the atexit backstop both run on a normal quit, and without
+    # this the second pass sat out its whole grace period sending SIGTERM to
+    # pids it had already killed.
     doomed = [job["process"] for job in _BACKGROUND.values()
               if job["process"].returncode is None and not job.get("stopped")]
     if not doomed:
         return 0
     for job in _BACKGROUND.values():
         job["stopped"] = True
+    # asyncio reaps these children on a watcher thread per child. Killing
+    # them from an atexit hook wakes those threads after the loop has been
+    # closed, and each one logs "Loop ... that handles pid N is closed"
+    # straight onto the user's terminal as wynxo quits. The processes are
+    # being stopped deliberately; the complaint about it is noise.
     import logging
 
     asyncio_log = logging.getLogger("asyncio")
@@ -420,6 +574,9 @@ def shutdown_background(timeout: float = 3.0) -> int:
     try:
         for process in doomed:
             _signal_group(process, terminate=True)
+        # A short grace period, then insist. Anything that ignores SIGTERM --
+        # a shell trapping it, a wedged compiler -- would otherwise still be
+        # there.
         deadline = time.monotonic() + max(0.0, timeout)
         while time.monotonic() < deadline:
             if all(_gone(process) for process in doomed):
@@ -428,6 +585,8 @@ def shutdown_background(timeout: float = 3.0) -> int:
         for process in doomed:
             if not _gone(process):
                 _signal_group(process, terminate=False)
+            # A pidfd watcher cannot reap after its loop has closed.
+            # Wait for SIGKILL too, rather than leaving a zombie until exit.
             _reap_after_loop_close(process, timeout=1.0)
             _close_transports(process, force=True)
     finally:
@@ -451,7 +610,13 @@ def _reap_after_loop_close(process, timeout: float = 0.0) -> bool:
 
 
 def _gone(process) -> bool:
-    """True when the process is no longer running."""
+    """True when the process is no longer running.
+
+    ``returncode`` is filled in by the event loop's child watcher, which is
+    not running during atexit. Once the loop is closed, poll the underlying
+    Popen to reap exited children; signal 0 alone also sees zombies as alive.
+    With a live loop, leave reaping to its watcher and only query existence.
+    """
     if process.returncode is not None or _reap_after_loop_close(process):
         return True
     if process.pid is None or os.name == "nt":
@@ -470,6 +635,10 @@ async def _launch_background(process, command: str) -> ToolResult:
     import atexit
     import uuid
 
+    # Registered on the first background job rather than at import, so a run
+    # that never starts one adds no hook. atexit is the backstop for the
+    # paths that never reach the REPL's teardown -- a crash, a hard quit --
+    # and is idempotent because a second shutdown finds nothing running.
     global _ATEXIT_REGISTERED
     if not _ATEXIT_REGISTERED:
         atexit.register(shutdown_background)
@@ -502,6 +671,8 @@ async def _background_reader(job: dict) -> None:
             chunk = await process.stdout.read(4096)
             if not chunk:
                 break
+            # Bounded like the foreground path: a chatty job must not grow
+            # without limit in memory while nobody is looking at it.
             if len(job["output"]) < MAX_OUTPUT:
                 job["output"].extend(chunk[:max(0, MAX_OUTPUT - len(job["output"]))])
         await process.wait()
@@ -519,7 +690,8 @@ def _job_output(job: dict) -> str:
 
 class BackgroundPollInput(Schema):
     job_id = Field(str, "The job id returned by shell(background=true).")
-    kill = Field(bool, "Set true to stop the job and its whole process group.", default=False)
+    kill = Field(bool, "Set true to stop the job and its whole process group.",
+                 default=False)
 
 
 class BackgroundPoll(Tool):
@@ -531,7 +703,7 @@ class BackgroundPoll(Tool):
         "builds or installs while continuing to work."
     )
     Input = BackgroundPollInput
-    mutating = True
+    mutating = True      # kill=true changes the world
     concurrency_safe = False
 
     async def run(self, args: BackgroundPollInput) -> ToolResult:
@@ -544,13 +716,16 @@ class BackgroundPoll(Tool):
         if args.kill and process.returncode is None:
             _signal_group(process, terminate=True)
             try:
-                await asyncio.wait_for(asyncio.shield(process.wait()), timeout=5.0)
-            except (asyncio.TimeoutError, ProcessLookupError, asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(process.wait()),
+                                       timeout=5.0)
+            except (asyncio.TimeoutError, ProcessLookupError,
+                    asyncio.CancelledError):
                 _signal_group(process, terminate=False)
             await job["done"].wait()
             return ToolResult.success(
                 f"Killed job {args.job_id}: {job['command']}",
-                job_id=args.job_id, exit_code=job["exit_code"], finished=True)
+                job_id=args.job_id, exit_code=job["exit_code"],
+                finished=True)
         if not job["done"].is_set():
             tail = _job_output(job)
             return ToolResult.success(
