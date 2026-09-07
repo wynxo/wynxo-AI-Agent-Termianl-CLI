@@ -22,7 +22,7 @@ TAIL_LINES = 200
 what matters -- a failing build says why on its last lines."""
 
 MAX_LINE_BYTES = 16_384
-"""A "line" longer than this is a progress bar redrawing with \\r, not a
+"""A "line" longer than this is a progress bar redrawing with \r, not a
 line. Flushed rather than buffered until the process exits."""
 
 
@@ -213,6 +213,20 @@ def _unwrap(tokens: list[str]) -> list[str]:
     return tokens
 
 
+def _dequote_script(script: str) -> str:
+    """Undo quote retention from ``shlex(..., posix=False)`` on Windows.
+
+    On Windows shlex keeps the matching outer quote pair around a ``-c``
+    payload. Feeding that token back into the recursive safety parser made
+    the entire script look like one harmless command. Remove only that one
+    pair; all inner quoting still belongs to the script itself.
+    """
+    script = script.strip()
+    if len(script) >= 2 and script[0] == script[-1] and script[0] in "'\"":
+        return script[1:-1]
+    return script
+
+
 def _script_of(tokens: list[str]) -> str | None:
     """The script a shell was asked to run, for `sh -c "..."` and friends.
 
@@ -229,7 +243,7 @@ def _script_of(tokens: list[str]) -> str | None:
         # the middle of the flag rather than the whole of it.
         letters = flag[1:]
         if (not flag.startswith("--") and "c" in letters) or flag == "--command":
-            return rest[0] if rest else None
+            return _dequote_script(rest[0]) if rest else None
     return None
 
 
@@ -378,11 +392,11 @@ class Shell(Tool):
                 code = int(match.group(1))
         if code == 0:
             return ToolResult.success(
-            output or "(no output)",
-            display=f"$ {command}",
-            command=command, stdout=output, stderr="", exit_code=0,
-            timed_out=False, cancelled=False,
-        )
+                output or "(no output)",
+                display=f"$ {command}",
+                command=command, stdout=output, stderr="", exit_code=0,
+                timed_out=False, cancelled=False,
+            )
         return ToolResult(
             ok=False,
             output=f"exit code {code}\n{output or '(no output)'}",

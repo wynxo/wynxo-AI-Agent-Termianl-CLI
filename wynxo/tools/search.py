@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from pathlib import Path
 
@@ -12,6 +13,38 @@ from .files import IGNORED, _looks_binary, _read_text
 
 MAX_MATCHES = 200
 MAX_FILES_SCANNED = 20_000
+
+
+def _project_files(root: Path, limit: int = MAX_FILES_SCANNED):
+    """Yield project files without building an unbounded candidate list.
+
+    ``Path.rglob`` is convenient, but it cannot prune ignored directories and
+    the previous grep implementation materialised every candidate before its
+    scan cap could fire. On a repository with ``node_modules`` or a large
+    generated tree that made a supposedly narrow search stall the agent.
+
+    ``os.walk`` lets us prune directories before entering them and gives the
+    traversal a hard upper bound. Hidden/ignored *ancestors of the workspace*
+    do not matter; only descendants are filtered.
+    """
+    seen = 0
+    for current, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = [
+            name for name in dirs
+            if name not in IGNORED and not name.startswith(".")
+        ]
+        for name in files:
+            if name in IGNORED or name.startswith("."):
+                continue
+            yield Path(current) / name
+            seen += 1
+            if seen >= limit:
+                return
+
+
+def _portable_relative(tool: Tool, path: Path) -> str:
+    """Model/user-facing project paths always use ``/`` on every platform."""
+    return tool.relative(path).replace("\\", "/")
 
 
 class GlobInput(Schema):
@@ -104,24 +137,32 @@ class Glob(Tool):
         body = "\n".join(shown)
         if len(matches) > len(shown):
             body += f"\n... and {len(matches) - len(shown)} more"
-        return ToolResult.success(body, display=f"glob {args.pattern} -> {len(matches)} files")
+        return ToolResult.success(
+            body,
+            display=f"glob {args.pattern} -> {len(matches)} files",
+            matches=len(matches),
+            truncated=len(matches) > len(shown),
+        )
 
     def _collect(self, root: Path, pattern: str) -> list[str]:
         matches = _matcher(pattern.replace("\\", "/").lstrip("./"))
         out: list[str] = []
-        for path in root.rglob("*"):
-            if len(out) > MAX_MATCHES * 4:
+        for path in _project_files(root):
+            if len(out) >= MAX_MATCHES * 4:
                 break
-            if not path.is_file():
-                continue
-            if any(part in IGNORED or part.startswith(".") for part in path.parts):
-                continue
-            rel = self.relative(path)
-            if matches(rel.replace("\\", "/")):
+            rel = _portable_relative(self, path)
+            if matches(rel):
                 out.append(rel)
         # Most-recently-modified first: when a model is hunting for the file it
-        # just changed, that is nearly always the one it wants.
-        out.sort(key=lambda r: -(root.joinpath(r).stat().st_mtime if (root / r).exists() else 0))
+        # just changed, that is nearly always the one it wants. Files can vanish
+        # between walking and sorting, so treat that race as an old timestamp.
+        def modified(relative: str) -> float:
+            try:
+                return (self.workspace / relative).stat().st_mtime
+            except OSError:
+                return 0
+
+        out.sort(key=lambda relative: -modified(relative))
         return out
 
 
@@ -153,11 +194,13 @@ class Grep(Tool):
         except re.error as exc:
             return ToolResult.failure(f"Invalid regex {args.pattern!r}: {exc}")
 
-        hits, scanned = await asyncio.to_thread(self._scan, target, regex, args.glob, args.context)
+        hits, scanned = await asyncio.to_thread(
+            self._scan, target, regex, args.glob, args.context)
         if not hits:
             where = f" in {args.glob}" if args.glob else ""
             return ToolResult.success(
-                f"No matches for {args.pattern!r}{where} ({scanned} files searched)."
+                f"No matches for {args.pattern!r}{where} ({scanned} files searched).",
+                scanned=scanned,
             )
         body, masked = self.shield.clean("\n".join(hits[:MAX_MATCHES]))
         if len(hits) > MAX_MATCHES:
@@ -179,7 +222,7 @@ class Grep(Tool):
         hits: list[str] = []
         scanned = 0
         for path in files:
-            if len(hits) > MAX_MATCHES * 2 or scanned > MAX_FILES_SCANNED:
+            if len(hits) > MAX_MATCHES * 2 or scanned >= MAX_FILES_SCANNED:
                 break
             if _looks_binary(path):
                 continue
@@ -193,7 +236,7 @@ class Grep(Tool):
             except OSError:
                 continue
             scanned += 1
-            rel = self.relative(path)
+            rel = _portable_relative(self, path)
             for i, line in enumerate(lines):
                 if not regex.search(line):
                     continue
@@ -213,13 +256,9 @@ class Grep(Tool):
         # Python file in the tree -- the filter that was meant to make a
         # search cheaper and more precise did neither.
         matches = _matcher(glob.replace("\\", "/").lstrip("./")) if glob else None
-        out = []
-        for path in root.rglob("*"):
-            if not path.is_file():
-                continue
-            if any(part in IGNORED or part.startswith(".") for part in path.parts):
-                continue
-            if matches and not matches(self.relative(path).replace("\\", "/")):
+        out: list[Path] = []
+        for path in _project_files(root):
+            if matches and not matches(_portable_relative(self, path)):
                 continue
             out.append(path)
         return out

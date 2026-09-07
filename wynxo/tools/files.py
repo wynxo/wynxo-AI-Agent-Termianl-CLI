@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import os
+import stat
+import tempfile
 from pathlib import Path
 from typing import NamedTuple
 
@@ -75,6 +78,38 @@ def _read_text(path: Path) -> str:
     return _decode(path).text
 
 
+def _safe_replace_bytes(path: Path, data: bytes) -> None:
+    """Replace an existing file atomically while preserving its mode bits.
+
+    A direct ``write_bytes`` truncates the original before the new contents
+    have been written. A crash, full disk, or interrupted process can therefore
+    turn a valid source file into a partial one. For existing files we write a
+    sibling temporary file, fsync it, preserve permissions (including Unix
+    executable bits), then atomically replace the original. New files retain
+    pathlib's normal umask-aware creation behavior.
+    """
+    if not path.exists():
+        path.write_bytes(data)
+        return
+
+    mode = stat.S_IMODE(path.stat().st_mode)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.wynxo-", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary_path, mode)
+        os.replace(temporary_path, path)
+    except Exception:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _write_back(path: Path, text: str, source: "Decoded | None" = None) -> str:
     encoding = source.encoding if source else "utf-8"
     bom = source.bom if source else b""
@@ -85,10 +120,10 @@ def _write_back(path: Path, text: str, source: "Decoded | None" = None) -> str:
         note = (f" (line endings were mixed in this file and are now all "
                 f"{'CRLF' if source.newline == chr(13) + chr(10) else 'LF'})")
     try:
-        path.write_bytes(bom + text.encode(encoding))
+        _safe_replace_bytes(path, bom + text.encode(encoding))
         return note
     except UnicodeEncodeError:
-        path.write_bytes(text.encode("utf-8"))
+        _safe_replace_bytes(path, text.encode("utf-8"))
         if encoding == "utf-8":
             return note
         return note + (f" (saved as UTF-8: the new text needs characters "
@@ -151,6 +186,7 @@ class ReadFile(Tool):
                 "the part you need, then read with start_line/end_line."
             )
 
+        raw_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         lines = _read_text(path).splitlines()
         if args.start_line:
             args.offset = args.start_line - 1
@@ -192,6 +228,7 @@ class ReadFile(Tool):
             path=rel, lines=len(lines), masked=masked,
             truncated=truncated or byte_truncated,
             bytes=len(encoded), max_bytes=args.max_bytes or None,
+            sha256=raw_hash,
         )
 
     def _suggest(self, path: Path) -> str | None:
@@ -229,17 +266,23 @@ class ReadFile(Tool):
         )
         return body, note, window
 
+
 class WriteInput(Schema):
     path = Field(str, "File path, relative to the project root.")
     content = Field(str, "Full contents to write.")
+    expected_hash = Field(
+        str,
+        "Optional SHA-256 returned by read_file; reject the write if the file changed since it was read.",
+        default="",
+    )
 
 
 class WriteFile(Tool):
     name = "write_file"
     description = (
-        "Create a new file, or completely replace an existing one. For a small "
-        "change to an existing file use edit_file instead -- it is far cheaper "
-        "and cannot accidentally drop the rest of the file."
+        "Create a new file, or completely replace a small existing text file. "
+        "For a small change use edit_file instead. Existing binary and large "
+        "files are protected from whole-file replacement."
     )
     Input = WriteInput
     mutating = True
@@ -248,13 +291,42 @@ class WriteFile(Tool):
     async def run(self, args: WriteInput) -> ToolResult:
         path = self.resolve_path(args.path)
         rel = self.relative(path)
+        if refused := self.shield.blocks(path):
+            return ToolResult.failure(refused)
         if path.is_dir():
             return ToolResult.failure(
                 f"{rel} is a directory, not a file. Give the path of a file "
-                "inside it, for example {rel}/notes.md.".replace("{rel}", rel))
+                f"inside it, for example {rel}/notes.md.")
+
         existed = path.exists()
-        source = _decode(path) if existed and not _looks_binary(path) else None
-        before = source.text if source else ""
+        source = None
+        before = ""
+        if existed:
+            if _looks_binary(path):
+                return ToolResult.failure(
+                    f"{rel} is a binary file. write_file will not replace it as text."
+                )
+            size = path.stat().st_size
+            if size > MAX_READ_BYTES:
+                return ToolResult.failure(
+                    f"{rel} is {size} bytes. Refusing a whole-file replacement "
+                    f"because read_file cannot safely load that file whole. Use "
+                    f"grep/find_symbols plus edit_file on the exact span instead; "
+                    f"no changes were applied.",
+                    protected_large_file=True, bytes=size,
+                )
+            actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+            if args.expected_hash and actual_hash.lower() != args.expected_hash.strip().lower():
+                return ToolResult.failure(
+                    f"{rel} changed since it was read (expected {args.expected_hash}, "
+                    f"found {actual_hash}). Re-read the file before replacing it; "
+                    f"no changes were applied.",
+                    stale=True, expected_hash=args.expected_hash,
+                    actual_hash=actual_hash,
+                )
+            source = _decode(path)
+            before = source.text
+
         path.parent.mkdir(parents=True, exist_ok=True)
         note = _write_back(path, args.content, source)
         n = len(args.content.splitlines())

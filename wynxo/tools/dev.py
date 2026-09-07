@@ -81,7 +81,13 @@ class RunTests(Tool):
             # missing guard were 16,000 characters of mostly identical
             # tracebacks, which on a small context window is the difference
             # between fixing the bug and compacting in the middle of it.
-            result.output = (testing.summarise(result.output)
-                             + testing.failure_report(result.output,
-                                                      self.workspace))
+            raw = result.output
+            report = testing.failure_report(raw, self.workspace)
+            # Keep raw process output byte-for-byte useful to a Windows user,
+            # but make the synthetic file references stable for the model and
+            # for follow-up tools. Project tools use '/' as their canonical
+            # separator on every OS; returning ``src\\calc.py:2`` here made a
+            # perfectly identified failure fail to line up with grep/read_file.
+            report = report.replace("\\", "/")
+            result.output = testing.summarise(raw) + report
         return result
