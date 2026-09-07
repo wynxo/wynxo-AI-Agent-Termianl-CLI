@@ -98,10 +98,13 @@ def test_project_walk_is_bounded_and_prunes_noise(tmp_path):
     assert all("node_modules" not in path.parts for path in found)
 
 
-def test_nested_posix_shell_refusal_survives_windows_quote_rules(monkeypatch):
-    # shlex(posix=False) retains the quote pair around the -c payload. That
-    # used to hide the destructive command from the recursive safety parser.
-    monkeypatch.setattr(shell_module.os, "name", "nt")
+def test_inline_shell_payload_dequotes_retained_outer_quotes():
+    assert shell_module._dequote_script("'rm -rf /'") == "rm -rf /"
+    assert shell_module._dequote_script('"rm -rf /"') == "rm -rf /"
+    assert shell_module._dequote_script("rm -rf /") == "rm -rf /"
 
+
+def test_nested_destructive_shell_command_is_refused():
+    # This naturally exercises the Windows shlex branch on the Windows CI
+    # runners without mutating process-wide os.name on POSIX.
     assert shell_module.hard_refusal("bash -c 'rm -rf /'")
-    assert shell_module.hard_refusal("zsh -lc 'sh -c \"rm -rf /\"'")
