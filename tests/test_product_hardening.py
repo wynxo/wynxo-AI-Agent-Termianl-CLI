@@ -8,6 +8,8 @@ import stat
 
 import pytest
 
+from wynxo.tools.base import ToolResult
+from wynxo.tools.dev import RunTests
 from wynxo.tools.files import MAX_READ_BYTES, ReadFile, WriteFile
 from wynxo.tools.search import _project_files
 from wynxo.tools import shell as shell_module
@@ -108,3 +110,21 @@ def test_nested_destructive_shell_command_is_refused():
     # This naturally exercises the Windows shlex branch on the Windows CI
     # runners without mutating process-wide os.name on POSIX.
     assert shell_module.hard_refusal("bash -c 'rm -rf /'")
+
+
+@pytest.mark.asyncio
+async def test_run_tests_canonicalizes_structured_windows_paths(tmp_path, monkeypatch):
+    raw = (
+        "src\\calc.py:2: in divide\n"
+        "E   ZeroDivisionError: division by zero\n"
+        "FAILED tests\\test_calc.py::test_divide - ZeroDivisionError: division by zero\n"
+    )
+
+    async def fake_invoke(self, args):
+        return ToolResult.failure(raw, command=args["command"], exit_code=1)
+
+    monkeypatch.setattr(shell_module.Shell, "invoke", fake_invoke)
+    result = await RunTests(tmp_path).invoke({"command": "pytest -q"})
+
+    assert not result.ok
+    assert "src/calc.py:2" in result.output
