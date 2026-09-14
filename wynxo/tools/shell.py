@@ -177,11 +177,19 @@ def _commands_in(line: str, depth: int = 0) -> list[list[str]]:
     commands *inside* that script as well as itself, so a destructive one
     cannot hide behind a level of quoting. The depth cap stops a pathological
     `sh -c "sh -c "..."` nest from recursing without end.
+
+    Safety analysis deliberately uses POSIX quote rules on every host. This
+    is not the parser that executes the command; its job is to understand
+    shell wrappers such as ``bash -c '...'`` consistently. Windows' shlex
+    mode preserves quote characters as literal token content, which hid the
+    nested script from ``_script_of`` and let destructive commands through
+    the hard-refusal layer. Native Windows commands with malformed POSIX
+    quoting fall back to conservative whitespace tokenisation below.
     """
     out = []
     for segment in _split_segments(line):
         try:
-            tokens = shlex.split(segment, posix=os.name != "nt")
+            tokens = shlex.split(segment, posix=True)
         except ValueError:
             tokens = segment.split()      # unbalanced quotes; do the crude thing
         if not tokens:
@@ -378,11 +386,11 @@ class Shell(Tool):
                 code = int(match.group(1))
         if code == 0:
             return ToolResult.success(
-            output or "(no output)",
-            display=f"$ {command}",
-            command=command, stdout=output, stderr="", exit_code=0,
-            timed_out=False, cancelled=False,
-        )
+                output or "(no output)",
+                display=f"$ {command}",
+                command=command, stdout=output, stderr="", exit_code=0,
+                timed_out=False, cancelled=False,
+            )
         return ToolResult(
             ok=False,
             output=f"exit code {code}\n{output or '(no output)'}",
