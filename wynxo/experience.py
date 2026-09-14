@@ -1,8 +1,8 @@
 """Chat-first product behaviour layered over the stable CLI core.
 
-The REPL and agent are intentionally large, mature modules.  This layer keeps
+The REPL and agent are intentionally large, mature modules. This layer keeps
 small product-policy decisions -- conversational identity, command completion,
-and the compact launch surface -- out of those hot paths.  It is installed by
+and the compact launch surface -- out of those hot paths. It is installed by
 :mod:`wynxo.bootstrap` after the existing product and clean UI layers.
 """
 
@@ -34,7 +34,7 @@ _AFFECTION = re.compile(
     re.IGNORECASE,
 )
 
-# build_chat_prompt formats these three fields.  Positive instructions are
+# build_chat_prompt formats these three fields. Positive instructions are
 # intentional here: smaller local models follow a concrete conversational
 # behaviour more reliably than a long list of forbidden support-bot phrases.
 CHAT_PROMPT = """You are Wynxo, the user's local AI companion in their terminal.
@@ -113,7 +113,7 @@ def command_completer_class(cli_mod):
                 return
 
             # Enumerated arguments should appear as soon as the space is
-            # typed.  The old completer required one character first, which
+            # typed. The old completer required one character first, which
             # made `/effort `, `/theme `, `/voice `, etc. look unsupported.
             if text.startswith("/") and " " in text:
                 command, _, raw_arg = text.partition(" ")
@@ -161,7 +161,7 @@ def _home(self, model: str, workspace: str, *, mode: str = "agent",
           show_static_controls: bool = False) -> None:
     """A compact front door: Wynxo is an assistant first, not a dashboard."""
     self.refresh_size()
-    if is_dumb_terminal() or self.narrow or not self.console.is_terminal:
+    if is_dumb_terminal() or not self.console.is_terminal:
         return _PREV_HOME(
             self, model, workspace, mode=mode, companion=companion,
             version=version, show_companion=show_companion, show_art=show_art,
@@ -177,17 +177,24 @@ def _home(self, model: str, workspace: str, *, mode: str = "agent",
     brand.append("  LOCAL AI", style=palette.muted)
     self.console.print(brand)
 
-    context = Table.grid(padding=(0, 2), expand=False)
-    context.add_column(no_wrap=True)
-    context.add_column(no_wrap=False)
-    context.add_row(
-        Text.assemble(("MODEL  ", palette.faint), (str(model), palette.muted)),
-        Text.assemble(
+    if self.width >= 72:
+        context = Table.grid(padding=(0, 2), expand=False)
+        context.add_column(no_wrap=True)
+        context.add_column(no_wrap=False)
+        context.add_row(
+            Text.assemble(("MODEL  ", palette.faint), (str(model), palette.muted)),
+            Text.assemble(
+                ("WORKSPACE  ", palette.faint),
+                (self.shorten_path(workspace), palette.muted),
+            ),
+        )
+        self.console.print(context)
+    else:
+        self.console.print(Text.assemble(
+            ("MODEL      ", palette.faint), (str(model), palette.muted)))
+        self.console.print(Text.assemble(
             ("WORKSPACE  ", palette.faint),
-            (self.shorten_path(workspace), palette.muted),
-        ),
-    )
-    self.console.print(context)
+            (self.shorten_path(workspace), palette.muted)))
     self.console.print()
 
     intro = Text()
@@ -258,9 +265,9 @@ def install() -> None:
     # class here changes completion without mutating an already-running prompt.
     cli_mod.CommandCompleter = command_completer_class(cli_mod)
 
-    # clean_ui installs the final home method before this layer. Keep it as the
-    # fallback for narrow/dumb terminals, then use the compact assistant-first
-    # home on normal terminals.
+    # clean_ui installs the final home method before this layer. Keep it only
+    # as a non-interactive fallback; narrow interactive terminals still get
+    # the same assistant-first identity, just with stacked context rows.
     _PREV_HOME = ui_mod.UI.home
     ui_mod.UI.home = _home
 
