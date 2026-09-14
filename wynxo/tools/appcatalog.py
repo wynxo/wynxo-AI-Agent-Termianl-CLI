@@ -352,16 +352,23 @@ class ApplicationCatalog:
             for child in children:
                 if seen >= MAX_PATH_ENTRIES:
                     break
-                if not child.is_file() or child.name.startswith("."):
+                # PATH is outside Wynxo's control. A directory can be readable
+                # while one child is not stat-able (ACLs, broken symlinks,
+                # sandboxed system shims). Discovery is best-effort: one bad
+                # entry must never make every installed application disappear.
+                try:
+                    if not child.is_file() or child.name.startswith("."):
+                        continue
+                    if sys.platform == "win32":
+                        if child.suffix.lower() not in executable_suffixes:
+                            continue
+                    else:
+                        if executable_suffixes and child.suffix not in executable_suffixes:
+                            continue
+                        if not os.access(child, os.X_OK):
+                            continue
+                except OSError:
                     continue
-                if sys.platform == "win32":
-                    if child.suffix.lower() not in executable_suffixes:
-                        continue
-                else:
-                    if executable_suffixes and child.suffix not in executable_suffixes:
-                        continue
-                    if not os.access(child, os.X_OK):
-                        continue
                 offer(AppEntry(child.stem, child, "path"))
                 seen += 1
 
