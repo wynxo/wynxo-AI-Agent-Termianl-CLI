@@ -22,7 +22,7 @@ def test_affection_is_conversation_without_swallowing_work():
 
 
 def test_chat_prompt_stays_with_the_human_moment():
-    prompt = experience.CHAT_PROMPT.lower()
+    prompt = " ".join(experience.CHAT_PROMPT.lower().split())
     assert "local ai companion" in prompt
     assert "do not pivot to features, coding" in prompt
     assert "coding is one capability" in prompt
