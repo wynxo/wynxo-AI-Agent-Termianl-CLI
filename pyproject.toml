@@ -1,7 +1,7 @@
 [project]
 name = "wynxo"
 version = "0.1.0"
-description = "A terminal AI coding agent for local Ollama models, with real effort levels."
+description = "A local-first terminal AI assistant for Ollama: natural chat, coding, and agent workflows."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
