@@ -2768,7 +2768,7 @@ class Repl:
         if workspace_info is not None and workspace_info.provider == "github":
             location = workspace_info.label
         else:
-            location = self.ui.shorten_path(str(self.workspace))
+            location = self.ui.shorten_path(str(getattr(self, "workspace", Path.cwd())))
         tail = [working_mode, location, self.policy.name,
                 f"ctx {100 * used / max(1, limit):.0f}%"]
 

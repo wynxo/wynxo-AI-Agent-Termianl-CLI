@@ -78,8 +78,9 @@ class Config(Schema):
     working_mode = Field(str, "Top-level working mode: chat or code.",
                           default="code", choices=("chat", "code"))
     intent_classification = Field(
-        bool, "Allow an extra model request for ambiguous Code turns.",
-        default=False)
+        bool,
+        "Allow one extra model request only for ambiguous Code turns; Chat never uses it.",
+        default=True)
 
     num_ctx = Field(int, "Context window sent with every request.",
                     default=DEFAULT_CONTEXT, ge=MIN_CONTEXT, le=MAX_CONTEXT)

@@ -1124,8 +1124,21 @@ effort-level setting.
 
 ## 11. Commands
 
+The primary working model is intentionally small:
+
+- `/chat` keeps the turn local to conversation: no filesystem, shell, Git or GitHub tools are sent to Ollama.
+- `/code` enables the local coding agent for the current project.
+- `/github owner/name` selects a GitHub workspace. GitHub API work stays distinct from local execution; use `/github status` to see the active location.
+
+Permissions, scope, effort and diagnostics remain available as advanced controls, but they do not change which workspace is active.
+
+
 ```
 /help                    everything below
+/chat                    conversation only; no project tools
+/code                    local coding agent
+/github owner/name       select a GitHub workspace
+/context                 mode, workspace and request diagnostics
 /copy [last]             conversation to the clipboard; last = last answer
 /effort [level]          low | medium | high | xhigh | max | ultra
 /model [name]            switch model, or list what the server has
@@ -1218,18 +1231,20 @@ wynxo [prompt]
   ],
   "active_endpoint": "gpu",
   "model": "qwen3-coder:30b",
+  "working_mode": "code",
+  "intent_classification": true,
   "effort": "medium",
   "num_ctx": 32768,
   "keep_alive": "30m",
   "request_timeout": 600.0,
   "auto_approve": ["read_file", "grep", "glob"],
   "allow_shell": true,
-  "voice": "plain",
+  "voice": "mommy",
   "pet": true,
   "pet_name": "wyn",
-  "animations": true,
+  "animations": false,
   "theme": "purple",
-  "clear_on_start": true,
+  "clear_on_start": false,
   "log": true,
   "show_thinking": false,
   "stream": true
