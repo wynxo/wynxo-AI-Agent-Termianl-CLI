@@ -82,10 +82,10 @@ _PRIMARY_COMMANDS = (
 _PRIMARY_RANK = {name: index for index, name in enumerate(_PRIMARY_COMMANDS)}
 
 # People remember what they want to do more easily than the exact command name.
-# These are completion keywords, not dispatcher aliases: typing `/talk` can
-# *suggest* /chat without silently changing what an entered `/talk` means.
+# These are completion keywords, not dispatcher aliases: typing `/chatter` can
+# *suggest* /chat without silently changing what an entered command means.
 _COMMAND_TERMS = {
-    "/chat": ("talk", "conversation", "companion", "chatting"),
+    "/chat": ("chatter", "conversation", "companion", "chatting"),
     "/code": ("agent", "coding", "project", "developer", "dev"),
     "/github": ("git", "repo", "repository", "remote", "pull", "pr"),
     "/help": ("commands", "command", "docs", "documentation"),
@@ -133,7 +133,8 @@ _PRODUCT_TASK_SIGNAL = re.compile(
     rf"|\b(?:commit|push|merge|deploy|refactor|debug)\b"
     rf"|\b{_PROJECT_ACTION}\b.{{0,100}}\b{_PROJECT_NOUN}\b"
     rf"|\b{_PROJECT_NOUN}\b.{{0,100}}\b{_PROJECT_ACTION}\b"
-    rf"|^\s*(?:sudo\s+)?(?:git|pytest|npm|pnpm|yarn|pip|pipx|cargo|python3?|node|go|make|cmake|ninja)\b"
+    rf"|^\s*(?:sudo\s+)?(?:git|pytest|npm|pnpm|yarn|pip|pipx|cargo|python3?|node|go|cmake|ninja)\b"
+    rf"|^\s*(?:sudo\s+)?make(?:\s+(?:-[\w-]+|all|build|test|install|clean|release|debug))?\s*$"
     rf")",
     re.IGNORECASE,
 )
@@ -176,7 +177,7 @@ def _ranked_commands(cli_mod, text: str, limit: int = 8) -> list[str]:
     A bare slash is discovery, so show the handful that explain the product.
     Once the user types characters, preserve the core resolver's alias, prefix,
     and fuzzy-spelling behaviour, then add intent-based discovery such as
-    `/talk` -> /chat and `/llm` -> /model.
+    `/chatter` -> /chat and `/llm` -> /model.
     """
     if text == "/":
         return [name for name in _PRIMARY_COMMANDS if name in cli_mod.COMMANDS][:limit]

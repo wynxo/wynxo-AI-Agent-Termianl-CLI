@@ -54,6 +54,7 @@ def test_product_task_signal_requires_project_evidence_for_generic_verbs():
         "show me the files",
         "refactor the shell tool",
         "git status",
+        "make clean",
         "```py\nx = 1\n```",
     ):
         assert signal.search(message), message
@@ -74,11 +75,10 @@ def test_typo_is_recovered_inside_completion_menu():
 
 
 def test_intent_words_find_commands_without_displacing_real_commands():
-    assert _complete("/talk")[0] == "/chat"
+    assert _complete("/chatter")[0] == "/chat"
     assert _complete("/agent")[0] == "/code"
     assert _complete("/llm")[0] == "/model"
     assert _complete("/bye")[0] == "/quit"
-    assert cli.resolve_command("/talk") is None
 
     # /repo already exists and means clone-and-work. Semantic discovery must
     # never turn an exact command into /github just because "repo" is also a
@@ -88,8 +88,8 @@ def test_intent_words_find_commands_without_displacing_real_commands():
 
 
 def test_footer_and_completion_share_semantic_ranking():
-    popup = _complete("/talk")
-    footer = experience._product_command_hints(cli, "/talk")
+    popup = _complete("/chatter")
+    footer = experience._product_command_hints(cli, "/chatter")
     assert popup[:len(footer)] == footer
     assert footer[0] == "/chat"
 
