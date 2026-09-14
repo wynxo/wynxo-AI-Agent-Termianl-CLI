@@ -3,6 +3,7 @@
 import inspect
 
 import pytest
+from rich.cells import cell_len
 
 from wynxo.cli import ALIASES, COMMANDS, resolve_command
 from wynxo.pet import Pet
@@ -24,6 +25,13 @@ class TestPending:
         assert result == "run tests"
         assert pending.draft == ""
         assert len(pending) == 1
+
+    def test_submitted_text_is_not_silently_rewritten(self):
+        pending = Pending()
+        for char in "  indented value  \r":
+            result = pending.key(char)
+        assert result == "  indented value  "
+        assert pending.take() == "  indented value  "
 
     def test_messages_come_back_oldest_first(self):
         pending = Pending()
@@ -81,15 +89,30 @@ class TestPending:
         for char in "a very long message that keeps going and going":
             pending.key(char)
         preview = pending.preview(width=20)
-        assert len(preview) <= 20
+        assert cell_len(preview) <= 20
         assert preview.endswith("going")
+
+    def test_preview_budget_is_terminal_cells_not_python_characters(self):
+        pending = Pending()
+        for char in "前半部分🙂後半部分🙂tail":
+            pending.key(char)
+        preview = pending.preview(width=12)
+        assert cell_len(preview) <= 12
+        assert preview.endswith("tail")
 
     def test_clear_reports_what_it_dropped(self):
         pending = Pending()
         for line in ("one", "two"):
             for char in line + "\r":
                 pending.key(char)
-        assert "2 queued" in pending.clear()
+        assert pending.clear() == "2 queued messages dropped"
+        assert not pending
+
+    def test_clear_reports_an_unsubmitted_draft_too(self):
+        pending = Pending()
+        for char in "half typed":
+            pending.key(char)
+        assert pending.clear() == "draft dropped"
         assert not pending
 
     def test_truthiness_covers_draft_and_queue(self):
