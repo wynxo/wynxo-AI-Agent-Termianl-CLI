@@ -8,6 +8,8 @@ test may rely on a hardcoded application name existing in the source.
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -220,6 +222,33 @@ def test_path_executables_are_the_lowest_priority_source(tmp_path):
     assert entries[0].source == "start_menu"
 
 
+def test_an_unreadable_path_entry_does_not_abort_discovery(tmp_path, monkeypatch):
+    """PATH is untrusted OS state: one ACL-protected or broken entry must not
+    make every otherwise launchable application disappear."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    suffix = ".exe" if sys.platform == "win32" else ""
+    blocked = bindir / f"blocked{suffix}"
+    working = bindir / f"working{suffix}"
+    blocked.write_bytes(b"x")
+    working.write_bytes(b"x")
+    if sys.platform != "win32":
+        working.chmod(0o755)
+        blocked.chmod(0o755)
+
+    real_is_file = Path.is_file
+
+    def guarded_is_file(path):
+        if path == blocked:
+            raise PermissionError("not yours")
+        return real_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", guarded_is_file)
+    catalog = ApplicationCatalog(sources=Sources(path_dirs=(bindir,)))
+    entries = catalog.entries()
+    assert [entry.name for entry in entries] == ["working"]
+
+
 def test_the_windows_store_alias_directory_is_ignored(tmp_path):
     """Zero-byte execution aliases whose job is opening the Microsoft Store
     are not applications."""
@@ -234,7 +263,6 @@ def test_the_windows_store_alias_directory_is_ignored(tmp_path):
 def _filtered(alias_dir: Path) -> tuple[Path, ...]:
     """Reproduce _windows_path_dirs' rule for a test-built PATH."""
     from wynxo.tools.appcatalog import _windows_path_dirs
-    import os
     real_env = os.environ.get("PATH", "")
     os.environ["PATH"] = str(alias_dir)
     try:
