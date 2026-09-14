@@ -898,17 +898,22 @@ async def inspect_all(client: "OllamaClient", models: list[ModelInfo],
     return list(await asyncio.gather(*(one(m) for m in models)))
 
 
-async def check_context(client: OllamaClient, config: Config) -> str | None:
+async def check_context(
+    client: OllamaClient,
+    config: Config,
+    info: ModelInfo | None = None,
+) -> str | None:
     if config.num_ctx < MIN_USABLE_CONTEXT:
         return (
             f"num_ctx is {config.num_ctx}, below the {MIN_USABLE_CONTEXT} an "
             "agent realistically needs. Long tasks will silently lose history. "
             "Raise it with /ctx."
         )
-    try:
-        info = await client.show(config.model)
-    except ProviderError:
-        return None
+    if info is None:
+        try:
+            info = await client.show(config.model)
+        except ProviderError:
+            return None
     if info.context_length and config.num_ctx > info.context_length:
         return (
             f"num_ctx {config.num_ctx} exceeds what {config.model} was trained "

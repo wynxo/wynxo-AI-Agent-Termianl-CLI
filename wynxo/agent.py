@@ -611,14 +611,16 @@ class Agent:
         if not isinstance(workspace_info, Workspace):
             raise TypeError("workspace_info must be a Workspace")
         self.workspace_info = workspace_info
-        if workspace_info.provider == "github":
+        # Chat is a hard boundary: selecting a remote workspace must not
+        # reintroduce GitHub tools until the user explicitly returns to Code.
+        if self.working_mode == "chat":
+            self.tools = Registry([])
+        elif workspace_info.provider == "github":
             from .tools.github_tool import GitHubRead, GitHubWrite
             self.tools = Registry([
                 GitHubRead(self.workspace, self.boundary, self.shield),
                 GitHubWrite(self.workspace, self.boundary, self.shield),
             ])
-        elif self.working_mode == "chat":
-            self.tools = Registry([])
         else:
             self.tools = build_registry(
                 self.workspace, allow_shell=self.config.allow_shell,
@@ -649,7 +651,7 @@ class Agent:
             return override(policy, thinking=False)
         return policy
 
-    async def detect_capabilities(self) -> None:
+    async def detect_capabilities(self, info=None) -> None:
         """Ask the server what the model can do, and adapt.
 
         Always sets native_tools rather than only ever clearing it, so
@@ -665,10 +667,11 @@ class Agent:
         fact about the model, so it survives detection rather than being
         overwritten by it.
         """
-        try:
-            info = await self.client.show(self.config.model)
-        except ProviderError:
-            return
+        if info is None:
+            try:
+                info = await self.client.show(self.config.model)
+            except ProviderError:
+                return
         self._model_info = info
         self.native_tools = ((not info.capabilities_known or info.supports_tools)
                              and not self.config.stream_tool_calls)

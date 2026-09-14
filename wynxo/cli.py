@@ -1813,12 +1813,12 @@ class Repl:
         if info is not None and info.capabilities_known and not info.supports_tools:
             note(WARN, self.config.model, "no native tool calling")
 
-        if warning := await check_context(self.client, self.config):
+        if warning := await check_context(self.client, self.config, info):
             note(WARN, f"context {self.config.num_ctx}", warning.split(".")[0])
 
         if getattr(self.agent, "working_mode", "code") != "chat":
             self._refresh_map(note)
-        await self.agent.detect_capabilities()
+        await self.agent.detect_capabilities(info)
         # EffortPolicy is immutable: a capability downgrade inside the agent
         # produces a new object rather than mutating self.policy in place, so
         # without this the status bar and /effort table would keep showing
