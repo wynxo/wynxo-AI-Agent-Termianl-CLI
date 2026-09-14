@@ -455,8 +455,8 @@ COMMAND_LIST: tuple[Command, ...] = (
             "cmd_resume"),
     Command("/github", "select a GitHub workspace, or return to local", "cmd_github"),
     Command("/gh",
-            "work on a GitHub repo in the cloud: status | login | open | ls | "
-            "cat | edit | branch | pr | close", "cmd_gh",
+            "GitHub API workspace: status | login | open | ls | cat | edit | "
+            "branch | pr | close", "cmd_gh",
             ("status", "login", "open", "ls", "cat", "edit", "branch", "pr",
              "close")),
     Command("/commit", "write a commit message from the staged diff, then commit",
@@ -3144,11 +3144,28 @@ class Repl:
         return False
 
     def cmd_help(self, args: list[str]) -> bool:
+        # Keep the first screen small enough to scan. Power-user controls
+        # remain discoverable, but they do not compete with the two modes and
+        # the workspace commands that explain Wynxo's product model.
+        primary_names = {
+            "/help", "/chat", "/code", "/github", "/model", "/cd", "/repo",
+            "/session", "/context", "/clear", "/quit",
+        }
+        primary = [c for c in COMMAND_LIST if c.name in primary_names]
         self.ui.table(
             ["command", "what it does"],
-            [(c.name, c.does) for c in COMMAND_LIST],
-            title="commands",
+            [(c.name, c.does) for c in primary],
+            title="main commands",
         )
+        if args and args[0].lower() in {"advanced", "all"}:
+            advanced = [c for c in COMMAND_LIST if c.name not in primary_names]
+            self.ui.table(
+                ["command", "what it does"],
+                [(c.name, c.does) for c in advanced],
+                title="advanced commands",
+            )
+        else:
+            self.ui.hint("More commands: /help advanced")
         self.ui.table(
             ["key", "does"],
             [("Ctrl-O", "show or hide the model's thinking (works mid-answer)"),
