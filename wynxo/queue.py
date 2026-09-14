@@ -15,6 +15,31 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 
+from rich.cells import cell_len
+
+
+def _tail_to_width(text: str, width: int, ellipsis: str) -> str:
+    """Keep the newest end of ``text`` inside a terminal-cell budget.
+
+    ``len`` is the wrong unit for terminal UI: CJK characters and many emoji
+    occupy two cells, while combining marks occupy none. The queue preview is
+    painted into the live status row, so exceeding the real cell width makes
+    the terminal wrap and leaves visual debris behind.
+    """
+    if width <= 0:
+        return ""
+    if cell_len(text) <= width:
+        return text
+
+    marker = ellipsis if cell_len(ellipsis) <= width else ""
+    suffix = ""
+    for char in reversed(text):
+        candidate = char + suffix
+        if cell_len(marker + candidate) > width:
+            break
+        suffix = candidate
+    return marker + suffix
+
 
 @dataclass
 class Pending:
@@ -33,8 +58,11 @@ class Pending:
         else belongs to the key watcher's bindings and is left alone.
         """
         if char in ("\r", "\n"):
-            line, self.draft = self.draft.strip(), ""
-            if line:
+            # Whitespace-only input is still empty, but do not silently alter
+            # a real line. A queued code fragment or shell command can
+            # legitimately care about its surrounding whitespace.
+            line, self.draft = self.draft, ""
+            if line.strip():
                 self.items.append(line)
                 return line
             return None
@@ -61,19 +89,26 @@ class Pending:
         return self.items.popleft() if self.items else None
 
     def clear(self) -> str:
-        """Drop everything. Returns what was dropped, for reporting."""
+        """Drop everything. Returns an exact human-readable description."""
         count = len(self.items)
+        had_draft = bool(self.draft)
         self.items.clear()
         self.draft = ""
-        return f"{count} queued message(s) dropped" if count else ""
+
+        if count and had_draft:
+            noun = "message" if count == 1 else "messages"
+            return f"{count} queued {noun} and draft dropped"
+        if count:
+            noun = "message" if count == 1 else "messages"
+            return f"{count} queued {noun} dropped"
+        if had_draft:
+            return "draft dropped"
+        return ""
 
     def preview(self, width: int = 40, ellipsis: str = "\u2026") -> str:
         """What to show in the status bar while a turn runs."""
         if self.draft:
-            text = self.draft
-            if len(text) > width:
-                text = ellipsis + text[-(width - len(ellipsis)):]
-            return text
+            return _tail_to_width(self.draft, width, ellipsis)
         if self.items:
             return f"{len(self.items)} queued"
         return ""
