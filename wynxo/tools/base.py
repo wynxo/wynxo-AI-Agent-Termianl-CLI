@@ -213,10 +213,16 @@ class Tool(ABC):
         return full
 
     def relative(self, path: Path) -> str:
-        """A short display path: relative to the workspace when it can be.
+        """A stable model-facing display path.
+
+        Paths inside the workspace use forward slashes on every OS. Tool
+        output is part of the model protocol as much as it is terminal text;
+        leaking Windows separators makes the exact same project look
+        different by platform and breaks glob-shaped follow-up calls. Absolute
+        paths outside the workspace keep the platform's native spelling.
 
         The workspace itself comes back as its own directory name rather than
-        ".", because "." is a directory' reads as a bug report about nothing.
+        ".", because ". is a directory" reads as a bug report about nothing.
         """
         try:
             resolved = path.resolve()
@@ -227,7 +233,7 @@ class Tool(ABC):
                 relative = resolved.relative_to(base)
             except ValueError:
                 continue
-            text = str(relative)
+            text = relative.as_posix()
             return f"{resolved.name}/" if text == "." else text
         return str(path)
 
