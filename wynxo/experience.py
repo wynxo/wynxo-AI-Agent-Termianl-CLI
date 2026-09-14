@@ -21,6 +21,7 @@ _INSTALLED = False
 _PREV_HOME = None
 _ORIGINAL_SMALL_TALK = None
 _ORIGINAL_MODEL_CALL = None
+_ORIGINAL_TASK_SIGNAL = None
 
 # Affection and tiny human moments should never be mistaken for a coding task.
 # Keep this deliberately narrow: "I love Python, fix this" is work; "ilyyy"
@@ -49,6 +50,8 @@ Respond to what the user actually said and stay on that subject.
   debugging, tasks, or "what next" unless they asked.
 - If they ask a normal question, answer the question. Do not turn it into a
   project workflow.
+- If they ask for writing, brainstorming, explaining, comparing, translating,
+  planning, or recommendations, do that directly like a general assistant.
 - If they ask for coding or project work, help with it directly.
 - Match their energy and length. Tiny messages get tiny replies.
 - Keep scratch work private. Never print a "thinking" section or narrate hidden
@@ -79,8 +82,8 @@ _PRIMARY_COMMANDS = (
 _PRIMARY_RANK = {name: index for index, name in enumerate(_PRIMARY_COMMANDS)}
 
 # People remember what they want to do more easily than the exact command name.
-# These are completion keywords, not dispatcher aliases: typing `/repo` can
-# *suggest* /github without silently changing what an entered `/repo` means.
+# These are completion keywords, not dispatcher aliases: typing `/talk` can
+# *suggest* /chat without silently changing what an entered `/talk` means.
 _COMMAND_TERMS = {
     "/chat": ("talk", "conversation", "companion", "chatting"),
     "/code": ("agent", "coding", "project", "developer", "dev"),
@@ -105,6 +108,36 @@ _COMMAND_META = {
 
 _CHAT_MARKER = "local AI companion in their terminal"
 
+# The core signal deliberately errs toward "work" and historically treated a
+# generic verb by itself ("explain", "write", "create", "find", "show me") as
+# proof that the user wanted the project agent. That made "explain black holes"
+# a coding turn. Product routing should call something obvious project work only
+# when it carries project evidence; everything else gets the cheap intent
+# classifier instead of being forced into tools.
+_PROJECT_ACTION = (
+    r"(?:fix|add|write|create|make|build|run|test|refactor|implement|remove|"
+    r"delete|rename|update|change|edit|debug|explain|review|check|find|search|"
+    r"install|deploy|commit|push|merge|read|open|show\s+me)"
+)
+_PROJECT_NOUN = (
+    r"(?:code|bug|parser|function|class|method|script|tool|shell|tests?|"
+    r"repo(?:sitory)?|project|files?|folders?|director(?:y|ies)|workspace|"
+    r"module|package|dependencies?|cli|api|endpoint|branch|commit|diff|build|"
+    r"config(?:uration)?|readme)"
+)
+_PRODUCT_TASK_SIGNAL = re.compile(
+    rf"(?:"
+    rf"\.(?:py|js|ts|tsx|jsx|go|rs|rb|java|c|h|cpp|cs|sh|md|json|ya?ml|toml|txt|html|css)\b"
+    rf"|[/\\][\w.-]"
+    rf"|```"
+    rf"|\b(?:commit|push|merge|deploy|refactor|debug)\b"
+    rf"|\b{_PROJECT_ACTION}\b.{{0,100}}\b{_PROJECT_NOUN}\b"
+    rf"|\b{_PROJECT_NOUN}\b.{{0,100}}\b{_PROJECT_ACTION}\b"
+    rf"|^\s*(?:sudo\s+)?(?:git|pytest|npm|pnpm|yarn|pip|pipx|cargo|python3?|node|go|make|cmake|ninja)\b"
+    rf")",
+    re.IGNORECASE,
+)
+
 
 def extra_conversation(request: str) -> bool:
     """Return True for small human messages the core router should not plan."""
@@ -114,7 +147,12 @@ def extra_conversation(request: str) -> bool:
 
 def _semantic_commands(cli_mod, text: str) -> list[str]:
     """Commands matching the user's *intent word*, not only their spelling."""
-    stem = (text or "").strip().lower().lstrip("/")
+    raw = (text or "").strip().lower()
+    if raw in cli_mod.COMMANDS or raw in cli_mod.ALIASES:
+        # An exact command is authoritative. `/repo` is a real command and
+        # must never be displaced by the semantic keyword "repo" for /github.
+        return []
+    stem = raw.lstrip("/")
     if len(stem) < 2 or " " in stem:
         return []
 
@@ -138,7 +176,7 @@ def _ranked_commands(cli_mod, text: str, limit: int = 8) -> list[str]:
     A bare slash is discovery, so show the handful that explain the product.
     Once the user types characters, preserve the core resolver's alias, prefix,
     and fuzzy-spelling behaviour, then add intent-based discovery such as
-    `/repo` -> /github and `/talk` -> /chat.
+    `/talk` -> /chat and `/llm` -> /model.
     """
     if text == "/":
         return [name for name in _PRIMARY_COMMANDS if name in cli_mod.COMMANDS][:limit]
@@ -369,12 +407,18 @@ def _install_prompts() -> None:
 
 
 def _install_router() -> None:
-    global _ORIGINAL_SMALL_TALK
+    global _ORIGINAL_SMALL_TALK, _ORIGINAL_TASK_SIGNAL
     from . import agent
 
     if _ORIGINAL_SMALL_TALK is None:
         _ORIGINAL_SMALL_TALK = agent.is_small_talk
+    if _ORIGINAL_TASK_SIGNAL is None:
+        _ORIGINAL_TASK_SIGNAL = agent._TASK_SIGNAL
 
+    # The original function resolves _TASK_SIGNAL from its module at call
+    # time, so replacing the signal improves both small-talk and intent-routing
+    # decisions without copying the core routing function into this layer.
+    agent._TASK_SIGNAL = _PRODUCT_TASK_SIGNAL
     original = _ORIGINAL_SMALL_TALK
 
     def is_small_talk(request: str) -> bool:

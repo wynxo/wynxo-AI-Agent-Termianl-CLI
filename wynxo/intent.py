@@ -18,9 +18,9 @@ So this module asks the model, once, cheaply, before the turn commits to a
 shape. It returns structure, not prose, and it is deliberately the only place
 that decides:
 
-    conversation    talk back; no tools, no planning, no repository
+    conversation    talk/answer/write; no tools, no planning, no repository
     system_action   launch what was named, then stop
-    coding          the full agent loop
+    coding          the full project/tool agent loop
 
 Two things it is careful *not* to be:
 
@@ -95,8 +95,13 @@ Classify the user's message. Answer with one JSON object and nothing else.
  "command": "",
  "then_coding": false}
 
-conversation   chat, greetings, reactions, opinions, questions about you,
-               or anything that wants an answer rather than work.
+conversation   normal assistant interaction that only needs an answer or text:
+               chat, greetings, reactions, opinions, explanations, questions,
+               brainstorming, creative writing or rewriting, translation,
+               summarization, recommendations, comparisons, advice, or plans.
+               A programming question is still conversation when the user only
+               wants an explanation or code in the reply and did not ask you
+               to inspect or change their project or run anything.
 system_action  the user wants an application or program opened, launched,
                started or run on their machine. Put what they called it in
                "targets", in their own words. Do not translate it into a
@@ -108,8 +113,14 @@ system_action  the user wants an application or program opened, launched,
                in "command": "open the terminal and run main.py" ->
                targets ["the terminal"], command "main.py". Leave
                "command" empty otherwise.
-coding         the user wants something done to code, files, tests or this
-               project: read, find, explain, fix, add, refactor, run tests.
+coding         the user wants the agent to act on code, files, tests, a repo,
+               or the local development environment: inspect/change project
+               files, fix a bug in the project, run tests or developer/shell
+               commands, install project dependencies, commit/push, etc.
+
+The topic being technical does NOT by itself make it coding. Route to coding
+for project/tool action; route to conversation for an answer that can simply
+be written back to the user.
 
 Set "then_coding" to true only when the message asks for BOTH an application
 and work on the project. Do not add work the user did not ask for.

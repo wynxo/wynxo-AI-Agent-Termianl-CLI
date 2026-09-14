@@ -28,9 +28,35 @@ def test_chat_prompt_stays_with_the_human_moment():
     assert "local ai companion" in prompt
     assert "do not pivot to features, coding" in prompt
     assert "coding is one capability" in prompt
+    assert "writing, brainstorming, explaining" in prompt
     assert "scratch work private" in prompt
     assert 'never print a "thinking" section' in prompt
     assert "what next" in prompt
+
+
+def test_product_task_signal_requires_project_evidence_for_generic_verbs():
+    signal = experience._PRODUCT_TASK_SIGNAL
+    for message in (
+        "explain black holes",
+        "write me a poem",
+        "create a workout plan",
+        "make a grocery list",
+        "find a good movie",
+        "show me why the sky is blue",
+        "open firefox",
+    ):
+        assert not signal.search(message), message
+
+    for message in (
+        "write text.py",
+        "fix the parser",
+        "run the tests",
+        "show me the files",
+        "refactor the shell tool",
+        "git status",
+        "```py\nx = 1\n```",
+    ):
+        assert signal.search(message), message
 
 
 def test_bare_slash_prioritises_product_modes():
@@ -47,20 +73,25 @@ def test_typo_is_recovered_inside_completion_menu():
     assert "/help" in _complete("/hlep")
 
 
-def test_intent_words_find_the_command_without_becoming_aliases():
+def test_intent_words_find_commands_without_displacing_real_commands():
     assert _complete("/talk")[0] == "/chat"
     assert _complete("/agent")[0] == "/code"
-    assert _complete("/repo")[0] == "/github"
     assert _complete("/llm")[0] == "/model"
     assert _complete("/bye")[0] == "/quit"
-    assert cli.resolve_command("/repo") is None
+    assert cli.resolve_command("/talk") is None
+
+    # /repo already exists and means clone-and-work. Semantic discovery must
+    # never turn an exact command into /github just because "repo" is also a
+    # useful keyword for that mode.
+    assert cli.resolve_command("/repo") == "/repo"
+    assert _complete("/repo")[0] == "/repo"
 
 
 def test_footer_and_completion_share_semantic_ranking():
-    popup = _complete("/repo")
-    footer = experience._product_command_hints(cli, "/repo")
+    popup = _complete("/talk")
+    footer = experience._product_command_hints(cli, "/talk")
     assert popup[:len(footer)] == footer
-    assert footer[0] == "/github"
+    assert footer[0] == "/chat"
 
 
 def test_enumerated_values_appear_immediately_after_space():
