@@ -20,6 +20,7 @@ from .platforms import is_dumb_terminal
 _INSTALLED = False
 _PREV_HOME = None
 _ORIGINAL_SMALL_TALK = None
+_ORIGINAL_MODEL_CALL = None
 
 # Affection and tiny human moments should never be mistaken for a coding task.
 # Keep this deliberately narrow: "I love Python, fix this" is work; "ilyyy"
@@ -50,6 +51,8 @@ Respond to what the user actually said and stay on that subject.
   project workflow.
 - If they ask for coding or project work, help with it directly.
 - Match their energy and length. Tiny messages get tiny replies.
+- Keep scratch work private. Never print a "thinking" section or narrate hidden
+  reasoning; give the user the answer.
 - Do not end replies with a generic offer to help or a question just to keep
   the conversation alive. Ask only when an answer is actually needed.
 - Never invent facts, memories, actions, or results.
@@ -75,6 +78,33 @@ _PRIMARY_COMMANDS = (
 )
 _PRIMARY_RANK = {name: index for index, name in enumerate(_PRIMARY_COMMANDS)}
 
+# People remember what they want to do more easily than the exact command name.
+# These are completion keywords, not dispatcher aliases: typing `/repo` can
+# *suggest* /github without silently changing what an entered `/repo` means.
+_COMMAND_TERMS = {
+    "/chat": ("talk", "conversation", "companion", "chatting"),
+    "/code": ("agent", "coding", "project", "developer", "dev"),
+    "/github": ("git", "repo", "repository", "remote", "pull", "pr"),
+    "/help": ("commands", "command", "docs", "documentation"),
+    "/model": ("llm", "ollama", "models"),
+    "/context": ("ctx", "tokens", "window"),
+    "/clear": ("reset", "clean"),
+    "/quit": ("bye", "leave"),
+}
+
+_COMMAND_META = {
+    "/chat": "talk without project tools",
+    "/code": "work on the local project",
+    "/github": "work with a GitHub repository",
+    "/help": "show commands and shortcuts",
+    "/model": "choose the local model",
+    "/context": "inspect context usage",
+    "/clear": "start a clean conversation",
+    "/quit": "leave Wynxo",
+}
+
+_CHAT_MARKER = "local AI companion in their terminal"
+
 
 def extra_conversation(request: str) -> bool:
     """Return True for small human messages the core router should not plan."""
@@ -82,19 +112,52 @@ def extra_conversation(request: str) -> bool:
     return bool(text and len(text) <= 120 and _AFFECTION.fullmatch(text))
 
 
+def _semantic_commands(cli_mod, text: str) -> list[str]:
+    """Commands matching the user's *intent word*, not only their spelling."""
+    stem = (text or "").strip().lower().lstrip("/")
+    if len(stem) < 2 or " " in stem:
+        return []
+
+    matches: list[tuple[int, int, str]] = []
+    for command, terms in _COMMAND_TERMS.items():
+        if command not in cli_mod.COMMANDS:
+            continue
+        matching = [term for term in terms if term.startswith(stem)]
+        if not matching:
+            continue
+        exact = 0 if stem in terms else 1
+        shortest = min(len(term) for term in matching)
+        matches.append((exact, shortest, command))
+    matches.sort(key=lambda item: (item[0], item[1], _PRIMARY_RANK.get(item[2], 999)))
+    return [command for _, _, command in matches]
+
+
 def _ranked_commands(cli_mod, text: str, limit: int = 8) -> list[str]:
     """Command suggestions with useful front-door commands first.
 
     A bare slash is discovery, so show the handful that explain the product.
     Once the user types characters, preserve the core resolver's alias, prefix,
-    and fuzzy-spelling behaviour while preferring the primary product modes.
+    and fuzzy-spelling behaviour, then add intent-based discovery such as
+    `/repo` -> /github and `/talk` -> /chat.
     """
     if text == "/":
         return [name for name in _PRIMARY_COMMANDS if name in cli_mod.COMMANDS][:limit]
 
     suggestions = cli_mod.suggest_commands(text, limit=max(limit, 12))
+    for command in _semantic_commands(cli_mod, text):
+        if command not in suggestions:
+            suggestions.append(command)
     suggestions.sort(key=lambda name: (_PRIMARY_RANK.get(name, 999), name))
     return suggestions[:limit]
+
+
+def _product_command_hints(cli_mod, buffer: str) -> list[str]:
+    """The footer and popup use one suggestion policy, so they never disagree."""
+    text = (buffer or "").strip().lower()
+    if not text.startswith("/") or " " in text or len(text) < 2:
+        return []
+    matches = _ranked_commands(cli_mod, text, limit=5)
+    return [] if matches == [text] else matches
 
 
 def command_completer_class(cli_mod):
@@ -104,15 +167,16 @@ def command_completer_class(cli_mod):
         def get_completions(self, document, complete_event):
             text = document.text_before_cursor
 
-            # Command names: include aliases and typo recovery in the popup,
-            # rather than only after Enter reports an unknown command.
+            # Command names: include aliases, intent words, and typo recovery
+            # in the popup rather than only after Enter reports an unknown
+            # command.
             if text.startswith("/") and " " not in text:
                 for name in _ranked_commands(cli_mod, text):
                     yield Completion(
                         name,
                         start_position=-len(text),
                         display=name,
-                        display_meta=cli_mod.COMMANDS.get(name, ""),
+                        display_meta=_COMMAND_META.get(name, cli_mod.COMMANDS.get(name, "")),
                     )
                 return
 
@@ -156,12 +220,12 @@ def _prompt_hint(repl) -> str:
     note, repl._prompt_note = cli_mod.live_note(repl._prompt_note)
     if note:
         return note
-    typed = cli_mod.command_hints(cli_mod._composer_text(repl))
+    typed = _product_command_hints(cli_mod, cli_mod._composer_text(repl))
     if typed:
         return "  ".join(typed)
     if getattr(repl.agent, "working_mode", "code") == "chat":
         return "Chat mode  ·  /code for project work"
-    return "Chat or ask for project work  ·  / for commands"
+    return "Ask anything  ·  / for commands"
 
 
 def _home(self, model: str, workspace: str, *, mode: str = "agent",
@@ -232,6 +296,68 @@ def _home(self, model: str, workspace: str, *, mode: str = "agent",
     self.console.print()
 
 
+class _ConversationCallbacks:
+    """Keep a chat turn conversational even when developer tracing is enabled.
+
+    Global thinking display remains useful in Code mode. A normal conversation
+    is different: showing the model's scratchpad between "i lov yuuu" and the
+    reply turns a human moment into a debugger trace. The model may still use
+    its reasoning internally; this proxy only keeps it out of the transcript.
+    """
+
+    def __init__(self, base):
+        self._base = base
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+    async def on_thinking(self, text: str) -> None:
+        return None
+
+    async def on_stage(self, name: str, detail: str = "") -> None:
+        # Keep a lightweight sign of life for a slow local model without
+        # exposing an implementation term as the headline of casual chat.
+        if name == "thinking":
+            name = "responding"
+        await self._base.on_stage(name, detail)
+
+
+def _is_chat_messages(messages) -> bool:
+    """Whether a model call is using Wynxo's conversational system prompt."""
+    if not isinstance(messages, list):
+        return False
+    marker = _CHAT_MARKER.lower()
+    for message in messages[:3]:
+        if not isinstance(message, dict) or message.get("role") != "system":
+            continue
+        if marker in str(message.get("content") or "").lower():
+            return True
+    return False
+
+
+def _install_chat_rendering() -> None:
+    """Hide scratch reasoning only for calls that carry the chat prompt."""
+    global _ORIGINAL_MODEL_CALL
+    from . import agent
+
+    if _ORIGINAL_MODEL_CALL is None:
+        _ORIGINAL_MODEL_CALL = agent.Agent._call_model
+    original = _ORIGINAL_MODEL_CALL
+
+    async def _call_model(self, *args, **kwargs):
+        if not _is_chat_messages(kwargs.get("messages")):
+            return await original(self, *args, **kwargs)
+
+        callbacks = self.cb
+        self.cb = _ConversationCallbacks(callbacks)
+        try:
+            return await original(self, *args, **kwargs)
+        finally:
+            self.cb = callbacks
+
+    agent.Agent._call_model = _call_model
+
+
 def _install_prompts() -> None:
     from . import prompts
 
@@ -269,6 +395,7 @@ def install() -> None:
 
     _install_prompts()
     _install_router()
+    _install_chat_rendering()
 
     # Repl instances are created after bootstrap finishes, so replacing the
     # class here changes completion without mutating an already-running prompt.
