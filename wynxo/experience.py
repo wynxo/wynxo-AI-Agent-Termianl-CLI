@@ -73,6 +73,7 @@ _NEW_CODE_IDENTITY = (
 _PRIMARY_COMMANDS = (
     "/chat", "/code", "/github", "/help", "/model", "/context", "/clear", "/quit",
 )
+_PRIMARY_RANK = {name: index for index, name in enumerate(_PRIMARY_COMMANDS)}
 
 
 def extra_conversation(request: str) -> bool:
@@ -86,11 +87,14 @@ def _ranked_commands(cli_mod, text: str, limit: int = 8) -> list[str]:
 
     A bare slash is discovery, so show the handful that explain the product.
     Once the user types characters, preserve the core resolver's alias, prefix,
-    and fuzzy-spelling behaviour.
+    and fuzzy-spelling behaviour while preferring the primary product modes.
     """
     if text == "/":
         return [name for name in _PRIMARY_COMMANDS if name in cli_mod.COMMANDS][:limit]
-    return cli_mod.suggest_commands(text, limit=limit)
+
+    suggestions = cli_mod.suggest_commands(text, limit=max(limit, 12))
+    suggestions.sort(key=lambda name: (_PRIMARY_RANK.get(name, 999), name))
+    return suggestions[:limit]
 
 
 def command_completer_class(cli_mod):
@@ -119,13 +123,18 @@ def command_completer_class(cli_mod):
                 command, _, raw_arg = text.partition(" ")
                 canonical = cli_mod.resolve_command(command) or command
                 values = cli_mod._SUBCOMMAND_VALUES.get(canonical)
-                if values is not None and " " not in raw_arg.strip():
-                    prefix = raw_arg.strip().lower()
+                # Only complete the first value token. Once the user has
+                # typed trailing whitespace, replacing `len(strip())` chars
+                # would replace that whitespace rather than the value.
+                clean_arg = raw_arg.strip()
+                one_token = not raw_arg or raw_arg == clean_arg
+                if values is not None and one_token and " " not in clean_arg:
+                    prefix = clean_arg.lower()
                     for value in values:
                         if value.lower().startswith(prefix):
                             yield Completion(
                                 value,
-                                start_position=-len(raw_arg.strip()),
+                                start_position=-len(clean_arg),
                                 display=value,
                                 display_meta=f"{canonical[1:]} option",
                             )
