@@ -34,6 +34,11 @@ def test_bare_slash_prioritises_product_modes():
     assert suggestions[:4] == ["/chat", "/code", "/github", "/help"]
 
 
+def test_primary_modes_stay_first_for_shared_prefixes():
+    suggestions = _complete("/c")
+    assert suggestions[:2] == ["/chat", "/code"]
+
+
 def test_typo_is_recovered_inside_completion_menu():
     assert "/help" in _complete("/hlep")
 
@@ -46,3 +51,7 @@ def test_enumerated_values_appear_immediately_after_space():
 def test_subcommand_completion_works_through_aliases():
     suggestions = _complete("/e h")
     assert suggestions == ["high"]
+
+
+def test_trailing_space_never_replaces_the_wrong_character():
+    assert _complete("/effort h ") == []
