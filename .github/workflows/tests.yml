@@ -126,6 +126,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
       - name: Measure coverage
+        # Coverage instrumentation makes the full suite materially slower
+        # than the normal matrix. Keep the watchdog, but give this job enough
+        # headroom that a healthy instrumented run is not mistaken for a hang.
+        env:
+          WYNXO_TEST_TIMEOUT: "300"
         run: >
           python -m pytest -q --cov=wynxo
           --cov-report=term-missing:skip-covered
