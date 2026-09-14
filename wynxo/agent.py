@@ -474,10 +474,12 @@ class Agent:
         in the run loop; initialized here so `_run_tool_calls` is safe on a
         bare agent (and state never lingers from a previous turn)."""
         self.shield = Shield(workspace, enabled=config.protect_secrets)
-        if registry is not None:
-            self.tools = registry
-        elif self.working_mode == "chat":
+        if self.working_mode == "chat":
+            # Chat is a hard boundary: injected registries are ignored so
+            # callers cannot accidentally leak tools into a chat request.
             self.tools = Registry([])
+        elif registry is not None:
+            self.tools = registry
         else:
             self.tools = build_registry(
                 workspace, allow_shell=config.allow_shell,
@@ -716,7 +718,7 @@ class Agent:
         metric = (metrics.begin(
             model=self.config.model,
             mode=self.working_mode,
-            tools_supplied=bool(use_tools and self.native_tools),
+            tools_supplied=bool(use_tools and self.working_mode != "chat" and self.native_tools),
             prompt_tokens_estimate=prompt_estimate,
             request_kind=("classifier" if silent else "generation"),
         ) if metrics is not None else None)
@@ -755,7 +757,11 @@ class Agent:
         stream = self.backend.chat(
             wire_messages,
             model=self.config.model,
-            tools=self.tools.ollama_schemas() if (use_tools and self.native_tools) else None,
+            tools=(
+                self.tools.ollama_schemas()
+                if (use_tools and self.working_mode != "chat" and self.native_tools)
+                else None
+            ),
             think=self._think_value(),
             temperature=self.policy.temperature if temperature is None else temperature,
             num_predict=self.policy.num_predict if num_predict is None else num_predict,

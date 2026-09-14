@@ -2763,18 +2763,32 @@ class Repl:
         room = max(12, self.ui.width // 3)
         model = self.ui.shorten_model(self.config.model, room)
         mode = self._agent_mode()
+        has_working_mode = hasattr(self.agent, "working_mode")
         working_mode = getattr(self.agent, "working_mode", "code")
         workspace_info = getattr(self.agent, "workspace_info", None)
         if workspace_info is not None and workspace_info.provider == "github":
             location = workspace_info.label
+        elif hasattr(self, "workspace"):
+            location = self.ui.shorten_path(str(self.workspace))
         else:
-            location = self.ui.shorten_path(str(getattr(self, "workspace", Path.cwd())))
-        tail = [working_mode, location, self.policy.name,
-                f"ctx {100 * used / max(1, limit):.0f}%"]
+            location = ""
+        permission = self.policy.name
+        context = f"ctx {100 * used / max(1, limit):.0f}%"
 
         separator = f" {self.ui.g.dot} "
 
-        def joined(labelled: bool) -> str:
+        def joined(
+            labelled: bool,
+            *,
+            include_mode: bool = True,
+            include_location: bool = True,
+        ) -> str:
+            tail = []
+            if include_mode and has_working_mode:
+                tail.append(working_mode)
+            if include_location and location:
+                tail.append(location)
+            tail.extend([permission, context])
             parts = pieces + [f"model: {model}" if labelled else model] + tail
             if mode != "agent":
                 # Not a statistic: a mode where wynxo stops asking before
@@ -2784,14 +2798,16 @@ class Repl:
                 parts.append(f"mode: {mode}" if labelled else mode)
             return separator.join(p for p in parts if p)
 
-        # The label goes before the value does. "model:" is seven cells of
-        # saying what everyone can already see, and at forty columns those
-        # seven were the difference between the line ending in "ctx 11%"
-        # and ending in "ctx " -- which is the one thing on it that has to
-        # survive, because it is the number that moves.
+        # Preserve the useful model label on normal terminals. As the
+        # terminal gets narrower, drop location and working mode before
+        # dropping the label; the context percentage remains visible.
         core = joined(True)
         if cell_len(core) > self.ui.width - self.LABEL_RESERVE:
-            core = joined(False)
+            core = joined(True, include_location=False)
+        if cell_len(core) > self.ui.width - self.LABEL_RESERVE:
+            core = joined(True, include_mode=False, include_location=False)
+        if cell_len(core) > self.ui.width - self.LABEL_RESERVE:
+            core = joined(False, include_mode=False, include_location=False)
 
         # What is left is decoration: the word "agent", which is only ever
         # said when nothing has been changed, and what the companion is
@@ -3100,7 +3116,9 @@ class Repl:
 
     def cmd_chat(self, args: list[str]) -> bool:
         """Switch to a direct, tool-free conversation."""
-        self.agent.set_workspace(Workspace(provider="local", root=self.workspace))
+        # Keep the selected workspace in view so Chat -> Code can restore a
+        # GitHub workspace without another selection step. Chat's structural
+        # boundary is enforced by Agent.set_working_mode.
         self.agent.set_working_mode("chat")
         self.config.working_mode = "chat"
         self.config.save()
