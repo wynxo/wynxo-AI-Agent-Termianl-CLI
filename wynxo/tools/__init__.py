@@ -18,7 +18,6 @@ from .apps import LaunchApplication
 from .appcatalog import ApplicationCatalog
 from .navigation_tool import NavigateSymbols
 from .references_tool import FindReferences
-from .github_tool import GitHubRead, GitHubWrite
 from .web import WebSearch
 
 __all__ = ["Tool", "ToolResult", "Registry", "build_registry"]
@@ -80,6 +79,7 @@ def build_registry(
     shield: Shield | None = None,
     app_catalog: ApplicationCatalog | None = None,
     shell_max_output: int | None = None,
+    include_github: bool = True,
 ) -> Registry:
     tools: list[Tool] = [
         ReadFile(workspace, boundary, shield),
@@ -93,8 +93,7 @@ def build_registry(
         LaunchApplication(workspace, boundary, shield, catalog=app_catalog),
         NavigateSymbols(workspace, boundary, shield),
         FindReferences(workspace, boundary, shield),
-        GitHubRead(workspace, boundary, shield),
-        GitHubWrite(workspace, boundary, shield),
+        # GitHub is a workspace integration, not a default startup dependency.
         Remember(workspace, boundary, memory, shield),
         Git(workspace, boundary, shield),
         RunTests(workspace, boundary, shield),
@@ -106,4 +105,8 @@ def build_registry(
         if shell_max_output:
             kwargs["max_output"] = shell_max_output
         tools.append(Shell(workspace, boundary, shield, **kwargs))
+    if include_github:
+        from .github_tool import GitHubRead, GitHubWrite
+        tools.extend((GitHubRead(workspace, boundary, shield),
+                      GitHubWrite(workspace, boundary, shield)))
     return Registry(tools)

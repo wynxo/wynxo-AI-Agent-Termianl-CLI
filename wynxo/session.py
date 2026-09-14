@@ -109,6 +109,32 @@ class Session:
         out = [{"role": "system", "content": self.system_prompt}] if self.system_prompt else []
         return out + self.messages
 
+    def chat_wire(self, system_prompt: str = "", max_chars: int = 24000) -> list[dict]:
+        """Build a bounded, conversation-only wire payload.
+
+        Tool messages and assistant tool-call envelopes are deliberately
+        excluded.  Chat mode therefore cannot accidentally leak coding
+        context or malformed tool-call history into Ollama.
+        """
+        chosen: list[dict] = []
+        used = 0
+        for message in reversed(self.messages):
+            role = message.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            content = str(message.get("content") or "")
+            if not content:
+                continue
+            item = {"role": role, "content": content}
+            size = len(content)
+            if chosen and used + size > max_chars:
+                break
+            chosen.append(item)
+            used += size
+        chosen.reverse()
+        result = [{"role": "system", "content": system_prompt}] if system_prompt else []
+        return result + chosen
+
     def _recorded(self) -> None:
         """One message went in. Write the conversation out if asked to.
 

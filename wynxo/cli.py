@@ -48,6 +48,7 @@ from .session import Session
 from .keys import KeyWatcher
 from .journal import Journal, recent as recent_logs
 from .memory import Memory
+from .workspace import Workspace
 from .pacing import Typewriter
 from .pet import Pet
 from .select import (
@@ -55,7 +56,7 @@ from .select import (
     supported as arrows_supported)
 from .scope import Mode, Scope, resolve as resolve_scope
 from .status import Status, WARN
-from .tools import build_registry
+from .tools import Registry, build_registry
 from .tools.appcatalog import ApplicationCatalog
 from rich.cells import cell_len
 from rich.text import Text
@@ -395,6 +396,10 @@ class Command:
 
 COMMAND_LIST: tuple[Command, ...] = (
     Command("/help", "show this", "cmd_help"),
+    Command("/chat", "conversation only; no tools or project access", "cmd_chat"),
+    Command("/code", "local coding agent; files, commands and tests", "cmd_code"),
+    Command("/context", "show mode, workspace, request and latency diagnostics",
+            "cmd_context"),
     Command("/effort", "how hard it works: low | medium | high | xhigh | max "
                        "| ultra", "cmd_effort",
             ("low", "medium", "high", "xhigh", "max", "ultra")),
@@ -448,6 +453,7 @@ COMMAND_LIST: tuple[Command, ...] = (
     Command("/resume",
             "pick up an earlier conversation, from this project or another",
             "cmd_resume"),
+    Command("/github", "select a GitHub workspace, or return to local", "cmd_github"),
     Command("/gh",
             "work on a GitHub repo in the cloud: status | login | open | ls | "
             "cat | edit | branch | pr | close", "cmd_gh",
@@ -1665,7 +1671,12 @@ class Repl:
         self.callbacks.boundary = self.boundary
         self.callbacks.journal = self.journal
         self.callbacks.pet = self.pet
-        self.project_info = self.discovery.scan()
+        # Chat is deliberately close to a direct Ollama conversation: no
+        # repository walk or project map is prepared before the first turn.
+        self.project_info = (
+            None if getattr(config, "working_mode", "code") == "chat"
+            else self.discovery.scan()
+        )
         self.agent = Agent(self.client, config, self.policy, workspace, self.callbacks,
                            boundary=self.boundary, memory=self.memory)
         # The companion is a view of the agent's own task state, so the
@@ -1674,7 +1685,10 @@ class Repl:
         # which runs before the agent exists.
         self.callbacks.task_state = self.agent.task_state
         launcher = self.agent.tools.get("launch_application")
-        self._app_catalog = launcher.catalog if launcher else ApplicationCatalog()
+        # Application discovery is shared by /apps and the launch tool, but
+        # Chat never constructs it. It is created on the first /apps request
+        # or when a local Code registry needs it.
+        self._app_catalog = launcher.catalog if launcher else None
         """The one application scan this session shares: /apps and the
         launch tool must agree on what this machine has installed."""
         self._model_names: list[str] = []
@@ -1802,7 +1816,8 @@ class Repl:
         if warning := await check_context(self.client, self.config):
             note(WARN, f"context {self.config.num_ctx}", warning.split(".")[0])
 
-        self._refresh_map(note)
+        if getattr(self.agent, "working_mode", "code") != "chat":
+            self._refresh_map(note)
         await self.agent.detect_capabilities()
         # EffortPolicy is immutable: a capability downgrade inside the agent
         # produces a new object rather than mutating self.policy in place, so
@@ -2748,7 +2763,14 @@ class Repl:
         room = max(12, self.ui.width // 3)
         model = self.ui.shorten_model(self.config.model, room)
         mode = self._agent_mode()
-        tail = [self.policy.name, f"ctx {100 * used / max(1, limit):.0f}%"]
+        working_mode = getattr(self.agent, "working_mode", "code")
+        workspace_info = getattr(self.agent, "workspace_info", None)
+        if workspace_info is not None and workspace_info.provider == "github":
+            location = workspace_info.label
+        else:
+            location = self.ui.shorten_path(str(self.workspace))
+        tail = [working_mode, location, self.policy.name,
+                f"ctx {100 * used / max(1, limit):.0f}%"]
 
         separator = f" {self.ui.g.dot} "
 
@@ -3075,6 +3097,30 @@ class Repl:
         return False if outcome is False else True
 
     # -- the commands ------------------------------------------------------
+
+    def cmd_chat(self, args: list[str]) -> bool:
+        """Switch to a direct, tool-free conversation."""
+        self.agent.set_workspace(Workspace(provider="local", root=self.workspace))
+        self.agent.set_working_mode("chat")
+        self.config.working_mode = "chat"
+        self.config.save()
+        self.ui.success("mode: chat · tools disabled · project scanning paused")
+        return True
+
+    def cmd_code(self, args: list[str]) -> bool:
+        """Switch to the local coding agent, preserving an open GitHub workspace."""
+        info = getattr(self.agent, "workspace_info", None)
+        if info is None or info.provider != "github":
+            self.agent.set_workspace(Workspace(provider="local", root=self.workspace))
+        self.agent.set_working_mode("code")
+        self.config.working_mode = "code"
+        self.config.save()
+        if self.project_info is None:
+            self._refresh_map()
+        self.ui.success("mode: code · local tools enabled" if
+                        getattr(self.agent.workspace_info, "provider", "local") == "local"
+                        else "mode: code · GitHub workspace preserved")
+        return True
 
     def cmd_quit(self, args: list[str]) -> bool:
         return False
@@ -3949,6 +3995,8 @@ class Repl:
         the platform equivalents -- never from a code-level list, so what is
         shown is exactly what launch_application can launch.
         """
+        if self._app_catalog is None:
+            self._app_catalog = ApplicationCatalog()
         wanted = ""
         if args and args[0].lower() in ("refresh", "rescan", "again"):
             with self.ui.status("scanning for installed applications..."):
@@ -4185,6 +4233,7 @@ class Repl:
         self.memory = Memory(target)
         self.agent.workspace = target
         self.agent.memory = self.memory
+        self.agent.workspace_info = Workspace(provider="local", root=target)
         self._apply_scope(self.boundary.scope)
         self._refresh_map()
         self.ui.success(f"working in {self.ui.shorten_path(str(target))}")
@@ -4204,10 +4253,16 @@ class Repl:
         # wipes the plan the agent is working through.
         previous_todo = self.agent.tools.get("todo_write")
         self.agent.boundary = boundary
-        self.agent.tools = build_registry(
-            self.workspace, allow_shell=self.config.allow_shell,
-            boundary=boundary, memory=self.agent.memory,
-            app_catalog=self._app_catalog)
+        if getattr(self.agent, "working_mode", "code") == "chat":
+            self.agent.tools = Registry([])
+        elif (info := getattr(self.agent, "workspace_info", None)) is not None                 and info.provider == "github":
+            self.agent.set_workspace(info)
+        else:
+            self.agent.tools = build_registry(
+                self.workspace, allow_shell=self.config.allow_shell,
+                boundary=boundary, memory=self.agent.memory,
+                app_catalog=self._app_catalog,
+                include_github=False)
         current_todo = self.agent.tools.get("todo_write")
         if previous_todo is not None and current_todo is not None:
             current_todo.items = previous_todo.items
@@ -4248,6 +4303,67 @@ class Repl:
             self.ui.success(f"copied the {label} ({len(text)} chars) to the clipboard")
         else:
             self.ui.error("could not copy: no clipboard tool on this machine")
+        return True
+
+    async def cmd_github(self, args: list[str]) -> bool:
+        """Select the GitHub workspace without implying remote execution."""
+        action = args[0].strip() if args else "status"
+        lowered = action.lower()
+
+        if lowered in ("local", "close"):
+            self.gh_ws = None
+            self.agent.set_workspace(
+                Workspace(provider="local", root=self.workspace))
+            self.agent.set_working_mode("code")
+            self.config.working_mode = "code"
+            self.config.save()
+            self.ui.success(f"workspace: local · {self.ui.shorten_path(str(self.workspace))}")
+            return True
+
+        if lowered == "status":
+            info = getattr(self.agent, "workspace_info", None)
+            if info is not None and info.provider == "github":
+                self.ui.info(
+                    f"workspace: {info.label} · API-only · gh runs on this machine")
+            elif self.gh_ws:
+                self.ui.info(
+                    f"workspace: github:{self.gh_ws['owner']}/{self.gh_ws['repo']}"
+                    f"#{self.gh_ws['branch']} · API-only · gh runs on this machine")
+            else:
+                self.ui.info(
+                    f"workspace: local · {self.ui.shorten_path(str(self.workspace))}")
+                self.ui.hint("/github owner/repo to select a GitHub workspace")
+            return True
+
+        repo = action
+        branch = args[1] if len(args) > 1 else ""
+        if lowered in ("open", "repo"):
+            if len(args) < 2:
+                self.ui.warn("usage: /github owner/repo [branch]")
+                return True
+            repo, branch = args[1], args[2] if len(args) > 2 else ""
+        if "/" not in repo:
+            self.ui.warn("usage: /github owner/repo [branch]")
+            return True
+
+        await self.cmd_gh(["open", repo] + ([branch] if branch else []))
+        if not self.gh_ws:
+            return True
+        selected = self.gh_ws
+        self.agent.set_workspace(Workspace(
+            provider="github",
+            root=self.workspace,
+            repository=f"{selected['owner']}/{selected['repo']}",
+            branch=selected["branch"],
+            execution="local",
+            api_only=True,
+        ))
+        self.agent.set_working_mode("code")
+        self.config.working_mode = "code"
+        self.config.save()
+        self.ui.success(
+            f"workspace: github:{selected['owner']}/{selected['repo']}"
+            f"#{selected['branch']} · API-only · local shell/filesystem disabled")
         return True
 
     async def cmd_gh(self, args: list[str]) -> bool:
@@ -5453,6 +5569,33 @@ class Repl:
                 return True
             chosen = typed
         return await self.cmd_ctx([chosen])
+
+    def cmd_context(self, args: list[str]) -> bool:
+        """Show the small set of state useful for diagnosing a turn."""
+        metrics = getattr(self.client, "metrics", None)
+        last = getattr(metrics, "last", None) if metrics is not None else None
+        info = getattr(self.agent, "workspace_info", None)
+        rows = [
+            ("mode", getattr(self.agent, "working_mode", "code")),
+            ("workspace", info.label if info is not None else
+             self.ui.shorten_path(str(self.workspace))),
+            ("tools", str(len(self.agent.tools))),
+            ("requests this turn", str(getattr(metrics, "requests_per_turn", 0))),
+        ]
+        if last is not None:
+            rows.extend([
+                ("last model", last.model),
+                ("last request", last.request_kind),
+                ("prompt estimate", f"~{last.prompt_tokens_estimate:,} tokens"),
+                ("time to first token",
+                 f"{last.time_to_first_token_ms:.0f} ms"
+                 if last.time_to_first_token_ms is not None else "n/a"),
+                ("generation", f"{last.tokens_per_second:.1f} tok/s"
+                 if last.tokens_per_second is not None else "n/a"),
+                ("tools supplied", "yes" if last.tools_supplied else "no"),
+            ])
+        self.ui.table(["", ""], rows, title="context")
+        return True
 
     def cmd_stats(self, args: list[str]) -> bool:
         usage = self.agent.session.usage

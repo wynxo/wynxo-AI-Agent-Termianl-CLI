@@ -17,6 +17,7 @@ import httpx
 
 from .coerce import as_int, as_list, as_text, loads as json_object
 from .config import Config, MIN_USABLE_CONTEXT
+from .metrics import InferenceMetrics
 
 LARGE_CONTEXT = 131_072
 
@@ -274,6 +275,7 @@ def _is_template_parse_error(low: str) -> bool:
 class OllamaClient:
     def __init__(self, config: Config):
         self.config = config
+        self.metrics = InferenceMetrics()
         self.think_levels_supported = True
         ep = config.endpoint()
         self.base_url = ep.url
@@ -437,6 +439,7 @@ class OllamaClient:
         num_ctx: int | None = None,
         stream: bool = True,
         extra_options: dict[str, Any] | None = None,
+        keep_alive: str | int | None = None,
     ) -> AsyncIterator[Chunk]:
         options: dict[str, Any] = {
             "num_ctx": num_ctx or self.config.num_ctx,
@@ -451,7 +454,7 @@ class OllamaClient:
             "model": model or self.config.model,
             "messages": messages,
             "stream": stream,
-            "keep_alive": self.config.keep_alive,
+            "keep_alive": self.config.keep_alive if keep_alive is None else keep_alive,
             "options": options,
         }
         if tools:
@@ -623,6 +626,7 @@ class OpenAIClient:
 
     def __init__(self, config: Config):
         self.config = config
+        self.metrics = InferenceMetrics()
         self.think_levels_supported = True
         ep = config.endpoint()
         self.base_url = ep.url
@@ -700,6 +704,7 @@ class OpenAIClient:
         num_ctx: int | None = None,
         stream: bool = True,
         extra_options: dict[str, Any] | None = None,
+        keep_alive: str | int | None = None,
     ) -> AsyncIterator[Chunk]:
         payload: dict[str, Any] = {
             "model": model or self.config.model,

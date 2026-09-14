@@ -89,6 +89,8 @@ class Talker:
                 think=None,          # a one-liner does not need reasoning
                 temperature=0.8,     # this half is allowed to have some life
                 num_predict=self.num_predict,
+                num_ctx=min(4096, self.client.config.num_ctx),
+                keep_alive=0 if self.model != self.client.config.model else None,
                 stream=True,
             ):
                 if chunk.content:

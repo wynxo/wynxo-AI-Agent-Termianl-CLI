@@ -44,6 +44,7 @@ from . import intent as intent_mod
 from . import safety
 from .intent import Intent
 from .provider import OllamaClient, ProviderError
+from .workspace import Workspace
 from .model import ModelBackend, OllamaBackend
 from .scope import Boundary, Mode
 from .session import Session
@@ -454,6 +455,8 @@ class Agent:
         self.config = config
         self.policy = policy
         self.workspace = workspace
+        self.working_mode = getattr(config, "working_mode", "code")
+        self.workspace_info = Workspace(root=workspace)
         self.cb = callbacks or Callbacks()
         self.boundary = boundary
         self.memory = memory or Memory(workspace)
@@ -471,10 +474,16 @@ class Agent:
         in the run loop; initialized here so `_run_tool_calls` is safe on a
         bare agent (and state never lingers from a previous turn)."""
         self.shield = Shield(workspace, enabled=config.protect_secrets)
-        self.tools = registry or build_registry(
-            workspace, allow_shell=config.allow_shell,
-            boundary=boundary, memory=self.memory, shield=self.shield,
-            shell_max_output=config.max_command_output_chars)
+        if registry is not None:
+            self.tools = registry
+        elif self.working_mode == "chat":
+            self.tools = Registry([])
+        else:
+            self.tools = build_registry(
+                workspace, allow_shell=config.allow_shell,
+                boundary=boundary, memory=self.memory, shield=self.shield,
+                shell_max_output=config.max_command_output_chars,
+                include_github=False)
         self.permissions = PermissionStore()
         self.permissions.preapprove(config.auto_approve)
 
@@ -540,8 +549,41 @@ class Agent:
 
     # -- setup -------------------------------------------------------------
 
+    def set_working_mode(self, mode: str) -> None:
+        mode = str(mode or "").strip().lower()
+        if mode not in ("chat", "code"):
+            raise ValueError("mode must be 'chat' or 'code'")
+        self.working_mode = mode
+        self.config.working_mode = mode
+        if mode == "chat":
+            self.tools = Registry([])
+        elif self.workspace_info.provider == "github":
+            # Keep GitHub work API-only when returning from Chat or changing
+            # permission mode; never silently restore local tools in a remote
+            # workspace.
+            from .tools.github_tool import GitHubRead, GitHubWrite
+            self.tools = Registry([
+                GitHubRead(self.workspace, self.boundary, self.shield),
+                GitHubWrite(self.workspace, self.boundary, self.shield),
+            ])
+        else:
+            # Rebuild deliberately on every local Code transition. This
+            # restores the full local registry after GitHub -> local and
+            # avoids carrying a stale Chat/remote registry across modes.
+            self.tools = build_registry(
+                self.workspace, allow_shell=self.config.allow_shell,
+                boundary=self.boundary, memory=self.memory,
+                shield=self.shield,
+                shell_max_output=self.config.max_command_output_chars,
+                include_github=False)
+        self.refresh_system_prompt()
+
     def refresh_system_prompt(self) -> None:
-        self.session.system_prompt = build_system_prompt(
+        if self.working_mode == "chat":
+            self.session.system_prompt = build_chat_prompt(
+                voice=self.config.voice, memory="", serious=False)
+            return
+        prompt = build_system_prompt(
             self.workspace,
             self.policy,
             tools_description=self.tools.describe(),
@@ -552,6 +594,37 @@ class Agent:
             voice=self.config.voice,
             project_map=self.project_map,
         )
+        if self.workspace_info.provider == "github":
+            prompt += "\n\n" + self.workspace_info.prompt
+        self.session.system_prompt = prompt
+
+    def set_workspace(self, workspace_info: Workspace) -> None:
+        """Select where work happens without changing the model provider.
+
+        A GitHub workspace is API-only by default: it receives only the
+        GitHub read/write tools, so a remote task can never silently run local
+        shell or filesystem operations. Local mode restores the normal coding
+        registry.
+        """
+        if not isinstance(workspace_info, Workspace):
+            raise TypeError("workspace_info must be a Workspace")
+        self.workspace_info = workspace_info
+        if workspace_info.provider == "github":
+            from .tools.github_tool import GitHubRead, GitHubWrite
+            self.tools = Registry([
+                GitHubRead(self.workspace, self.boundary, self.shield),
+                GitHubWrite(self.workspace, self.boundary, self.shield),
+            ])
+        elif self.working_mode == "chat":
+            self.tools = Registry([])
+        else:
+            self.tools = build_registry(
+                self.workspace, allow_shell=self.config.allow_shell,
+                boundary=self.boundary, memory=self.memory,
+                shield=self.shield,
+                shell_max_output=self.config.max_command_output_chars,
+                include_github=False)
+        self.refresh_system_prompt()
 
     def set_effort(self, policy: EffortPolicy) -> None:
         self.policy = self._apply_capability_limits(policy)
@@ -635,6 +708,19 @@ class Agent:
         """
         content_parts: list[str] = []
         thinking_parts: list[str] = []
+        metrics = getattr(self.client, "metrics", None)
+        wire_messages = messages if messages is not None else self.session.wire()
+        prompt_estimate = sum(
+            len(str(message.get("content") or "")) for message in wire_messages
+        ) // 4
+        metric = (metrics.begin(
+            model=self.config.model,
+            mode=self.working_mode,
+            tools_supplied=bool(use_tools and self.native_tools),
+            prompt_tokens_estimate=prompt_estimate,
+            request_kind=("classifier" if silent else "generation"),
+        ) if metrics is not None else None)
+        eval_seconds = 0.0
         native_calls: list[dict] = []
         # A model with no native `thinking`/`tools` support writes
         # <think>...</think> and <tool_call>...</tool_call> straight into
@@ -667,7 +753,7 @@ class Agent:
         if not silent:
             await self.cb.on_stage("thinking")
         stream = self.backend.chat(
-            messages if messages is not None else self.session.wire(),
+            wire_messages,
             model=self.config.model,
             tools=self.tools.ollama_schemas() if (use_tools and self.native_tools) else None,
             think=self._think_value(),
@@ -725,6 +811,10 @@ class Agent:
             if chunk.tool_calls:
                 native_calls.extend(chunk.tool_calls)
             evidence.chunks += 1
+            if metric is not None and metric.first_token_at is None and (
+                    chunk.content or chunk.thinking or chunk.tool_calls
+                    or chunk.arguments_delta):
+                metric.first_token_at = time.monotonic()
             if chunk.thinking:
                 evidence.had_thinking = True
             if chunk.done:
@@ -736,6 +826,8 @@ class Agent:
                 self.session.usage.add_chunk(
                     chunk.prompt_tokens, chunk.completion_tokens, chunk.total_duration_ns
                 )
+                if chunk.total_duration_ns:
+                    eval_seconds = max(eval_seconds, chunk.total_duration_ns / 1e9)
 
         # The stream ended on its own, so there is nothing half-said to
         # rescue: parse_turn below produces the real answer.
@@ -756,6 +848,10 @@ class Agent:
 
         evidence.truncated = truncated
         self._last_evidence = evidence
+        if metric is not None:
+            metric.output_tokens = evidence.completion_tokens
+            metric.eval_seconds = eval_seconds
+            metrics.finish(metric)
 
         turn = parse_turn("".join(content_parts), "".join(thinking_parts),
                           native_calls)
@@ -1833,6 +1929,9 @@ class Agent:
         self._turn_mark = self.checkpoints.mark()
         self._warned_over_window = False
         self._recovery_inserted = False
+        metrics = getattr(self.client, "metrics", None)
+        if metrics is not None:
+            metrics.begin_turn()
 
         # What kind of turn is this? Asked once, before anything commits to a
         # shape.
@@ -1843,11 +1942,11 @@ class Agent:
         # consulted for these turns.
         distress = is_distress(request)
         chatting = is_small_talk(request)
-        if distress or chatting:
-            # Already settled, and settled locally. Neither needs a model
-            # call to tell us what it is.
-            decision = Intent(kind=intent_mod.CONVERSATION, source="fallback")
-        elif self._needs_routing(request):
+        if self.working_mode == "chat" or distress or chatting:
+            # Explicit Chat mode is authoritative and never invokes the
+            # intent classifier.
+            decision = Intent(kind=intent_mod.CONVERSATION, source="mode")
+        elif getattr(self.config, "intent_classification", False) and self._needs_routing(request):
             decision = await intent_mod.classify(
                 self._classify_call, request, chatting=chatting)
         else:
@@ -1887,11 +1986,10 @@ class Agent:
             # remember anything on this turn, whatever it tries.
             chat_prompt = build_chat_prompt(
                 voice=self.config.voice,
-                memory=self.memory.prompt_section(),
+                memory="",
                 serious=distress,
             )
-            chat_wire = [{"role": "system", "content": chat_prompt},
-                         *self.session.messages]
+            chat_wire = self.session.chat_wire(chat_prompt)
             try:
                 turn = await self._call_model(
                     messages=chat_wire, temperature=0.95, num_predict=200,
@@ -1912,7 +2010,9 @@ class Agent:
                 # here is the model hallucinating one. Never run it -- the
                 # turn is conversation, not work.
                 turn = ParsedTurn(content=turn.content or "", tool_calls=[])
-            if not turn.content.strip():
+            if not turn.content.strip() and self.working_mode != "chat":
+                # Recovery is useful for Code infrastructure calls, but a
+                # normal Chat turn must remain exactly one generation request.
                 # Same one-chance recovery as the tool loop: a greeting that
                 # comes back empty should not die on the spot.
                 self.session.add_user(EMPTY_ANSWER_NUDGE)

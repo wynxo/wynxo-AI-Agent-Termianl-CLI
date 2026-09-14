@@ -73,6 +73,13 @@ class Config(Schema):
     model = Field(str, "Model tag.", default=DEFAULT_MODEL)
     effort = Field(str, "Default effort level.", default="medium",
                    choices=("low", "medium", "high", "xhigh", "max", "ultra"))
+    # User-facing top-level mode.  Lower-level scope and effort remain
+    # implementation details; Chat is structurally tool-free.
+    working_mode = Field(str, "Top-level working mode: chat or code.",
+                          default="code", choices=("chat", "code"))
+    intent_classification = Field(
+        bool, "Allow an extra model request for ambiguous Code turns.",
+        default=False)
 
     num_ctx = Field(int, "Context window sent with every request.",
                     default=DEFAULT_CONTEXT, ge=MIN_CONTEXT, le=MAX_CONTEXT)
@@ -108,8 +115,9 @@ class Config(Schema):
     """
     warm_start = Field(bool, "Load the model at start-up rather than on the first "
                              "question, so the wait happens while you are typing.",
-                       default=True)
-    """Most of why `ollama run` feels quicker: it loads the model as the
+                       default=False)
+    """Warmup is opt-in: a local model should not be loaded before the user
+    asks for work, especially on machines where another model is resident.: it loads the model as the
     terminal opens. wynxo asked the server for nothing until you pressed
     enter, so the first question of every session paid for a cold load --
     tens of seconds for a 30B -- behind a line that said "thinking".
@@ -141,11 +149,11 @@ class Config(Schema):
     theme = Field(str, "Colour palette: purple, sakura, kawaii, midnight, ember, catboy, plain or minimal (reduced motion).",
                    default="purple",
                    choices=("purple", "sakura", "kawaii", "midnight", "ember", "catboy", "plain", "minimal"))
-    clear_on_start = Field(bool, "Clear the terminal when wynxo opens.", default=True)
+    clear_on_start = Field(bool, "Clear the terminal when wynxo opens.", default=False)
     log = Field(bool, "Write a session transcript for debugging.", default=True)
     voice = Field(str, "How the agent talks: plain, warm, mentor, blunt, "
                        "kawaii or mommy.",
-                  default="mommy",
+                  default="plain",
                   choices=("plain", "warm", "mentor", "blunt", "kawaii", "mommy"))
     pet = Field(bool, "Draw the companion beside the live status.",
                 default=False)
@@ -154,7 +162,7 @@ class Config(Schema):
     off. What a coding session needs to show is what the agent is doing;
     everything else is opt-in, which is what /pet on is for."""
     pet_name = Field(str, "What to call it.", default="wyn")
-    animations = Field(bool, "Animate the companion.", default=True)
+    animations = Field(bool, "Animate the companion.", default=False)
     show_thinking = Field(bool, "Display the model's reasoning. It always "
                                 "thinks; this only controls whether you see it.",
                           default=False)
@@ -187,7 +195,7 @@ class Config(Schema):
     that a value that is plainly not a rate is refused here rather than by
     the synthesiser."""
     speech_model = Field(str, "Path to a piper .onnx voice model.", default="")
-    stt_enabled = Field(bool, "Enable microphone speech recognition (Ctrl-R).", default=True)
+    stt_enabled = Field(bool, "Enable microphone speech recognition (Ctrl-R).", default=False)
     stt_backend = Field(str, "Speech recognition backend: auto, offline (faster-whisper) "
                               "or online (SpeechRecognition).", default="auto",
                         choices=("auto", "offline", "online"))
