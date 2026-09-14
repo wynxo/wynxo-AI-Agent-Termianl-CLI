@@ -72,13 +72,15 @@ class TestTheTableIsWellFormed:
             assert " " not in command.name
 
     def test_every_description_is_written_the_same_way(self):
-        """/help is a column of them, and one that shouts or trails a full
-        stop is the one you notice instead of reading."""
+        """/help is a column of them: descriptions stay sentence-style and
+        do not trail punctuation, while real brand names keep their casing."""
+        branded_leads = ("GitHub ",)
         for command in COMMAND_LIST:
             assert command.does, command.name
             assert not command.does.endswith("."), command.name
-            assert command.does[0].islower() or not command.does[0].isalpha(), \
-                command.name
+            assert (command.does[0].islower()
+                    or not command.does[0].isalpha()
+                    or command.does.startswith(branded_leads)), command.name
 
     def test_a_handler_is_named_after_its_command(self):
         """cmd_<name>, without exception, so a reader who has found one can
