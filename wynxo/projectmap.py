@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ast
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -112,10 +113,28 @@ def _python_symbols(text: str) -> list[str]:
 
 
 def _is_junction(path: Path) -> bool:
-    """Windows junctions, which is_symlink() reports as False."""
+    """Whether ``path`` is a Windows directory reparse point.
+
+    ``Path.is_junction`` only exists on Python 3.12+. Wynxo still supports
+    3.10 and 3.11, where a junction reports ``is_symlink() == False`` and
+    would otherwise be traversed. A junction can point outside the workspace
+    or back at a parent, so missing it is both a privacy leak and a loop risk.
+    """
     try:
         return bool(path.is_junction())
-    except AttributeError:      # Python before 3.12
+    except AttributeError:
+        pass
+
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        attrs = ctypes.windll.kernel32.GetFileAttributesW(str(path))
+        invalid = 0xFFFFFFFF
+        reparse_point = 0x0400
+        return attrs != invalid and bool(attrs & reparse_point)
+    except (AttributeError, OSError, ValueError):
         return False
 
 
@@ -150,9 +169,7 @@ def walk(root: Path, limit: int = MAX_FILES) -> list[Path]:
                 continue
             # Links are not part of the map. is_symlink() catches POSIX
             # links; Windows junctions need their own check because
-            # is_symlink() reports False for them. A junction to the
-            # project's own parent used to loop forever, and one pointing
-            # outside pulled unrelated files into the map.
+            # is_symlink() reports False for them on older Python releases.
             if entry.is_symlink() or _is_junction(entry):
                 continue
             if entry.is_dir():
