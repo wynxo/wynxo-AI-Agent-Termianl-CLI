@@ -147,7 +147,7 @@ def test_prompt_and_toolbar_do_not_draw_frames():
         toolbar_text = "".join(
             fragment[1] for fragment in to_formatted_text(toolbar)
         )
-        assert "\n" not in toolbar_text
+        assert chr(10) not in toolbar_text
         assert "ready" in toolbar_text
         assert "╭" not in toolbar_text and "╰" not in toolbar_text
         """
