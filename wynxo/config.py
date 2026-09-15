@@ -154,7 +154,7 @@ class Config(Schema):
     log = Field(bool, "Write a session transcript for debugging.", default=True)
     voice = Field(str, "How the agent talks: plain, warm, mentor, blunt, "
                        "kawaii or mommy.",
-                  default="mommy",
+                  default="warm",
                   choices=("plain", "warm", "mentor", "blunt", "kawaii", "mommy"))
     pet = Field(bool, "Draw the companion beside the live status.",
                 default=False)
