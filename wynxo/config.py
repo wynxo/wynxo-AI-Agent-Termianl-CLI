@@ -309,14 +309,20 @@ def atomic_write(path: Path, text: str) -> None:
 
     The temporary file is in the same directory so the replace is a rename
     within one filesystem, which is atomic on both platforms this targets.
+    We intentionally do not call os.fsync() here. Session autosave uses this
+    path after every message and tool result, and FlushFileBuffers can block
+    for seconds per write on Windows. Closing the temporary file still gives
+    os.replace() complete contents while preserving the all-or-nothing file
+    replacement guarantee against process interruption. A sudden machine or
+    filesystem power loss may lose the newest write, which is preferable to
+    making the interactive agent synchronously wait on hardware after every
+    message.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.new")
     try:
         with temporary.open("w", encoding="utf-8", newline="") as handle:
             handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
         os.replace(temporary, path)
     except OSError:
         with contextlib.suppress(OSError):
@@ -413,12 +419,12 @@ def _validate_forgivingly(data: dict[str, Any]) -> Config:
                     top_level = loc.split("[")[0].split(".")[0]
                     if top_level in data:
                         bad.add(top_level)
-            
+
             if not bad:
                 break
             for loc in bad:
-                message = next(msg for l, msg in exc.error_list 
-                              if l == loc or l.startswith(loc + "[") or l.startswith(loc + "."))
+                message = next(msg for l, msg in exc.error_list
+                               if l == loc or l.startswith(loc + "[") or l.startswith(loc + "."))
                 LOAD_PROBLEMS.append(
                     f"{loc}={data[loc]!r} in your settings is not usable "
                     f"({message}); using the default instead")
