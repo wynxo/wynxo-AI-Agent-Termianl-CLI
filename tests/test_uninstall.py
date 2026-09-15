@@ -6,6 +6,7 @@ holds the only copy of their work. Those are what most of this covers.
 """
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -19,9 +20,35 @@ spec.loader.exec_module(uninstall)
 
 
 def git(repo: Path, *args: str) -> None:
+    """Run fixture Git with no path to an editor, signer, pager or prompt.
+
+    These tests need repository state, not the CI machine's Git personality.
+    A hosted Windows runner once inherited a child process from ``git commit``;
+    because stdout/stderr were captured, that child kept the pipe handles open
+    after the timeout killed Git and Python then waited forever for its reader
+    threads. DEVNULL removes that pipe lifetime entirely, while the clean Git
+    environment prevents signing/editor/credential configuration from spawning
+    an interactive child in the first place.
+    """
+    env = os.environ.copy()
+    env.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_EDITOR": "true",
+        "GIT_PAGER": "cat",
+    })
     subprocess.run(
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
-        cwd=repo, check=True, capture_output=True, timeout=30)
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+         "-c", "commit.gpgsign=false", *args],
+        cwd=repo,
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=20,
+        env=env,
+    )
 
 
 @pytest.fixture
