@@ -16,6 +16,7 @@ def main():
     from . import clean_ui
     from . import cli
     from . import experience
+    from . import help_ui
     from . import product_ui
 
     # Tests and embedders sometimes replace cli.main with their own callable.
@@ -26,6 +27,7 @@ def main():
         product_ui.install()
         clean_ui.install()
         experience.install()
+        help_ui.install()
     return cli.main()
 
 
