@@ -23,12 +23,10 @@ class Palette:
     faint: str           # things you should be able to ignore
     """Ignorable, not unreadable.
 
-    Every one of these was mixed to sit just under 4.5:1 against a black
+    Every one of these was mixed to sit at or above 4.5:1 against a black
     terminal -- the threshold below which body text stops being reliably
-    legible -- because "quiet" and "invisible" are one nudge apart and the
-    first draft landed on the wrong side of it. They stay well under muted,
-    so the hierarchy is unchanged; they are simply readable when you go
-    looking."""
+    legible. They still stay below muted, so the hierarchy remains quiet.
+    """
 
     good: str
     warn: str
@@ -48,51 +46,45 @@ class Palette:
     Code was the one thing on screen /theme could not reach: inline spans
     were a hardcoded amber and highlighted blocks used raw ANSI names --
     magenta keywords, cyan numbers -- so an answer containing code was
-    coloured by a scheme unrelated to the rest of the interface, and the
-    same expression in prose and in a fenced block came out two different
-    colours.
+    coloured by a scheme unrelated to the rest of the interface.
 
-    Four roles because that is what the eye actually separates in a line of
-    code: what the language provides, what the program says, what it names,
-    and everything else. Finer distinctions than that are a pygments theme's
-    business, and this is drawn a line at a time as it streams.
+    Four roles are enough for streaming code: language structure, literals,
+    program-defined names, and inline code. The default palette deliberately
+    keeps those roles close together so code is readable without becoming a
+    rainbow inside an otherwise calm terminal.
     """
 
     def as_dict(self) -> dict[str, str]:
         return {k: v for k, v in self.__dict__.items() if k != "name"}
 
     def role(self, name: str) -> str:
-        """A colour by the job it does, falling back to the body text.
-
-        The mascot asks for "resting" or "busy" rather than for cyan, so a
-        theme can be a theme rather than a recolour of everything except the
-        cat. Before this, MOOD_STYLES named literal colours -- grey62,
-        bright_cyan, bright_magenta -- and the mascot was the one thing on
-        screen that /theme could not touch.
-        """
+        """A colour by the job it does, falling back to the body text."""
         return getattr(self, name, self.text)
 
 
-# Default. A deep violet that stays legible on a black terminal and does not
-# collide with the green/yellow/red the status lines need to keep meaning.
+# Default. Purple remains Wynxo's identity, but the old default spent a bright
+# violet on almost every focal element and paired it with very pale body text.
+# This version is graphite first and violet second: neutral body colours,
+# restrained syntax roles, and one violet accent. Status colours retain their
+# semantic meaning without turning ordinary turns into a light show.
 PURPLE = Palette(
     name="purple",
     accent="#b47cff",
-    accent_dim="#7c5cbf",
-    text="#e6e0f0",
-    muted="#9a8fb0",
-    faint="#7b7192",
-    good="#7ee081",
-    warn="#f0c674",
-    bad="#ff6b7a",
-    bar_bg="#2a1f3d",
-    bar_text="#e6e0f0",
-    bar_dim="#a99cc4",
-    bar_accent="#c9a6ff",
-    code='#e6c07b',
-    keyword='#c48fff',
-    literal='#8fd9a8',
-    symbol='#8ec8f0',
+    accent_dim="#75689a",
+    text="#d6d3dc",
+    muted="#918b9b",
+    faint="#787281",
+    good="#82b58a",
+    warn="#c9a96e",
+    bad="#cf7d86",
+    bar_bg="#18161c",
+    bar_text="#d6d3dc",
+    bar_dim="#8d8797",
+    bar_accent="#a894d2",
+    code="#c8c3cf",
+    keyword="#ad9bcf",
+    literal="#9eae9b",
+    symbol="#9faeb9",
 )
 
 MIDNIGHT = Palette(
@@ -109,15 +101,12 @@ MIDNIGHT = Palette(
     bar_text="#dfe7ef",
     bar_dim="#9fb3c6",
     bar_accent="#8fd4ff",
-    code='#e6c07b',
-    keyword='#79c7ff',
-    literal='#8fd9a8',
-    symbol='#a9b7f5',
+    code="#e6c07b",
+    keyword="#79c7ff",
+    literal="#8fd9a8",
+    symbol="#a9b7f5",
 )
 
-# Pink and violet, turned up. Same legibility rules as PURPLE -- the accent
-# still has to survive on a black background and must not drift into the
-# red the `bad` status uses, which is why the pinks stay on the magenta side.
 SAKURA = Palette(
     name="sakura",
     accent="#ff8ad8",
@@ -132,15 +121,12 @@ SAKURA = Palette(
     bar_text="#fbe9f6",
     bar_dim="#d0a8d4",
     bar_accent="#ffb3e6",
-    code='#ffd08a',
-    keyword='#ff9fe0',
-    literal='#9df0b8',
-    symbol='#a9c8ff',
+    code="#ffd08a",
+    keyword="#ff9fe0",
+    literal="#9df0b8",
+    symbol="#a9c8ff",
 )
 
-# Soft candy pink with lavender highlights. Unlike sakura's saturated neon,
-# this keeps the low-contrast, cosy look of a handheld game UI while retaining
-# enough separation for errors and tool output to stay legible.
 KAWAII = Palette(
     name="kawaii",
     accent="#ff9fce",
@@ -155,10 +141,10 @@ KAWAII = Palette(
     bar_text="#fff2fa",
     bar_dim="#e3bddd",
     bar_accent="#ffc0e3",
-    code='#ffd8a0',
-    keyword='#ffaad6',
-    literal='#a8f0c0',
-    symbol='#a9d4ff',
+    code="#ffd8a0",
+    keyword="#ffaad6",
+    literal="#a8f0c0",
+    symbol="#a9d4ff",
 )
 
 EMBER = Palette(
@@ -175,14 +161,12 @@ EMBER = Palette(
     bar_text="#f0e6de",
     bar_dim="#c4ab98",
     bar_accent="#ffb87a",
-    code='#f0c674',
-    keyword='#ffb072',
-    literal='#a8d98a',
-    symbol='#8fc6d9',
+    code="#f0c674",
+    keyword="#ffb072",
+    literal="#a8d98a",
+    symbol="#8fc6d9",
 )
 
-# A 16-colour fallback for terminals that cannot do more, and for anyone who
-# wants their own terminal palette respected rather than overridden.
 PLAIN = Palette(
     name="plain",
     accent="bright_magenta",
@@ -197,45 +181,32 @@ PLAIN = Palette(
     bar_text="default",
     bar_dim="bright_black",
     bar_accent="bright_magenta",
-    code='yellow',
-    keyword='bright_magenta',
-    literal='green',
-    symbol='bright_cyan',
+    code="yellow",
+    keyword="bright_magenta",
+    literal="green",
+    symbol="bright_cyan",
 )
 
-# Catboy heaven: the premium personality theme. Violet and pink over a
-# near-black ground, with a pastel cyan holding the cooler end so the whole
-# thing is not one hue.
-#
-# Rebuilt rather than tuned. The first version made `bad` #ff69b4 against an
-# accent of #ff6ec7 -- two hot pinks four steps apart, so an error was the
-# same colour as a heading and stopped reading as an error at all. The body
-# text was lemon chiffon, a yellow, which belongs to no part of this palette
-# and made ordinary prose look like a warning. Errors are the one thing a
-# theme may never make pretty at the cost of legibility.
 CATBOY = Palette(
     name="catboy",
-    accent="#c77dff",        # violet, the identity colour
+    accent="#c77dff",
     accent_dim="#8e5bc4",
-    text="#f2e9ff",          # near-white with a violet cast
+    text="#f2e9ff",
     muted="#b9a3d4",
     faint="#7e6f96",
-    good="#8ff0c4",          # soft mint
-    warn="#ffcf7a",          # warm amber
-    bad="#ff7a9c",           # soft red, clearly not the accent
+    good="#8ff0c4",
+    warn="#ffcf7a",
+    bad="#ff7a9c",
     bar_bg="#1b1226",
     bar_text="#f2e9ff",
     bar_dim="#b9a3d4",
-    bar_accent="#ff9fd6",    # pink, against the violet accent
-    code='#ffcf7a',
-    keyword='#d49aff',
-    literal='#8ff0c4',
-    symbol='#9ad0ff',
+    bar_accent="#ff9fd6",
+    code="#ffcf7a",
+    keyword="#d49aff",
+    literal="#8ff0c4",
+    symbol="#9ad0ff",
 )
 
-# Reduced-motion theme: the same plain grey palette with no animation
-# ambitions. `/theme minimal` also switches the animation engine to its
-# static mode, so this is the palette for the accessibility option.
 MINIMAL = Palette(
     name="minimal",
     accent="bright_white",
@@ -250,29 +221,23 @@ MINIMAL = Palette(
     bar_text="default",
     bar_dim="bright_black",
     bar_accent="bright_white",
-    code='bright_white',
-    keyword='bright_white',
-    literal='white',
-    symbol='white',
+    code="bright_white",
+    keyword="bright_white",
+    literal="white",
+    symbol="white",
 )
 
 PALETTES: dict[str, Palette] = {
-    p.name: p for p in (PURPLE, SAKURA, KAWAII, MIDNIGHT, EMBER, CATBOY, PLAIN, MINIMAL)
+    p.name: p
+    for p in (PURPLE, SAKURA, KAWAII, MIDNIGHT, EMBER, CATBOY, PLAIN, MINIMAL)
 }
 DEFAULT = "purple"
-
 
 _active: Palette | None = None
 
 
 def use(palette: Palette) -> None:
-    """Remember which palette is in force.
-
-    Colours are pushed into the modules that imported them, which works for
-    module-level constants and not for anything that has to choose a colour
-    per draw -- the mascot's, which depends on its mood. One place to ask
-    keeps that from becoming a second palette.
-    """
+    """Remember which palette is in force."""
     global _active
     _active = palette
 
@@ -282,10 +247,7 @@ def active() -> Palette:
 
 
 def resolve(name: str) -> Palette:
-    """Look up a palette, falling back to the default rather than failing.
-
-    A bad theme name in a config file should not stop the agent starting.
-    """
+    """Look up a palette, falling back to the default rather than failing."""
     return PALETTES.get((name or "").strip().lower(), PALETTES[DEFAULT])
 
 
