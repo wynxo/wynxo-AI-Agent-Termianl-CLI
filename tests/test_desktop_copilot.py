@@ -12,6 +12,7 @@ command half is asked about on the same terms a shell command would be.
 from __future__ import annotations
 
 import pathlib
+import shlex
 import time
 
 import pytest
@@ -90,13 +91,16 @@ class TestSeveralApplicationsInOneSentence:
 class TestATerminalCanBeGivenSomethingToRun:
     async def test_the_command_goes_to_the_last_target(self, tmp_path, machine):
         """Where the sentence puts it: "kcalc, then firefox, then a terminal
-        running main.py"."""
+        running main.py". The target gets quoted for the Bash command the
+        terminal receives, even when the test itself happens to run on a
+        Windows worker with a Windows-shaped temporary path."""
         await act(tmp_path, machine, ["kcalc", "firefox", "konsole"],
                   command="python3 main.py")
         assert [name for name, _ in machine["started"]] == ["kcalc", "firefox"]
+        quoted_workspace = shlex.quote(str(tmp_path))
         assert machine["argv"] == [
             ["/usr/bin/konsole", "--separate", "--hold", "-e", "bash", "-lc",
-             f"cd -- {tmp_path} && python3 main.py"]]
+             f"cd -- {quoted_workspace} && python3 main.py"]]
 
     async def test_the_window_stays_open_afterwards(self, tmp_path, machine):
         """"Open a terminal and run this" means the window is there to be
