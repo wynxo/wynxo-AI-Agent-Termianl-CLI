@@ -223,7 +223,9 @@ def test_run_tests_reports_one_cause_for_twenty_five_failures(tmp_path):
     root = project(tmp_path)
     result = asyncio.run(RunTests(root).invoke({}))
     assert "1 root cause" in result.output
-    assert "src/calc.py:2" in result.output
+    # Pytest reports native path separators. The failure intelligence is
+    # correct either way; normalize only for this cross-platform assertion.
+    assert "src/calc.py:2" in result.output.replace("\\", "/")
 
 
 def test_a_passing_run_is_not_rewritten(tmp_path):
