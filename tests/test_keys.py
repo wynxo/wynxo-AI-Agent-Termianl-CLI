@@ -106,7 +106,13 @@ class TestSafety:
 @pytest.mark.skipif(sys.platform == "win32", reason="posix termios")
 class TestTerminalRestore:
     def test_terminal_settings_are_restored(self, monkeypatch):
-        """The important one: the shell must be usable afterwards."""
+        """The important one: the shell must be usable afterwards.
+
+        Darwin may set PENDIN while canonical mode is restored. It is a
+        kernel-owned request to reprocess queued input, not a mode Wynxo
+        changed, so compare every other terminal bit exactly while ignoring
+        that transient flag.
+        """
         master, slave = pty.openpty()
         try:
             reader = os.fdopen(slave, "r")
@@ -120,7 +126,14 @@ class TestTerminalRestore:
             assert not (during[3] & termios.ICANON), "cbreak not actually applied"
 
             watcher.stop()
-            assert termios.tcgetattr(slave) == before
+            after = termios.tcgetattr(slave)
+            pendin = getattr(termios, "PENDIN", 0)
+            if pendin:
+                before[3] &= ~pendin
+                after[3] &= ~pendin
+            assert after == before
+            assert after[3] & termios.ICANON, "canonical input was not restored"
+            assert after[3] & termios.ECHO, "terminal echo was not restored"
         finally:
             reader.close()          # takes the slave fd with it
             os.close(master)
