@@ -111,9 +111,10 @@ _CHAT_MARKER = "local AI companion in their terminal"
 # The core signal deliberately errs toward "work" and historically treated a
 # generic verb by itself ("explain", "write", "create", "find", "show me") as
 # proof that the user wanted the project agent. That made "explain black holes"
-# a coding turn. Product routing should call something obvious project work only
-# when it carries project evidence; everything else gets the cheap intent
-# classifier instead of being forced into tools.
+# a coding turn. Product routing calls something obvious project work only when
+# it carries project evidence. Obvious general-assistant requests can now take
+# the direct chat path; genuinely ambiguous turns still get the cheap intent
+# classifier rather than being guessed at.
 _PROJECT_ACTION = (
     r"(?:fix|add|write|create|make|build|run|test|refactor|implement|remove|"
     r"delete|rename|update|change|edit|debug|explain|review|check|find|search|"
@@ -139,11 +140,56 @@ _PRODUCT_TASK_SIGNAL = re.compile(
     re.IGNORECASE,
 )
 
+# Requests that are plainly general-assistant work rather than project work.
+# They are only used after _PRODUCT_TASK_SIGNAL has ruled out paths, code
+# fences, project nouns paired with actions, and developer commands. This is a
+# latency optimisation: a local model should not have to answer a classifier
+# request before it can answer "write me a poem".
+_GENERAL_REQUEST = re.compile(
+    r"^\s*(?:"
+    r"explain|teach(?:\s+me)?|help\s+me\s+understand|summari[sz]e|translate|"
+    r"brainstorm|recommend|suggest|compare|write|draft|create|make|find|"
+    r"give\s+me"
+    r")\b",
+    re.IGNORECASE,
+)
+_GENERAL_QUESTION = re.compile(
+    r"^\s*(?:what|who|where|when|why|how)\s+"
+    r"(?:is|are|was|were|does|do|did|can|could|would|should)\b",
+    re.IGNORECASE,
+)
+_PROJECT_WORD = re.compile(rf"\b{_PROJECT_NOUN}\b", re.IGNORECASE)
+# "create an app" is project creation even though "app" is deliberately not
+# in _PROJECT_NOUN (where it would make ordinary questions about apps look
+# like repository work). Keep construction targets as a separate guard.
+_BUILD_TARGET = re.compile(
+    r"\b(?:website|web\s*app|app(?:lication)?|program|service|server|database|"
+    r"frontend|backend|component)\b",
+    re.IGNORECASE,
+)
+
 
 def extra_conversation(request: str) -> bool:
-    """Return True for small human messages the core router should not plan."""
+    """True when Code mode can answer directly with the chat prompt.
+
+    This is deliberately a certainty fast path, not a second intent router.
+    Project evidence and build-like targets still go through the normal
+    routing/tool path; anything unclear still gets the model classifier.
+    """
     text = (request or "").strip()
-    return bool(text and len(text) <= 120 and _AFFECTION.fullmatch(text))
+    if not text:
+        return False
+    if len(text) <= 120 and _AFFECTION.fullmatch(text):
+        return True
+    if _PRODUCT_TASK_SIGNAL.search(text):
+        return False
+    if _GENERAL_REQUEST.match(text):
+        return not _BUILD_TARGET.search(text)
+    if _GENERAL_QUESTION.match(text):
+        # "what is photosynthesis?" is obvious chat; "where is config?" or
+        # "what does this function do?" needs project context or a classifier.
+        return not _PROJECT_WORD.search(text)
+    return False
 
 
 def _semantic_commands(cli_mod, text: str) -> list[str]:
