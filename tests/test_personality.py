@@ -143,7 +143,7 @@ def test_the_chat_path_is_hot_and_uses_the_minimal_prompt(tmp_path, monkeypatch)
     assert system["role"] == "system"
     assert system["content"].startswith("You are wynxo")
     assert system["content"] != agent.session.system_prompt
-    assert build_chat_prompt("mommy") == system["content"]
+    assert build_chat_prompt("warm") == system["content"]
     # Conversation never advertises tools -- that is what made a coding model
     # burn six tool calls on "remember what we were building?".
     assert captured["use_tools"] is False
@@ -258,7 +258,7 @@ def test_a_distress_turn_is_serious_and_tool_free(tmp_path, monkeypatch):
     result = asyncio.run(agent.run("i want to kill myself"))
     assert captured["use_tools"] is False
     system = captured["messages"][0]
-    assert system["content"] == build_chat_prompt("mommy", serious=True)
+    assert system["content"] == build_chat_prompt("warm", serious=True)
     # The tool call was dropped: the turn answered, nothing ran.
     assert result.tool_calls == 0
     assert "I'm here" in result.content
